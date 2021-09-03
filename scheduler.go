@@ -10,11 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
-	"github.com/hibiken/asynq/internal/rdb"
 	"github.com/robfig/cron/v3"
 )
 
@@ -26,7 +25,7 @@ type Scheduler struct {
 	state      *base.ServerState
 	logger     *log.Logger
 	client     *Client
-	rdb        *rdb.RDB
+	rdb        base.Scheduler
 	cron       *cron.Cron
 	location   *time.Location
 	done       chan struct{}
@@ -43,11 +42,20 @@ type Scheduler struct {
 
 // NewScheduler returns a new Scheduler instance given the redis connection option.
 // The parameter opts is optional, defaults will be used if opts is set to nil
-func NewScheduler(r RedisConnOpt, opts *SchedulerOpts) *Scheduler {
-	c, ok := r.MakeRedisClient().(redis.UniversalClient)
-	if !ok {
-		panic(fmt.Sprintf("asynq: unsupported RedisConnOpt type %T", r))
+func NewScheduler(r ClientConnOpt, opts *SchedulerOpts) *Scheduler {
+	broker, err := makeBroker(r)
+	if err != nil {
+		panic(err)
 	}
+	scheduler, ok := broker.(base.Scheduler)
+	if !ok {
+		panic(errors.E("NewScheduler", errors.Internal, fmt.Sprintf("expecting a Scheduler, got %T", broker)))
+	}
+	return newScheduler(scheduler, opts)
+}
+
+func newScheduler(scheduler base.Scheduler, opts *SchedulerOpts) *Scheduler {
+
 	if opts == nil {
 		opts = &SchedulerOpts{}
 	}
@@ -68,8 +76,8 @@ func NewScheduler(r RedisConnOpt, opts *SchedulerOpts) *Scheduler {
 		id:         generateSchedulerID(),
 		state:      base.NewServerState(),
 		logger:     logger,
-		client:     NewClient(r),
-		rdb:        rdb.NewRDB(c),
+		client:     NewClientWithBroker(scheduler),
+		rdb:        scheduler,
 		cron:       cron.New(cron.WithLocation(loc)),
 		location:   loc,
 		done:       make(chan struct{}),
@@ -117,7 +125,7 @@ type enqueueJob struct {
 	location   *time.Location
 	logger     *log.Logger
 	client     *Client
-	rdb        *rdb.RDB
+	rdb        base.Scheduler
 	errHandler func(task *Task, opts []Option, err error)
 }
 
@@ -217,8 +225,8 @@ func (s *Scheduler) Shutdown() {
 	s.wg.Wait()
 
 	s.clearHistory()
-	s.client.Close()
-	s.rdb.Close()
+	_ = s.client.Close()
+	_ = s.rdb.Close()
 	s.state.Set(base.StateClosed)
 	s.logger.Info("Scheduler stopped")
 }
@@ -230,7 +238,7 @@ func (s *Scheduler) runHeartbeater() {
 		select {
 		case <-s.done:
 			s.logger.Debugf("Scheduler heatbeater shutting down")
-			s.rdb.ClearSchedulerEntries(s.id)
+			_ = s.rdb.ClearSchedulerEntries(s.id)
 			return
 		case <-ticker.C:
 			s.beat()

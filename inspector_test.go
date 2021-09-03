@@ -5,7 +5,6 @@
 package asynq
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -18,13 +17,16 @@ import (
 	"github.com/google/uuid"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/rdb"
+	"github.com/hibiken/asynq/internal/utc"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInspectorQueues(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	inspector := NewInspector(getRedisConnOpt(t))
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		queues []string
@@ -36,11 +38,9 @@ func TestInspectorQueues(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
+		ctx.FlushDB()
 		for _, qname := range tc.queues {
-			if err := r.SAdd(context.Background(), base.AllQueues, qname).Err(); err != nil {
-				t.Fatalf("could not initialize all queue set: %v", err)
-			}
+			ctx.InitQueue(qname)
 		}
 		got, err := inspector.Queues()
 		if err != nil {
@@ -55,10 +55,12 @@ func TestInspectorQueues(t *testing.T) {
 }
 
 func TestInspectorDeleteQueue(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	inspector := NewInspector(getRedisConnOpt(t))
-	defer inspector.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
+
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
@@ -124,12 +126,12 @@ func TestInspectorDeleteQueue(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllPendingQueues(t, r, tc.pending)
-		h.SeedAllActiveQueues(t, r, tc.active)
-		h.SeedAllScheduledQueues(t, r, tc.scheduled)
-		h.SeedAllRetryQueues(t, r, tc.retry)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllPendingQueues(tc.pending)
+		ctx.SeedAllActiveQueues(tc.active)
+		ctx.SeedAllScheduledQueues(tc.scheduled)
+		ctx.SeedAllRetryQueues(tc.retry)
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		err := inspector.DeleteQueue(tc.qname, tc.force)
 		if err != nil {
@@ -137,21 +139,22 @@ func TestInspectorDeleteQueue(t *testing.T) {
 				tc.qname, tc.force, err)
 			continue
 		}
-		if r.SIsMember(context.Background(), base.AllQueues, tc.qname).Val() {
+		if ctx.QueueExist(tc.qname) {
 			t.Errorf("%q is a member of %q", tc.qname, base.AllQueues)
 		}
 	}
 }
 
 func TestInspectorDeleteQueueErrorQueueNotEmpty(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	inspector := NewInspector(getRedisConnOpt(t))
-	defer inspector.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
+
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
-	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
-	m4 := h.NewTaskMessageWithQueue("task4", nil, "custom")
+	m3 := h.NewTaskMessageWithQueue("task3", nil, "default")
+	m4 := h.NewTaskMessageWithQueue("task4", nil, "default")
 
 	tests := []struct {
 		pending   map[string][]*base.TaskMessage
@@ -184,12 +187,12 @@ func TestInspectorDeleteQueueErrorQueueNotEmpty(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllPendingQueues(t, r, tc.pending)
-		h.SeedAllActiveQueues(t, r, tc.active)
-		h.SeedAllScheduledQueues(t, r, tc.scheduled)
-		h.SeedAllRetryQueues(t, r, tc.retry)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllPendingQueues(tc.pending)
+		ctx.SeedAllActiveQueues(tc.active)
+		ctx.SeedAllScheduledQueues(tc.scheduled)
+		ctx.SeedAllRetryQueues(tc.retry)
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		err := inspector.DeleteQueue(tc.qname, tc.force)
 		if !errors.Is(err, ErrQueueNotEmpty) {
@@ -200,14 +203,15 @@ func TestInspectorDeleteQueueErrorQueueNotEmpty(t *testing.T) {
 }
 
 func TestInspectorDeleteQueueErrorQueueNotFound(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	inspector := NewInspector(getRedisConnOpt(t))
-	defer inspector.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
+
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
-	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
-	m4 := h.NewTaskMessageWithQueue("task4", nil, "custom")
+	m3 := h.NewTaskMessageWithQueue("task3", nil, "default")
+	m4 := h.NewTaskMessageWithQueue("task4", nil, "default")
 
 	tests := []struct {
 		pending   map[string][]*base.TaskMessage
@@ -240,12 +244,12 @@ func TestInspectorDeleteQueueErrorQueueNotFound(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllPendingQueues(t, r, tc.pending)
-		h.SeedAllActiveQueues(t, r, tc.active)
-		h.SeedAllScheduledQueues(t, r, tc.scheduled)
-		h.SeedAllRetryQueues(t, r, tc.retry)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllPendingQueues(tc.pending)
+		ctx.SeedAllActiveQueues(tc.active)
+		ctx.SeedAllScheduledQueues(tc.scheduled)
+		ctx.SeedAllRetryQueues(tc.retry)
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		err := inspector.DeleteQueue(tc.qname, tc.force)
 		if !errors.Is(err, ErrQueueNotFound) {
@@ -256,30 +260,33 @@ func TestInspectorDeleteQueueErrorQueueNotFound(t *testing.T) {
 }
 
 func TestInspectorGetQueueInfo(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessage("task3", nil)
 	m4 := h.NewTaskMessage("task4", nil)
 	m5 := h.NewTaskMessageWithQueue("task5", nil, "critical")
 	m6 := h.NewTaskMessageWithQueue("task6", nil, "low")
-	now := time.Now()
+
+	now := utc.Now().Time
 	timeCmpOpt := cmpopts.EquateApproxTime(time.Second)
 	ignoreMemUsg := cmpopts.IgnoreFields(QueueInfo{}, "MemoryUsage")
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
-		pending   map[string][]*base.TaskMessage
-		active    map[string][]*base.TaskMessage
-		scheduled map[string][]base.Z
-		retry     map[string][]base.Z
-		archived  map[string][]base.Z
-		processed map[string]int
-		failed    map[string]int
-		qname     string
-		want      *QueueInfo
+		pending    map[string][]*base.TaskMessage
+		active     map[string][]*base.TaskMessage
+		scheduled  map[string][]base.Z
+		retry      map[string][]base.Z
+		archived   map[string][]base.Z
+		processed  map[string]int
+		failed     map[string]int
+		qname      string
+		want       *QueueInfo
+		wantRqlite *QueueInfo
 	}{
 		{
 			pending: map[string][]*base.TaskMessage{
@@ -334,24 +341,33 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				Paused:    false,
 				Timestamp: now,
 			},
+			// PENDING(GIL): see comment in test TestCurrentStats in rqlite/inspect_test
+			wantRqlite: &QueueInfo{
+				Queue:     "default",
+				Size:      6,
+				Pending:   1,
+				Active:    1,
+				Scheduled: 2,
+				Retry:     2,
+				Archived:  0,
+				Processed: 120,
+				Failed:    2,
+				Paused:    false,
+				Timestamp: now,
+			},
 		},
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllPendingQueues(t, r, tc.pending)
-		h.SeedAllActiveQueues(t, r, tc.active)
-		h.SeedAllScheduledQueues(t, r, tc.scheduled)
-		h.SeedAllRetryQueues(t, r, tc.retry)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
-		for qname, n := range tc.processed {
-			processedKey := base.ProcessedKey(qname, now)
-			r.Set(context.Background(), processedKey, n, 0)
-		}
-		for qname, n := range tc.failed {
-			failedKey := base.FailedKey(qname, now)
-			r.Set(context.Background(), failedKey, n, 0)
-		}
+		ctx.FlushDB()
+		ctx.SeedAllPendingQueues(tc.pending)
+		ctx.SeedAllActiveQueues(tc.active)
+		ctx.SeedAllScheduledQueues(tc.scheduled)
+		ctx.SeedAllRetryQueues(tc.retry)
+		ctx.SeedAllArchivedQueues(tc.archived)
+
+		ctx.SeedAllProcessedQueues(tc.processed, now)
+		ctx.SeedAllFailedQueues(tc.failed, now)
 
 		got, err := inspector.GetQueueInfo(tc.qname)
 		if err != nil {
@@ -359,20 +375,31 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				tc.qname, got, err, tc.want)
 			continue
 		}
-		if diff := cmp.Diff(tc.want, got, timeCmpOpt, ignoreMemUsg); diff != "" {
-			t.Errorf("r.GetQueueInfo(%q) = %v, %v, want %v, nil; (-want, +got)\n%s",
-				tc.qname, got, err, tc.want, diff)
-			continue
+		if brokerType == rqliteType {
+			if diff := cmp.Diff(tc.wantRqlite, got, timeCmpOpt, ignoreMemUsg); diff != "" {
+				t.Errorf("r.GetQueueInfo(%q) = %v, %v, want %v, nil; (-want, +got)\n%s",
+					tc.qname, got, err, tc.want, diff)
+				continue
+			}
+		} else {
+			if diff := cmp.Diff(tc.want, got, timeCmpOpt, ignoreMemUsg); diff != "" {
+				t.Errorf("r.GetQueueInfo(%q) = %v, %v, want %v, nil; (-want, +got)\n%s",
+					tc.qname, got, err, tc.want, diff)
+				continue
+			}
 		}
 	}
 
 }
 
 func TestInspectorHistory(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	now := time.Now().UTC()
-	inspector := NewInspector(getRedisConnOpt(t))
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
 
 	tests := []struct {
 		qname string // queue of interest
@@ -383,17 +410,28 @@ func TestInspectorHistory(t *testing.T) {
 		{"default", 1},
 	}
 
-	for _, tc := range tests {
-		h.FlushDB(t, r)
+	processedCount := func(i int) int {
+		if brokerType == rqliteType {
+			return (i + 1) * 10
+		}
+		return (i + 1) * 1000
+	}
+	failedCount := func(i int) int {
+		if brokerType == rqliteType {
+			return i + 1
+		}
+		return i + 10
+	}
 
-		r.SAdd(context.Background(), base.AllQueues, tc.qname)
+	for _, tc := range tests {
+		ctx.FlushDB()
+
+		ctx.InitQueue(tc.qname)
 		// populate last n days data
 		for i := 0; i < tc.n; i++ {
 			ts := now.Add(-time.Duration(i) * 24 * time.Hour)
-			processedKey := base.ProcessedKey(tc.qname, ts)
-			failedKey := base.FailedKey(tc.qname, ts)
-			r.Set(context.Background(), processedKey, (i+1)*1000, 0)
-			r.Set(context.Background(), failedKey, (i+1)*10, 0)
+			ctx.SeedProcessedQueue(processedCount(i), tc.qname, ts.Time)
+			ctx.SeedFailedQueue(failedCount(i), tc.qname, ts.Time)
 		}
 
 		got, err := inspector.History(tc.qname, tc.n)
@@ -409,9 +447,9 @@ func TestInspectorHistory(t *testing.T) {
 		for i := 0; i < tc.n; i++ {
 			want := &DailyStats{
 				Queue:     tc.qname,
-				Processed: (i + 1) * 1000,
-				Failed:    (i + 1) * 10,
-				Date:      now.Add(-time.Duration(i) * 24 * time.Hour),
+				Processed: processedCount(i),
+				Failed:    failedCount(i),
+				Date:      now.Add(-time.Duration(i) * 24 * time.Hour).Time,
 			}
 			// Allow 2 seconds difference in timestamp.
 			timeCmpOpt := cmpopts.EquateApproxTime(2 * time.Second)
@@ -428,8 +466,8 @@ func createPendingTask(msg *base.TaskMessage) *TaskInfo {
 }
 
 func TestInspectorGetTaskInfo(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 
 	m1 := h.NewTaskMessageWithQueue("task1", nil, "default")
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "default")
@@ -471,11 +509,11 @@ func TestInspectorGetTaskInfo(t *testing.T) {
 		},
 	}
 
-	h.SeedAllActiveQueues(t, r, fixtures.active)
-	h.SeedAllPendingQueues(t, r, fixtures.pending)
-	h.SeedAllScheduledQueues(t, r, fixtures.scheduled)
-	h.SeedAllRetryQueues(t, r, fixtures.retry)
-	h.SeedAllArchivedQueues(t, r, fixtures.archived)
+	ctx.SeedAllActiveQueues(fixtures.active)
+	ctx.SeedAllPendingQueues(fixtures.pending)
+	ctx.SeedAllScheduledQueues(fixtures.scheduled)
+	ctx.SeedAllRetryQueues(fixtures.retry)
+	ctx.SeedAllArchivedQueues(fixtures.archived)
 
 	tests := []struct {
 		qname string
@@ -529,7 +567,9 @@ func TestInspectorGetTaskInfo(t *testing.T) {
 		},
 	}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
+
 	for _, tc := range tests {
 		got, err := inspector.GetTaskInfo(tc.qname, tc.id)
 		if err != nil {
@@ -547,8 +587,8 @@ func TestInspectorGetTaskInfo(t *testing.T) {
 }
 
 func TestInspectorGetTaskInfoError(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 
 	m1 := h.NewTaskMessageWithQueue("task1", nil, "default")
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "default")
@@ -590,11 +630,11 @@ func TestInspectorGetTaskInfoError(t *testing.T) {
 		},
 	}
 
-	h.SeedAllActiveQueues(t, r, fixtures.active)
-	h.SeedAllPendingQueues(t, r, fixtures.pending)
-	h.SeedAllScheduledQueues(t, r, fixtures.scheduled)
-	h.SeedAllRetryQueues(t, r, fixtures.retry)
-	h.SeedAllArchivedQueues(t, r, fixtures.archived)
+	ctx.SeedAllActiveQueues(fixtures.active)
+	ctx.SeedAllPendingQueues(fixtures.pending)
+	ctx.SeedAllScheduledQueues(fixtures.scheduled)
+	ctx.SeedAllRetryQueues(fixtures.retry)
+	ctx.SeedAllArchivedQueues(fixtures.archived)
 
 	tests := []struct {
 		qname   string
@@ -613,7 +653,8 @@ func TestInspectorGetTaskInfoError(t *testing.T) {
 		},
 	}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	for _, tc := range tests {
 		info, err := inspector.GetTaskInfo(tc.qname, tc.id)
@@ -627,14 +668,15 @@ func TestInspectorGetTaskInfoError(t *testing.T) {
 }
 
 func TestInspectorListPendingTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "critical")
 	m4 := h.NewTaskMessageWithQueue("task4", nil, "low")
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		desc    string
@@ -676,9 +718,9 @@ func TestInspectorListPendingTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
+		ctx.FlushDB()
 		for q, msgs := range tc.pending {
-			h.SeedPendingQueue(t, r, msgs, q)
+			ctx.SeedPendingQueue(msgs, q)
 		}
 
 		got, err := inspector.ListPendingTasks(tc.qname)
@@ -699,14 +741,15 @@ func TestInspectorListPendingTasks(t *testing.T) {
 }
 
 func TestInspectorListActiveTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
 	m4 := h.NewTaskMessageWithQueue("task4", nil, "custom")
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		desc   string
@@ -729,8 +772,8 @@ func TestInspectorListActiveTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllActiveQueues(t, r, tc.active)
+		ctx.FlushDB()
+		ctx.SeedAllActiveQueues(tc.active)
 
 		got, err := inspector.ListActiveTasks(tc.qname)
 		if err != nil {
@@ -753,8 +796,8 @@ func createScheduledTask(z base.Z) *TaskInfo {
 }
 
 func TestInspectorListScheduledTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessage("task3", nil)
@@ -765,7 +808,8 @@ func TestInspectorListScheduledTasks(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 	z4 := base.Z{Message: m4, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		desc      string
@@ -798,8 +842,8 @@ func TestInspectorListScheduledTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllScheduledQueues(t, r, tc.scheduled)
+		ctx.FlushDB()
+		ctx.SeedAllScheduledQueues(tc.scheduled)
 
 		got, err := inspector.ListScheduledTasks(tc.qname)
 		if err != nil {
@@ -822,8 +866,8 @@ func createRetryTask(z base.Z) *TaskInfo {
 }
 
 func TestInspectorListRetryTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessage("task3", nil)
@@ -834,7 +878,8 @@ func TestInspectorListRetryTasks(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 	z4 := base.Z{Message: m4, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		desc  string
@@ -868,8 +913,8 @@ func TestInspectorListRetryTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllRetryQueues(t, r, tc.retry)
+		ctx.FlushDB()
+		ctx.SeedAllRetryQueues(tc.retry)
 
 		got, err := inspector.ListRetryTasks(tc.qname)
 		if err != nil {
@@ -892,8 +937,8 @@ func createArchivedTask(z base.Z) *TaskInfo {
 }
 
 func TestInspectorListArchivedTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessage("task3", nil)
@@ -904,7 +949,8 @@ func TestInspectorListArchivedTasks(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(-2 * time.Minute).Unix()}
 	z4 := base.Z{Message: m4, Score: now.Add(-2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		desc     string
@@ -937,8 +983,8 @@ func TestInspectorListArchivedTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		got, err := inspector.ListArchivedTasks(tc.qname)
 		if err != nil {
@@ -959,11 +1005,12 @@ func TestInspectorListPagination(t *testing.T) {
 		msgs = append(msgs,
 			h.NewTaskMessage(fmt.Sprintf("task%d", i), nil))
 	}
-	r := setup(t)
-	defer r.Close()
-	h.SeedPendingQueue(t, r, msgs, base.DefaultQueueName)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	ctx.SeedPendingQueue(msgs, base.DefaultQueueName)
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		page     int
@@ -1017,10 +1064,11 @@ func TestInspectorListPagination(t *testing.T) {
 }
 
 func TestInspectorListTasksQueueNotFoundError(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		qname   string
@@ -1033,7 +1081,7 @@ func TestInspectorListTasksQueueNotFoundError(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
+		ctx.FlushDB()
 
 		if _, err := inspector.ListActiveTasks(tc.qname); !errors.Is(err, tc.wantErr) {
 			t.Errorf("ListActiveTasks(%q) returned error %v, want %v", tc.qname, err, tc.wantErr)
@@ -1054,14 +1102,15 @@ func TestInspectorListTasksQueueNotFoundError(t *testing.T) {
 }
 
 func TestInspectorDeleteAllPendingTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessage("task3", nil)
 	m4 := h.NewTaskMessageWithQueue("task3", nil, "custom")
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		pending     map[string][]*base.TaskMessage
@@ -1096,8 +1145,8 @@ func TestInspectorDeleteAllPendingTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllPendingQueues(t, r, tc.pending)
+		ctx.FlushDB()
+		ctx.SeedAllPendingQueues(tc.pending)
 
 		got, err := inspector.DeleteAllPendingTasks(tc.qname)
 		if err != nil {
@@ -1109,7 +1158,7 @@ func TestInspectorDeleteAllPendingTasks(t *testing.T) {
 		}
 
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("unexpected pending tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -1118,8 +1167,8 @@ func TestInspectorDeleteAllPendingTasks(t *testing.T) {
 }
 
 func TestInspectorDeleteAllScheduledTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessage("task3", nil)
@@ -1130,7 +1179,8 @@ func TestInspectorDeleteAllScheduledTasks(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 	z4 := base.Z{Message: m4, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		scheduled     map[string][]base.Z
@@ -1163,8 +1213,8 @@ func TestInspectorDeleteAllScheduledTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllScheduledQueues(t, r, tc.scheduled)
+		ctx.FlushDB()
+		ctx.SeedAllScheduledQueues(tc.scheduled)
 
 		got, err := inspector.DeleteAllScheduledTasks(tc.qname)
 		if err != nil {
@@ -1175,7 +1225,7 @@ func TestInspectorDeleteAllScheduledTasks(t *testing.T) {
 			t.Errorf("DeleteAllScheduledTasks(%q) = %d, want %d", tc.qname, got, tc.want)
 		}
 		for qname, want := range tc.wantScheduled {
-			gotScheduled := h.GetScheduledEntries(t, r, qname)
+			gotScheduled := ctx.GetScheduledEntries(qname)
 			if diff := cmp.Diff(want, gotScheduled, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected scheduled tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -1184,8 +1234,8 @@ func TestInspectorDeleteAllScheduledTasks(t *testing.T) {
 }
 
 func TestInspectorDeleteAllRetryTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessage("task3", nil)
@@ -1196,7 +1246,8 @@ func TestInspectorDeleteAllRetryTasks(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 	z4 := base.Z{Message: m4, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		retry     map[string][]base.Z
@@ -1229,8 +1280,8 @@ func TestInspectorDeleteAllRetryTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllRetryQueues(t, r, tc.retry)
+		ctx.FlushDB()
+		ctx.SeedAllRetryQueues(tc.retry)
 
 		got, err := inspector.DeleteAllRetryTasks(tc.qname)
 		if err != nil {
@@ -1241,7 +1292,7 @@ func TestInspectorDeleteAllRetryTasks(t *testing.T) {
 			t.Errorf("DeleteAllRetryTasks(%q) = %d, want %d", tc.qname, got, tc.want)
 		}
 		for qname, want := range tc.wantRetry {
-			gotRetry := h.GetRetryEntries(t, r, qname)
+			gotRetry := ctx.GetRetryEntries(qname)
 			if diff := cmp.Diff(want, gotRetry, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected retry tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -1250,8 +1301,8 @@ func TestInspectorDeleteAllRetryTasks(t *testing.T) {
 }
 
 func TestInspectorDeleteAllArchivedTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessage("task3", nil)
@@ -1262,7 +1313,8 @@ func TestInspectorDeleteAllArchivedTasks(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 	z4 := base.Z{Message: m4, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		archived     map[string][]base.Z
@@ -1295,8 +1347,8 @@ func TestInspectorDeleteAllArchivedTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		got, err := inspector.DeleteAllArchivedTasks(tc.qname)
 		if err != nil {
@@ -1307,7 +1359,7 @@ func TestInspectorDeleteAllArchivedTasks(t *testing.T) {
 			t.Errorf("DeleteAllArchivedTasks(%q) = %d, want %d", tc.qname, got, tc.want)
 		}
 		for qname, want := range tc.wantArchived {
-			gotArchived := h.GetArchivedEntries(t, r, qname)
+			gotArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, gotArchived, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -1316,8 +1368,8 @@ func TestInspectorDeleteAllArchivedTasks(t *testing.T) {
 }
 
 func TestInspectorArchiveAllPendingTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessage("task3", nil)
@@ -1325,7 +1377,8 @@ func TestInspectorArchiveAllPendingTasks(t *testing.T) {
 	now := time.Now()
 	z1 := base.Z{Message: m1, Score: now.Add(5 * time.Minute).Unix()}
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		pending      map[string][]*base.TaskMessage
@@ -1398,9 +1451,9 @@ func TestInspectorArchiveAllPendingTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllPendingQueues(t, r, tc.pending)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllPendingQueues(tc.pending)
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		got, err := inspector.ArchiveAllPendingTasks(tc.qname)
 		if err != nil {
@@ -1411,7 +1464,7 @@ func TestInspectorArchiveAllPendingTasks(t *testing.T) {
 			t.Errorf("ArchiveAllPendingTasks(%q) = %d, want %d", tc.qname, got, tc.want)
 		}
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("unexpected pending tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -1421,7 +1474,7 @@ func TestInspectorArchiveAllPendingTasks(t *testing.T) {
 			approxOpt := cmp.Comparer(func(a, b int64) bool {
 				return math.Abs(float64(a-b)) < 2
 			})
-			gotArchived := h.GetArchivedEntries(t, r, qname)
+			gotArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, gotArchived, h.SortZSetEntryOpt, approxOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -1430,8 +1483,8 @@ func TestInspectorArchiveAllPendingTasks(t *testing.T) {
 }
 
 func TestInspectorArchiveAllScheduledTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessage("task3", nil)
@@ -1442,7 +1495,8 @@ func TestInspectorArchiveAllScheduledTasks(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 	z4 := base.Z{Message: m4, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		scheduled     map[string][]base.Z
@@ -1531,9 +1585,9 @@ func TestInspectorArchiveAllScheduledTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllScheduledQueues(t, r, tc.scheduled)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllScheduledQueues(tc.scheduled)
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		got, err := inspector.ArchiveAllScheduledTasks(tc.qname)
 		if err != nil {
@@ -1544,7 +1598,7 @@ func TestInspectorArchiveAllScheduledTasks(t *testing.T) {
 			t.Errorf("ArchiveAllScheduledTasks(%q) = %d, want %d", tc.qname, got, tc.want)
 		}
 		for qname, want := range tc.wantScheduled {
-			gotScheduled := h.GetScheduledEntries(t, r, qname)
+			gotScheduled := ctx.GetScheduledEntries(qname)
 			if diff := cmp.Diff(want, gotScheduled, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected scheduled tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -1554,7 +1608,7 @@ func TestInspectorArchiveAllScheduledTasks(t *testing.T) {
 			approxOpt := cmp.Comparer(func(a, b int64) bool {
 				return math.Abs(float64(a-b)) < 2
 			})
-			gotArchived := h.GetArchivedEntries(t, r, qname)
+			gotArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, gotArchived, h.SortZSetEntryOpt, approxOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -1563,8 +1617,8 @@ func TestInspectorArchiveAllScheduledTasks(t *testing.T) {
 }
 
 func TestInspectorArchiveAllRetryTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessage("task3", nil)
@@ -1575,7 +1629,8 @@ func TestInspectorArchiveAllRetryTasks(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 	z4 := base.Z{Message: m4, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		retry        map[string][]base.Z
@@ -1648,9 +1703,9 @@ func TestInspectorArchiveAllRetryTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllRetryQueues(t, r, tc.retry)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllRetryQueues(tc.retry)
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		got, err := inspector.ArchiveAllRetryTasks(tc.qname)
 		if err != nil {
@@ -1661,14 +1716,14 @@ func TestInspectorArchiveAllRetryTasks(t *testing.T) {
 			t.Errorf("ArchiveAllRetryTasks(%q) = %d, want %d", tc.qname, got, tc.want)
 		}
 		for qname, want := range tc.wantRetry {
-			gotRetry := h.GetRetryEntries(t, r, qname)
+			gotRetry := ctx.GetRetryEntries(qname)
 			if diff := cmp.Diff(want, gotRetry, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected retry tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
 		}
 		cmpOpt := h.EquateInt64Approx(2) // allow for 2 seconds difference in Z.Score
 		for qname, want := range tc.wantArchived {
-			wantArchived := h.GetArchivedEntries(t, r, qname)
+			wantArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, wantArchived, h.SortZSetEntryOpt, cmpOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -1677,8 +1732,8 @@ func TestInspectorArchiveAllRetryTasks(t *testing.T) {
 }
 
 func TestInspectorRunAllScheduledTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "critical")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "low")
@@ -1689,7 +1744,8 @@ func TestInspectorRunAllScheduledTasks(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 	z4 := base.Z{Message: m4, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		scheduled     map[string][]base.Z
@@ -1766,9 +1822,9 @@ func TestInspectorRunAllScheduledTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllScheduledQueues(t, r, tc.scheduled)
-		h.SeedAllPendingQueues(t, r, tc.pending)
+		ctx.FlushDB()
+		ctx.SeedAllScheduledQueues(tc.scheduled)
+		ctx.SeedAllPendingQueues(tc.pending)
 
 		got, err := inspector.RunAllScheduledTasks(tc.qname)
 		if err != nil {
@@ -1779,13 +1835,13 @@ func TestInspectorRunAllScheduledTasks(t *testing.T) {
 			t.Errorf("RunAllScheduledTasks(%q) = %d, want %d", tc.qname, got, tc.want)
 		}
 		for qname, want := range tc.wantScheduled {
-			gotScheduled := h.GetScheduledEntries(t, r, qname)
+			gotScheduled := ctx.GetScheduledEntries(qname)
 			if diff := cmp.Diff(want, gotScheduled, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected scheduled tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
 		}
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("unexpected pending tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -1794,8 +1850,8 @@ func TestInspectorRunAllScheduledTasks(t *testing.T) {
 }
 
 func TestInspectorRunAllRetryTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "critical")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "low")
@@ -1806,7 +1862,8 @@ func TestInspectorRunAllRetryTasks(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 	z4 := base.Z{Message: m4, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		retry       map[string][]base.Z
@@ -1883,9 +1940,9 @@ func TestInspectorRunAllRetryTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllRetryQueues(t, r, tc.retry)
-		h.SeedAllPendingQueues(t, r, tc.pending)
+		ctx.FlushDB()
+		ctx.SeedAllRetryQueues(tc.retry)
+		ctx.SeedAllPendingQueues(tc.pending)
 
 		got, err := inspector.RunAllRetryTasks(tc.qname)
 		if err != nil {
@@ -1896,13 +1953,13 @@ func TestInspectorRunAllRetryTasks(t *testing.T) {
 			t.Errorf("RunAllRetryTasks(%q) = %d, want %d", tc.qname, got, tc.want)
 		}
 		for qname, want := range tc.wantRetry {
-			gotRetry := h.GetRetryEntries(t, r, qname)
+			gotRetry := ctx.GetRetryEntries(qname)
 			if diff := cmp.Diff(want, gotRetry, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected retry tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
 		}
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("unexpected pending tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -1911,8 +1968,8 @@ func TestInspectorRunAllRetryTasks(t *testing.T) {
 }
 
 func TestInspectorRunAllArchivedTasks(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "critical")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "low")
@@ -1923,7 +1980,8 @@ func TestInspectorRunAllArchivedTasks(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(-2 * time.Minute).Unix()}
 	z4 := base.Z{Message: m4, Score: now.Add(-2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		archived     map[string][]base.Z
@@ -1996,9 +2054,9 @@ func TestInspectorRunAllArchivedTasks(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
-		h.SeedAllPendingQueues(t, r, tc.pending)
+		ctx.FlushDB()
+		ctx.SeedAllArchivedQueues(tc.archived)
+		ctx.SeedAllPendingQueues(tc.pending)
 
 		got, err := inspector.RunAllArchivedTasks(tc.qname)
 		if err != nil {
@@ -2009,14 +2067,14 @@ func TestInspectorRunAllArchivedTasks(t *testing.T) {
 			t.Errorf("RunAllArchivedTasks(%q) = %d, want %d", tc.qname, got, tc.want)
 		}
 		for qname, want := range tc.wantArchived {
-			wantArchived := h.GetArchivedEntries(t, r, qname)
+			wantArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, wantArchived, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
 
 		}
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("unexpected pending tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -2025,12 +2083,13 @@ func TestInspectorRunAllArchivedTasks(t *testing.T) {
 }
 
 func TestInspectorDeleteTaskDeletesPendingTask(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		pending     map[string][]*base.TaskMessage
@@ -2065,8 +2124,8 @@ func TestInspectorDeleteTaskDeletesPendingTask(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllPendingQueues(t, r, tc.pending)
+		ctx.FlushDB()
+		ctx.SeedAllPendingQueues(tc.pending)
 
 		if err := inspector.DeleteTask(tc.qname, tc.id); err != nil {
 			t.Errorf("DeleteTask(%q, %q) returned error: %v", tc.qname, tc.id, err)
@@ -2074,7 +2133,7 @@ func TestInspectorDeleteTaskDeletesPendingTask(t *testing.T) {
 		}
 
 		for qname, want := range tc.wantPending {
-			got := h.GetPendingMessages(t, r, qname)
+			got := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, got, h.SortMsgOpt); diff != "" {
 				t.Errorf("unspected pending tasks in queue %q: (-want,+got):\n%s",
 					qname, diff)
@@ -2085,8 +2144,8 @@ func TestInspectorDeleteTaskDeletesPendingTask(t *testing.T) {
 }
 
 func TestInspectorDeleteTaskDeletesScheduledTask(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
@@ -2095,7 +2154,8 @@ func TestInspectorDeleteTaskDeletesScheduledTask(t *testing.T) {
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		scheduled     map[string][]base.Z
@@ -2118,14 +2178,14 @@ func TestInspectorDeleteTaskDeletesScheduledTask(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllScheduledQueues(t, r, tc.scheduled)
+		ctx.FlushDB()
+		ctx.SeedAllScheduledQueues(tc.scheduled)
 
 		if err := inspector.DeleteTask(tc.qname, tc.id); err != nil {
 			t.Errorf("DeleteTask(%q, %q) returned error: %v", tc.qname, tc.id, err)
 		}
 		for qname, want := range tc.wantScheduled {
-			gotScheduled := h.GetScheduledEntries(t, r, qname)
+			gotScheduled := ctx.GetScheduledEntries(qname)
 			if diff := cmp.Diff(want, gotScheduled, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected scheduled tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -2135,8 +2195,8 @@ func TestInspectorDeleteTaskDeletesScheduledTask(t *testing.T) {
 }
 
 func TestInspectorDeleteTaskDeletesRetryTask(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
@@ -2145,7 +2205,8 @@ func TestInspectorDeleteTaskDeletesRetryTask(t *testing.T) {
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		retry     map[string][]base.Z
@@ -2168,15 +2229,15 @@ func TestInspectorDeleteTaskDeletesRetryTask(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllRetryQueues(t, r, tc.retry)
+		ctx.FlushDB()
+		ctx.SeedAllRetryQueues(tc.retry)
 
 		if err := inspector.DeleteTask(tc.qname, tc.id); err != nil {
 			t.Errorf("DeleteTask(%q, %q) returned error: %v", tc.qname, tc.id, err)
 			continue
 		}
 		for qname, want := range tc.wantRetry {
-			gotRetry := h.GetRetryEntries(t, r, qname)
+			gotRetry := ctx.GetRetryEntries(qname)
 			if diff := cmp.Diff(want, gotRetry, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected retry tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -2185,8 +2246,8 @@ func TestInspectorDeleteTaskDeletesRetryTask(t *testing.T) {
 }
 
 func TestInspectorDeleteTaskDeletesArchivedTask(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
@@ -2195,7 +2256,8 @@ func TestInspectorDeleteTaskDeletesArchivedTask(t *testing.T) {
 	z2 := base.Z{Message: m2, Score: now.Add(-15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(-2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		archived     map[string][]base.Z
@@ -2218,15 +2280,15 @@ func TestInspectorDeleteTaskDeletesArchivedTask(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		if err := inspector.DeleteTask(tc.qname, tc.id); err != nil {
 			t.Errorf("DeleteTask(%q, %q) returned error: %v", tc.qname, tc.id, err)
 			continue
 		}
 		for qname, want := range tc.wantArchived {
-			wantArchived := h.GetArchivedEntries(t, r, qname)
+			wantArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, wantArchived, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -2235,8 +2297,8 @@ func TestInspectorDeleteTaskDeletesArchivedTask(t *testing.T) {
 }
 
 func TestInspectorDeleteTaskError(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
@@ -2245,7 +2307,8 @@ func TestInspectorDeleteTaskError(t *testing.T) {
 	z2 := base.Z{Message: m2, Score: now.Add(-15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(-2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		archived     map[string][]base.Z
@@ -2283,15 +2346,15 @@ func TestInspectorDeleteTaskError(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		if err := inspector.DeleteTask(tc.qname, tc.id); !errors.Is(err, tc.wantErr) {
 			t.Errorf("DeleteTask(%q, %q) = %v, want %v", tc.qname, tc.id, err, tc.wantErr)
 			continue
 		}
 		for qname, want := range tc.wantArchived {
-			wantArchived := h.GetArchivedEntries(t, r, qname)
+			wantArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, wantArchived, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
@@ -2300,8 +2363,8 @@ func TestInspectorDeleteTaskError(t *testing.T) {
 }
 
 func TestInspectorRunTaskRunsScheduledTask(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
@@ -2310,7 +2373,8 @@ func TestInspectorRunTaskRunsScheduledTask(t *testing.T) {
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		scheduled     map[string][]base.Z
@@ -2343,16 +2407,16 @@ func TestInspectorRunTaskRunsScheduledTask(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllScheduledQueues(t, r, tc.scheduled)
-		h.SeedAllPendingQueues(t, r, tc.pending)
+		ctx.FlushDB()
+		ctx.SeedAllScheduledQueues(tc.scheduled)
+		ctx.SeedAllPendingQueues(tc.pending)
 
 		if err := inspector.RunTask(tc.qname, tc.id); err != nil {
 			t.Errorf("RunTask(%q, %q) returned error: %v", tc.qname, tc.id, err)
 			continue
 		}
 		for qname, want := range tc.wantScheduled {
-			gotScheduled := h.GetScheduledEntries(t, r, qname)
+			gotScheduled := ctx.GetScheduledEntries(qname)
 			if diff := cmp.Diff(want, gotScheduled, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected scheduled tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
@@ -2360,7 +2424,7 @@ func TestInspectorRunTaskRunsScheduledTask(t *testing.T) {
 
 		}
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("unexpected pending tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
@@ -2370,8 +2434,8 @@ func TestInspectorRunTaskRunsScheduledTask(t *testing.T) {
 }
 
 func TestInspectorRunTaskRunsRetryTask(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "custom")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
@@ -2380,7 +2444,8 @@ func TestInspectorRunTaskRunsRetryTask(t *testing.T) {
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		retry       map[string][]base.Z
@@ -2413,23 +2478,23 @@ func TestInspectorRunTaskRunsRetryTask(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllRetryQueues(t, r, tc.retry)
-		h.SeedAllPendingQueues(t, r, tc.pending)
+		ctx.FlushDB()
+		ctx.SeedAllRetryQueues(tc.retry)
+		ctx.SeedAllPendingQueues(tc.pending)
 
 		if err := inspector.RunTask(tc.qname, tc.id); err != nil {
 			t.Errorf("RunTaskBy(%q, %q) returned error: %v", tc.qname, tc.id, err)
 			continue
 		}
 		for qname, want := range tc.wantRetry {
-			gotRetry := h.GetRetryEntries(t, r, qname)
+			gotRetry := ctx.GetRetryEntries(qname)
 			if diff := cmp.Diff(want, gotRetry, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected retry tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
 			}
 		}
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("unexpected pending tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
@@ -2439,8 +2504,8 @@ func TestInspectorRunTaskRunsRetryTask(t *testing.T) {
 }
 
 func TestInspectorRunTaskRunsArchivedTask(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "critical")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "low")
@@ -2449,7 +2514,8 @@ func TestInspectorRunTaskRunsArchivedTask(t *testing.T) {
 	z2 := base.Z{Message: m2, Score: now.Add(-15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(-2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		archived     map[string][]base.Z
@@ -2486,23 +2552,23 @@ func TestInspectorRunTaskRunsArchivedTask(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
-		h.SeedAllPendingQueues(t, r, tc.pending)
+		ctx.FlushDB()
+		ctx.SeedAllArchivedQueues(tc.archived)
+		ctx.SeedAllPendingQueues(tc.pending)
 
 		if err := inspector.RunTask(tc.qname, tc.id); err != nil {
 			t.Errorf("RunTask(%q, %q) returned error: %v", tc.qname, tc.id, err)
 			continue
 		}
 		for qname, want := range tc.wantArchived {
-			wantArchived := h.GetArchivedEntries(t, r, qname)
+			wantArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, wantArchived, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
 			}
 		}
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("unexpected pending tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
@@ -2512,8 +2578,8 @@ func TestInspectorRunTaskRunsArchivedTask(t *testing.T) {
 }
 
 func TestInspectorRunTaskError(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "critical")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "low")
@@ -2522,7 +2588,8 @@ func TestInspectorRunTaskError(t *testing.T) {
 	z2 := base.Z{Message: m2, Score: now.Add(-15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(-2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		archived     map[string][]base.Z
@@ -2586,23 +2653,23 @@ func TestInspectorRunTaskError(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
-		h.SeedAllPendingQueues(t, r, tc.pending)
+		ctx.FlushDB()
+		ctx.SeedAllArchivedQueues(tc.archived)
+		ctx.SeedAllPendingQueues(tc.pending)
 
 		if err := inspector.RunTask(tc.qname, tc.id); !errors.Is(err, tc.wantErr) {
 			t.Errorf("RunTask(%q, %q) = %v, want %v", tc.qname, tc.id, err, tc.wantErr)
 			continue
 		}
 		for qname, want := range tc.wantArchived {
-			wantArchived := h.GetArchivedEntries(t, r, qname)
+			wantArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, wantArchived, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
 			}
 		}
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("unexpected pending tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
@@ -2612,13 +2679,17 @@ func TestInspectorRunTaskError(t *testing.T) {
 }
 
 func TestInspectorArchiveTaskArchivesPendingTask(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "custom")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
-	inspector := NewInspector(getRedisConnOpt(t))
-	now := time.Now()
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
 
 	tests := []struct {
 		pending      map[string][]*base.TaskMessage
@@ -2675,16 +2746,16 @@ func TestInspectorArchiveTaskArchivesPendingTask(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllPendingQueues(t, r, tc.pending)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllPendingQueues(tc.pending)
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		if err := inspector.ArchiveTask(tc.qname, tc.id); err != nil {
 			t.Errorf("ArchiveTask(%q, %q) returned error: %v", tc.qname, tc.id, err)
 			continue
 		}
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("unexpected pending tasks in queue %q: (-want,+got)\n%s",
 					qname, diff)
@@ -2692,7 +2763,7 @@ func TestInspectorArchiveTaskArchivesPendingTask(t *testing.T) {
 
 		}
 		for qname, want := range tc.wantArchived {
-			wantArchived := h.GetArchivedEntries(t, r, qname)
+			wantArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, wantArchived, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want,+got)\n%s",
 					qname, diff)
@@ -2702,17 +2773,21 @@ func TestInspectorArchiveTaskArchivesPendingTask(t *testing.T) {
 }
 
 func TestInspectorArchiveTaskArchivesScheduledTask(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "custom")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
-	now := time.Now()
 	z1 := base.Z{Message: m1, Score: now.Add(5 * time.Minute).Unix()}
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		scheduled     map[string][]base.Z
@@ -2751,16 +2826,16 @@ func TestInspectorArchiveTaskArchivesScheduledTask(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllScheduledQueues(t, r, tc.scheduled)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllScheduledQueues(tc.scheduled)
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		if err := inspector.ArchiveTask(tc.qname, tc.id); err != nil {
 			t.Errorf("ArchiveTask(%q, %q) returned error: %v", tc.qname, tc.id, err)
 			continue
 		}
 		for qname, want := range tc.wantScheduled {
-			gotScheduled := h.GetScheduledEntries(t, r, qname)
+			gotScheduled := ctx.GetScheduledEntries(qname)
 			if diff := cmp.Diff(want, gotScheduled, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected scheduled tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
@@ -2768,7 +2843,7 @@ func TestInspectorArchiveTaskArchivesScheduledTask(t *testing.T) {
 
 		}
 		for qname, want := range tc.wantArchived {
-			wantArchived := h.GetArchivedEntries(t, r, qname)
+			wantArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, wantArchived, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
@@ -2778,8 +2853,8 @@ func TestInspectorArchiveTaskArchivesScheduledTask(t *testing.T) {
 }
 
 func TestInspectorArchiveTaskArchivesRetryTask(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "custom")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
@@ -2788,7 +2863,8 @@ func TestInspectorArchiveTaskArchivesRetryTask(t *testing.T) {
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		retry        map[string][]base.Z
@@ -2826,24 +2902,28 @@ func TestInspectorArchiveTaskArchivesRetryTask(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllRetryQueues(t, r, tc.retry)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllRetryQueues(tc.retry)
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		if err := inspector.ArchiveTask(tc.qname, tc.id); err != nil {
 			t.Errorf("ArchiveTask(%q, %q) returned error: %v", tc.qname, tc.id, err)
 			continue
 		}
 		for qname, want := range tc.wantRetry {
-			gotRetry := h.GetRetryEntries(t, r, qname)
+			gotRetry := ctx.GetRetryEntries(qname)
 			if diff := cmp.Diff(want, gotRetry, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected retry tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
 			}
 		}
+		cmpOpts := []cmp.Option{
+			h.SortZSetEntryOpt,
+			cmpopts.EquateApproxTime(2 * time.Second),
+		}
 		for qname, want := range tc.wantArchived {
-			wantArchived := h.GetArchivedEntries(t, r, qname)
-			if diff := cmp.Diff(want, wantArchived, h.SortZSetEntryOpt); diff != "" {
+			wantArchived := ctx.GetArchivedEntries(qname)
+			if diff := cmp.Diff(want, wantArchived, cmpOpts...); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
 			}
@@ -2852,8 +2932,8 @@ func TestInspectorArchiveTaskArchivesRetryTask(t *testing.T) {
 }
 
 func TestInspectorArchiveTaskError(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "custom")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
@@ -2862,7 +2942,8 @@ func TestInspectorArchiveTaskError(t *testing.T) {
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
-	inspector := NewInspector(getRedisConnOpt(t))
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
 		retry        map[string][]base.Z
@@ -2918,23 +2999,23 @@ func TestInspectorArchiveTaskError(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllRetryQueues(t, r, tc.retry)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllRetryQueues(tc.retry)
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		if err := inspector.ArchiveTask(tc.qname, tc.id); !errors.Is(err, tc.wantErr) {
 			t.Errorf("ArchiveTask(%q, %q) = %v, want %v", tc.qname, tc.id, err, tc.wantErr)
 			continue
 		}
 		for qname, want := range tc.wantRetry {
-			gotRetry := h.GetRetryEntries(t, r, qname)
+			gotRetry := ctx.GetRetryEntries(qname)
 			if diff := cmp.Diff(want, gotRetry, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected retry tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
 			}
 		}
 		for qname, want := range tc.wantArchived {
-			wantArchived := h.GetArchivedEntries(t, r, qname)
+			wantArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, wantArchived, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s",
 					qname, diff)
@@ -2952,9 +3033,12 @@ var sortSchedulerEntry = cmp.Transformer("SortSchedulerEntry", func(in []*Schedu
 })
 
 func TestInspectorSchedulerEntries(t *testing.T) {
-	r := setup(t)
-	rdbClient := rdb.NewRDB(r)
-	inspector := NewInspector(getRedisConnOpt(t))
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
+
+	rdbClient := NewClientWithBroker(inspector.rdb)
 
 	now := time.Now().UTC()
 	schedulerID := "127.0.0.1:9876:abc123"
@@ -3002,8 +3086,10 @@ func TestInspectorSchedulerEntries(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		err := rdbClient.WriteSchedulerEntries(schedulerID, tc.data, time.Minute)
+		ctx.FlushDB()
+		scheduler, ok := rdbClient.rdb.(base.Scheduler)
+		require.True(t, ok)
+		err := scheduler.WriteSchedulerEntries(schedulerID, tc.data, time.Minute)
 		if err != nil {
 			t.Fatalf("could not write data: %v", err)
 		}

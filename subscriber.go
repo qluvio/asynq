@@ -5,10 +5,10 @@
 package asynq
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/log"
 )
@@ -45,6 +45,7 @@ func newSubscriber(params subscriberParams) *subscriber {
 
 func (s *subscriber) shutdown() {
 	s.logger.Debug("Subscriber shutting down...")
+
 	// Signal the subscriber goroutine to stop.
 	s.done <- struct{}{}
 }
@@ -54,7 +55,7 @@ func (s *subscriber) start(wg *sync.WaitGroup) {
 	go func() {
 		defer wg.Done()
 		var (
-			pubsub *redis.PubSub
+			pubsub base.PubSub
 			err    error
 		)
 		// Try until successfully connect to Redis.
@@ -76,11 +77,16 @@ func (s *subscriber) start(wg *sync.WaitGroup) {
 		for {
 			select {
 			case <-s.done:
-				pubsub.Close()
+				_ = pubsub.Close()
 				s.logger.Debug("Subscriber done")
 				return
 			case msg := <-cancelCh:
-				cancel, ok := s.cancelations.Get(msg.Payload)
+				id, ok := msg.(string)
+				if !ok {
+					s.logger.Warn(fmt.Sprintf("Subscriber: invalid value %v", msg))
+					continue
+				}
+				cancel, ok := s.cancelations.Get(id)
 				if ok {
 					cancel()
 				}

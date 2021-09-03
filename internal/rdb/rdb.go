@@ -18,6 +18,10 @@ import (
 
 const statsTTL = 90 * 24 * time.Hour // 90 days
 
+var _ base.Broker = (*RDB)(nil)
+var _ base.Scheduler = (*RDB)(nil)
+var _ base.Inspector = (*RDB)(nil)
+
 // RDB is a client interface to query and mutate task queues.
 type RDB struct {
 	client redis.UniversalClient
@@ -36,6 +40,10 @@ func (r *RDB) Close() error {
 // Client returns the reference to underlying redis client.
 func (r *RDB) Client() redis.UniversalClient {
 	return r.client
+}
+
+func (r *RDB) Inspector() base.Inspector {
+	return r
 }
 
 // Ping checks the connection with redis server.
@@ -188,7 +196,7 @@ if redis.call("EXISTS", KEYS[2]) == 0 then
 		local key = ARGV[2] .. id
 		redis.call("HSET", key, "state", "active")
 		local data = redis.call("HMGET", key, "msg", "timeout", "deadline")
-		local msg = data[1]	
+		local msg = data[1]
 		local timeout = tonumber(data[2])
 		local deadline = tonumber(data[3])
 		local score
@@ -802,15 +810,39 @@ func (r *RDB) ClearSchedulerEntries(scheduelrID string) error {
 	return nil
 }
 
+type redisPubSub struct {
+	pubsub *redis.PubSub
+	out    <-chan interface{}
+}
+
+func (ps *redisPubSub) Close() error {
+	return ps.pubsub.Close()
+}
+
+func (ps *redisPubSub) Channel() <-chan interface{} {
+	return ps.out
+}
+
 // CancelationPubSub returns a pubsub for cancelation messages.
-func (r *RDB) CancelationPubSub() (*redis.PubSub, error) {
+func (r *RDB) CancelationPubSub() (base.PubSub, error) {
 	var op errors.Op = "rdb.CancelationPubSub"
 	pubsub := r.client.Subscribe(context.Background(), base.CancelChannel)
 	_, err := pubsub.Receive(context.Background())
 	if err != nil {
 		return nil, errors.E(op, errors.Unknown, fmt.Sprintf("redis pubsub receive error: %v", err))
 	}
-	return pubsub, nil
+	return &redisPubSub{
+		pubsub: pubsub,
+		out: base.Wrap(pubsub.Channel(), func(x interface{}) interface{} {
+			msg, ok := x.(*redis.Message)
+			if !ok {
+				// This should never happen but should this happen it will
+				// trigger a warning in subscriber
+				return msg
+			}
+			return msg.Payload
+		}).Channel(),
+	}, nil
 }
 
 // PublishCancelation publish cancelation message to all subscribers.

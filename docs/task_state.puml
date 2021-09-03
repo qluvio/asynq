@@ -1,0 +1,72 @@
+@startuml
+'https://plantuml.com/state-diagram
+
+hide empty description
+scale 350 width
+skinparam State {
+  BorderColor violet
+  BackgroundColor<<active>> lightblue
+}
+
+[*] -up-> pending : enqueue
+pending -left-> active : dequeue
+note on link
+  processor
+end note
+
+state processed
+state archived
+archived: retry count exceeded or
+archived: skip retry
+state retry
+retry: retry_at
+state scheduled
+scheduled: scheduled_at
+
+state active {
+  [*] --> processing <<active>>
+  processing --> pending : requeue (server abort)
+  processing --> failed : error
+  processing --> timedOut
+  processing --> cancelled : cancel
+  note on link
+    pub-sub
+  end note
+
+  processing --> processed : done
+
+  state failed <<active>>
+  state timedOut <<active>>
+  state cancelled <<active>>
+
+  failed --> retry_or_kill
+  timedOut --> retry_or_kill
+  cancelled --> retry_or_kill
+
+  state retry_or_kill <<active>>
+  note right of retry_or_kill
+    also executed by recoverer
+    which polls deadlines exceeded
+  end note
+  retry_or_kill --> archived
+  retry_or_kill --> retry
+}
+note top of active
+  processor
+end note
+
+retry --> pending
+note on link
+  forwarder
+end note
+
+scheduled --> pending
+note on link
+  forwarder
+end note
+
+
+processed --> [*]
+archived --> [*]
+
+@enduml

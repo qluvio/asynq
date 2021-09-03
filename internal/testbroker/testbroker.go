@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/hibiken/asynq/internal/base"
 )
 
@@ -31,6 +30,10 @@ var _ base.Broker = (*TestBroker)(nil)
 
 func NewTestBroker(b base.Broker) *TestBroker {
 	return &TestBroker{real: b}
+}
+
+func (tb *TestBroker) Inspector() base.Inspector {
+	return tb.real.Inspector()
 }
 
 func (tb *TestBroker) Sleep() {
@@ -162,7 +165,7 @@ func (tb *TestBroker) ClearServerState(host string, pid int, serverID string) er
 	return tb.real.ClearServerState(host, pid, serverID)
 }
 
-func (tb *TestBroker) CancelationPubSub() (*redis.PubSub, error) {
+func (tb *TestBroker) CancelationPubSub() (base.PubSub, error) {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
@@ -196,4 +199,13 @@ func (tb *TestBroker) Close() error {
 		return errRedisDown
 	}
 	return tb.real.Close()
+}
+
+func (tb *TestBroker) ListServers() ([]*base.ServerInfo, error) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return nil, errRedisDown
+	}
+	return tb.real.ListServers()
 }

@@ -10,27 +10,25 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
-	"github.com/hibiken/asynq/internal/rdb"
 )
 
 // Inspector is a client interface to inspect and mutate the state of
 // queues and tasks.
 type Inspector struct {
-	rdb *rdb.RDB
+	rdb base.Inspector
 }
 
-// New returns a new instance of Inspector.
-func NewInspector(r RedisConnOpt) *Inspector {
-	c, ok := r.MakeRedisClient().(redis.UniversalClient)
-	if !ok {
-		panic(fmt.Sprintf("inspeq: unsupported RedisConnOpt type %T", r))
+// NewInspector returns a new instance of Inspector.
+func NewInspector(r ClientConnOpt) *Inspector {
+	c, err := makeBroker(r)
+	if err != nil {
+		panic(err)
 	}
 	return &Inspector{
-		rdb: rdb.NewRDB(c),
+		rdb: c.Inspector(),
 	}
 }
 
@@ -263,7 +261,7 @@ func (i *Inspector) ListPendingTasks(qname string, opts ...ListOption) ([]*TaskI
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
+	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
 	msgs, err := i.rdb.ListPending(qname, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
@@ -287,7 +285,7 @@ func (i *Inspector) ListActiveTasks(qname string, opts ...ListOption) ([]*TaskIn
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
+	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
 	msgs, err := i.rdb.ListActive(qname, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
@@ -311,7 +309,7 @@ func (i *Inspector) ListScheduledTasks(qname string, opts ...ListOption) ([]*Tas
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
+	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
 	zs, err := i.rdb.ListScheduled(qname, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
@@ -339,7 +337,7 @@ func (i *Inspector) ListRetryTasks(qname string, opts ...ListOption) ([]*TaskInf
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
+	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
 	zs, err := i.rdb.ListRetry(qname, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
@@ -367,7 +365,7 @@ func (i *Inspector) ListArchivedTasks(qname string, opts ...ListOption) ([]*Task
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
+	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
 	zs, err := i.rdb.ListArchived(qname, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
@@ -685,28 +683,11 @@ func (i *Inspector) ClusterKeySlot(qname string) (int64, error) {
 	return i.rdb.ClusterKeySlot(qname)
 }
 
-// ClusterNode describes a node in redis cluster.
-type ClusterNode struct {
-	// Node ID in the cluster.
-	ID string
-
-	// Address of the node.
-	Addr string
-}
-
 // ClusterNodes returns a list of nodes the given queue belongs to.
 //
 // Only relevant if task queues are stored in redis cluster.
-func (i *Inspector) ClusterNodes(qname string) ([]*ClusterNode, error) {
-	nodes, err := i.rdb.ClusterNodes(qname)
-	if err != nil {
-		return nil, err
-	}
-	var res []*ClusterNode
-	for _, node := range nodes {
-		res = append(res, &ClusterNode{ID: node.ID, Addr: node.Addr})
-	}
-	return res, nil
+func (i *Inspector) ClusterNodes(qname string) ([]*base.ClusterNode, error) {
+	return i.rdb.ClusterNodes(qname)
 }
 
 // SchedulerEntry holds information about a periodic task registered with a scheduler.
@@ -842,7 +823,7 @@ type SchedulerEnqueueEvent struct {
 // By default, it retrieves the first 30 tasks.
 func (i *Inspector) ListSchedulerEnqueueEvents(entryID string, opts ...ListOption) ([]*SchedulerEnqueueEvent, error) {
 	opt := composeListOptions(opts...)
-	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
+	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
 	data, err := i.rdb.ListSchedulerEnqueueEvents(entryID, pgn)
 	if err != nil {
 		return nil, err

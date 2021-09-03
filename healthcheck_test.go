@@ -9,14 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hibiken/asynq/internal/rdb"
 	"github.com/hibiken/asynq/internal/testbroker"
 )
 
 func TestHealthChecker(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	rdbClient := rdb.NewRDB(r)
+	connOpt := getClientConnOpt(t)
+	client := NewClient(connOpt)
+	defer func() { _ = client.Close() }()
 
 	var (
 		// mu guards called and e variables.
@@ -33,7 +32,7 @@ func TestHealthChecker(t *testing.T) {
 
 	hc := newHealthChecker(healthcheckerParams{
 		logger:          testLogger,
-		broker:          rdbClient,
+		broker:          client.rdb,
 		interval:        1 * time.Second,
 		healthcheckFunc: checkFn,
 	})
@@ -62,9 +61,11 @@ func TestHealthCheckerWhenRedisDown(t *testing.T) {
 			t.Errorf("panic occurred: %v", r)
 		}
 	}()
-	r := rdb.NewRDB(setup(t))
-	defer r.Close()
-	testBroker := testbroker.NewTestBroker(r)
+	connOpt := getClientConnOpt(t)
+	client := NewClient(connOpt)
+	defer func() { _ = client.Close() }()
+
+	testBroker := testbroker.NewTestBroker(client.rdb)
 	var (
 		// mu guards called and e variables.
 		mu     sync.Mutex

@@ -11,16 +11,17 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/rdb"
 	"github.com/hibiken/asynq/internal/testbroker"
 )
 
 func TestHeartbeater(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	rdbClient := rdb.NewRDB(r)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	connOpt := getClientConnOpt(t)
+	client := NewClient(connOpt)
+	defer func() { _ = client.Close() }()
 
 	tests := []struct {
 		interval    time.Duration
@@ -36,12 +37,12 @@ func TestHeartbeater(t *testing.T) {
 	ignoreOpt := cmpopts.IgnoreUnexported(base.ServerInfo{})
 	ignoreFieldOpt := cmpopts.IgnoreFields(base.ServerInfo{}, "ServerID")
 	for _, tc := range tests {
-		h.FlushDB(t, r)
+		ctx.FlushDB()
 
 		state := base.NewServerState()
 		hb := newHeartbeater(heartbeaterParams{
 			logger:         testLogger,
-			broker:         rdbClient,
+			broker:         client.rdb,
 			interval:       tc.interval,
 			concurrency:    tc.concurrency,
 			queues:         tc.queues,
@@ -71,7 +72,7 @@ func TestHeartbeater(t *testing.T) {
 		// allow for heartbeater to write to redis
 		time.Sleep(tc.interval)
 
-		ss, err := rdbClient.ListServers()
+		ss, err := client.rdb.ListServers()
 		if err != nil {
 			t.Errorf("could not read server info from redis: %v", err)
 			hb.shutdown()
@@ -97,7 +98,7 @@ func TestHeartbeater(t *testing.T) {
 		time.Sleep(tc.interval * 2)
 
 		want.Status = "closed"
-		ss, err = rdbClient.ListServers()
+		ss, err = client.rdb.ListServers()
 		if err != nil {
 			t.Errorf("could not read process status from redis: %v", err)
 			hb.shutdown()
@@ -128,9 +129,13 @@ func TestHeartbeaterWithRedisDown(t *testing.T) {
 			t.Errorf("panic occurred: %v", r)
 		}
 	}()
-	r := rdb.NewRDB(setup(t))
-	defer r.Close()
-	testBroker := testbroker.NewTestBroker(r)
+
+	connOpt := getClientConnOpt(t)
+	client := NewClient(connOpt)
+	defer func() { _ = client.Close() }()
+
+	testBroker := testbroker.NewTestBroker(client.rdb)
+
 	state := base.NewServerState()
 	state.Set(base.StateActive)
 	hb := newHeartbeater(heartbeaterParams{

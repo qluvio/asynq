@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq/internal/errors"
@@ -633,6 +632,11 @@ func (c *Cancelations) Get(id string) (fn context.CancelFunc, ok bool) {
 	return fn, ok
 }
 
+type PubSub interface {
+	Close() error
+	Channel() <-chan interface{}
+}
+
 // Broker is a message broker that supports operations to manage task queues.
 //
 // See rdb.RDB as a reference implementation.
@@ -651,7 +655,17 @@ type Broker interface {
 	ListDeadlineExceeded(deadline time.Time, qnames ...string) ([]*TaskMessage, error)
 	WriteServerState(info *ServerInfo, workers []*WorkerInfo, ttl time.Duration) error
 	ClearServerState(host string, pid int, serverID string) error
-	CancelationPubSub() (*redis.PubSub, error) // TODO: Need to decouple from redis to support other brokers
+	CancelationPubSub() (PubSub, error)
 	PublishCancelation(id string) error
 	Close() error
+	ListServers() ([]*ServerInfo, error)
+	Inspector() Inspector
+}
+
+type Scheduler interface {
+	Broker
+	ClearSchedulerEntries(schedulerID string) error
+	RecordSchedulerEnqueueEvent(entryID string, event *SchedulerEnqueueEvent) error
+	WriteSchedulerEntries(schedulerID string, entries []*SchedulerEntry, ttl time.Duration) error
+	ClearSchedulerHistory(entryID string) error
 }

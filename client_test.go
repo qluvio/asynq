@@ -5,7 +5,6 @@
 package asynq
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -14,12 +13,15 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/hibiken/asynq/internal/utc"
 )
 
 func TestClientEnqueueWithProcessAtOption(t *testing.T) {
-	r := setup(t)
-	client := NewClient(getRedisConnOpt(t))
-	defer client.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
 
 	task := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant@example.com"}))
 
@@ -111,7 +113,7 @@ func TestClientEnqueueWithProcessAtOption(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r) // clean up db before each test case.
+		ctx.FlushDB() // clean up db before each test case.
 
 		opts := append(tc.opts, ProcessAt(tc.processAt))
 		gotInfo, err := client.Enqueue(tc.task, opts...)
@@ -129,13 +131,13 @@ func TestClientEnqueueWithProcessAtOption(t *testing.T) {
 		}
 
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.IgnoreIDOpt, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.PendingKey(qname), diff)
 			}
 		}
 		for qname, want := range tc.wantScheduled {
-			gotScheduled := h.GetScheduledEntries(t, r, qname)
+			gotScheduled := ctx.GetScheduledEntries(qname)
 			if diff := cmp.Diff(want, gotScheduled, h.IgnoreIDOpt, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.ScheduledKey(qname), diff)
 			}
@@ -144,12 +146,16 @@ func TestClientEnqueueWithProcessAtOption(t *testing.T) {
 }
 
 func TestClientEnqueue(t *testing.T) {
-	r := setup(t)
-	client := NewClient(getRedisConnOpt(t))
-	defer client.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t), time.UTC)
+	defer func() { _ = client.Close() }()
 
 	task := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant@example.com"}))
-	now := time.Now()
+	nowUtc := utc.Now()
+	defer utc.MockNow(nowUtc)()
+	now := nowUtc.Time
 
 	tests := []struct {
 		desc        string
@@ -419,16 +425,17 @@ func TestClientEnqueue(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r) // clean up db before each test case.
+		ctx.FlushDB() // clean up db before each test case.
 
 		gotInfo, err := client.Enqueue(tc.task, tc.opts...)
 		if err != nil {
 			t.Error(err)
 			continue
 		}
+
 		cmpOptions := []cmp.Option{
 			cmpopts.IgnoreFields(TaskInfo{}, "ID"),
-			cmpopts.EquateApproxTime(500 * time.Millisecond),
+			cmpopts.EquateApproxTime(time.Second),
 		}
 		if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
 			t.Errorf("%s;\nEnqueue(task) returned %v, want %v; (-want,+got)\n%s",
@@ -436,7 +443,7 @@ func TestClientEnqueue(t *testing.T) {
 		}
 
 		for qname, want := range tc.wantPending {
-			got := h.GetPendingMessages(t, r, qname)
+			got := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, got, h.IgnoreIDOpt); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.PendingKey(qname), diff)
 			}
@@ -445,12 +452,15 @@ func TestClientEnqueue(t *testing.T) {
 }
 
 func TestClientEnqueueWithProcessInOption(t *testing.T) {
-	r := setup(t)
-	client := NewClient(getRedisConnOpt(t))
-	defer client.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
 
 	task := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant@example.com"}))
-	now := time.Now()
+	now := utc.Now()
+	defer utc.MockNow(now)()
 
 	tests := []struct {
 		desc          string
@@ -514,7 +524,7 @@ func TestClientEnqueueWithProcessInOption(t *testing.T) {
 				LastFailedAt:  time.Time{},
 				Timeout:       defaultTimeout,
 				Deadline:      time.Time{},
-				NextProcessAt: now,
+				NextProcessAt: now.Time,
 			},
 			wantPending: map[string][]*base.TaskMessage{
 				"default": {
@@ -535,7 +545,7 @@ func TestClientEnqueueWithProcessInOption(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r) // clean up db before each test case.
+		ctx.FlushDB() // clean up db before each test case.
 
 		opts := append(tc.opts, ProcessIn(tc.delay))
 		gotInfo, err := client.Enqueue(tc.task, opts...)
@@ -553,13 +563,13 @@ func TestClientEnqueueWithProcessInOption(t *testing.T) {
 		}
 
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.IgnoreIDOpt, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.PendingKey(qname), diff)
 			}
 		}
 		for qname, want := range tc.wantScheduled {
-			gotScheduled := h.GetScheduledEntries(t, r, qname)
+			gotScheduled := ctx.GetScheduledEntries(qname)
 			if diff := cmp.Diff(want, gotScheduled, h.IgnoreIDOpt, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.ScheduledKey(qname), diff)
 			}
@@ -568,9 +578,11 @@ func TestClientEnqueueWithProcessInOption(t *testing.T) {
 }
 
 func TestClientEnqueueError(t *testing.T) {
-	r := setup(t)
-	client := NewClient(getRedisConnOpt(t))
-	defer client.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
 
 	task := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant@example.com"}))
 
@@ -599,7 +611,7 @@ func TestClientEnqueueError(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
+		ctx.FlushDB()
 
 		_, err := client.Enqueue(tc.task, tc.opts...)
 		if err == nil {
@@ -609,9 +621,11 @@ func TestClientEnqueueError(t *testing.T) {
 }
 
 func TestClientDefaultOptions(t *testing.T) {
-	r := setup(t)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 
-	now := time.Now()
+	now := utc.Now()
+	defer utc.MockNow(now)()
 
 	tests := []struct {
 		desc        string
@@ -638,7 +652,7 @@ func TestClientDefaultOptions(t *testing.T) {
 				LastFailedAt:  time.Time{},
 				Timeout:       defaultTimeout,
 				Deadline:      time.Time{},
-				NextProcessAt: now,
+				NextProcessAt: now.Time,
 			},
 			queue: "feed",
 			want: &base.TaskMessage{
@@ -666,7 +680,7 @@ func TestClientDefaultOptions(t *testing.T) {
 				LastFailedAt:  time.Time{},
 				Timeout:       defaultTimeout,
 				Deadline:      time.Time{},
-				NextProcessAt: now,
+				NextProcessAt: now.Time,
 			},
 			queue: "feed",
 			want: &base.TaskMessage{
@@ -693,7 +707,7 @@ func TestClientDefaultOptions(t *testing.T) {
 				LastFailedAt:  time.Time{},
 				Timeout:       defaultTimeout,
 				Deadline:      time.Time{},
-				NextProcessAt: now,
+				NextProcessAt: now.Time,
 			},
 			queue: "critical",
 			want: &base.TaskMessage{
@@ -708,68 +722,74 @@ func TestClientDefaultOptions(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		c := NewClient(getRedisConnOpt(t))
-		defer c.Close()
-		c.SetDefaultOptions(tc.task.Type(), tc.defaultOpts...)
-		gotInfo, err := c.Enqueue(tc.task, tc.opts...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cmpOptions := []cmp.Option{
-			cmpopts.IgnoreFields(TaskInfo{}, "ID"),
-			cmpopts.EquateApproxTime(500 * time.Millisecond),
-		}
-		if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
-			t.Errorf("%s;\nEnqueue(task, opts...) returned %v, want %v; (-want,+got)\n%s",
-				tc.desc, gotInfo, tc.wantInfo, diff)
-		}
-		pending := h.GetPendingMessages(t, r, tc.queue)
-		if len(pending) != 1 {
-			t.Errorf("%s;\nexpected queue %q to have one message; got %d messages in the queue.",
-				tc.desc, tc.queue, len(pending))
-			continue
-		}
-		got := pending[0]
-		if diff := cmp.Diff(tc.want, got, h.IgnoreIDOpt); diff != "" {
-			t.Errorf("%s;\nmismatch found in pending task message; (-want,+got)\n%s",
-				tc.desc, diff)
-		}
+
+		t.Run(tc.desc, func(t *testing.T) {
+			ctx.FlushDB()
+			client := NewClient(getClientConnOpt(t))
+			defer func() { _ = client.Close() }()
+
+			client.SetDefaultOptions(tc.task.Type(), tc.defaultOpts...)
+			gotInfo, err := client.Enqueue(tc.task, tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmpOptions := []cmp.Option{
+				cmpopts.IgnoreFields(TaskInfo{}, "ID"),
+				cmpopts.EquateApproxTime(500 * time.Millisecond),
+			}
+			if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
+				t.Errorf("%s;\nEnqueue(task, opts...) returned %v, want %v; (-want,+got)\n%s",
+					tc.desc, gotInfo, tc.wantInfo, diff)
+			}
+			pending := ctx.GetPendingMessages(tc.queue)
+			if len(pending) != 1 {
+				t.Errorf("%s;\nexpected queue %q to have one message; got %d messages in the queue.",
+					tc.desc, tc.queue, len(pending))
+				return
+			}
+			got := pending[0]
+			if diff := cmp.Diff(tc.want, got, h.IgnoreIDOpt); diff != "" {
+				t.Errorf("%s;\nmismatch found in pending task message; (-want,+got)\n%s",
+					tc.desc, diff)
+			}
+		})
 	}
 }
 
 func TestClientEnqueueUnique(t *testing.T) {
-	r := setup(t)
-	c := NewClient(getRedisConnOpt(t))
-	defer c.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
 
 	tests := []struct {
 		task *Task
 		ttl  time.Duration
 	}{
 		{
-			NewTask("email", h.JSON(map[string]interface{}{"user_id": 123})),
-			time.Hour,
+			task: NewTask("email", h.JSON(map[string]interface{}{"user_id": 123})),
+			ttl:  time.Hour,
 		},
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r) // clean up db before each test case.
+		ctx.FlushDB() // clean up db before each test case.
 
 		// Enqueue the task first. It should succeed.
-		_, err := c.Enqueue(tc.task, Unique(tc.ttl))
+		_, err := client.Enqueue(tc.task, Unique(tc.ttl))
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		gotTTL := r.TTL(context.Background(), base.UniqueKey(base.DefaultQueueName, tc.task.Type(), tc.task.Payload())).Val()
+		gotTTL := ctx.GetUniqueKeyTTL(base.DefaultQueueName, tc.task.Type(), tc.task.Payload())
 		if !cmp.Equal(tc.ttl.Seconds(), gotTTL.Seconds(), cmpopts.EquateApprox(0, 1)) {
 			t.Errorf("TTL = %v, want %v", gotTTL, tc.ttl)
 			continue
 		}
 
 		// Enqueue the task again. It should fail.
-		_, err = c.Enqueue(tc.task, Unique(tc.ttl))
+		_, err = client.Enqueue(tc.task, Unique(tc.ttl))
 		if err == nil {
 			t.Errorf("Enqueueing %+v did not return an error", tc.task)
 			continue
@@ -782,9 +802,11 @@ func TestClientEnqueueUnique(t *testing.T) {
 }
 
 func TestClientEnqueueUniqueWithProcessInOption(t *testing.T) {
-	r := setup(t)
-	c := NewClient(getRedisConnOpt(t))
-	defer c.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
 
 	tests := []struct {
 		task *Task
@@ -799,15 +821,15 @@ func TestClientEnqueueUniqueWithProcessInOption(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r) // clean up db before each test case.
+		ctx.FlushDB() // clean up db before each test case.
 
 		// Enqueue the task first. It should succeed.
-		_, err := c.Enqueue(tc.task, ProcessIn(tc.d), Unique(tc.ttl))
+		_, err := client.Enqueue(tc.task, ProcessIn(tc.d), Unique(tc.ttl))
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		gotTTL := r.TTL(context.Background(), base.UniqueKey(base.DefaultQueueName, tc.task.Type(), tc.task.Payload())).Val()
+		gotTTL := ctx.GetUniqueKeyTTL(base.DefaultQueueName, tc.task.Type(), tc.task.Payload())
 		wantTTL := time.Duration(tc.ttl.Seconds()+tc.d.Seconds()) * time.Second
 		if !cmp.Equal(wantTTL.Seconds(), gotTTL.Seconds(), cmpopts.EquateApprox(0, 1)) {
 			t.Errorf("TTL = %v, want %v", gotTTL, wantTTL)
@@ -815,7 +837,7 @@ func TestClientEnqueueUniqueWithProcessInOption(t *testing.T) {
 		}
 
 		// Enqueue the task again. It should fail.
-		_, err = c.Enqueue(tc.task, ProcessIn(tc.d), Unique(tc.ttl))
+		_, err = client.Enqueue(tc.task, ProcessIn(tc.d), Unique(tc.ttl))
 		if err == nil {
 			t.Errorf("Enqueueing %+v did not return an error", tc.task)
 			continue
@@ -828,9 +850,11 @@ func TestClientEnqueueUniqueWithProcessInOption(t *testing.T) {
 }
 
 func TestClientEnqueueUniqueWithProcessAtOption(t *testing.T) {
-	r := setup(t)
-	c := NewClient(getRedisConnOpt(t))
-	defer c.Close()
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
 
 	tests := []struct {
 		task *Task
@@ -838,22 +862,22 @@ func TestClientEnqueueUniqueWithProcessAtOption(t *testing.T) {
 		ttl  time.Duration
 	}{
 		{
-			NewTask("reindex", nil),
-			time.Now().Add(time.Hour),
-			10 * time.Minute,
+			task: NewTask("reindex", nil),
+			at:   time.Now().Add(time.Hour),
+			ttl:  10 * time.Minute,
 		},
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r) // clean up db before each test case.
+		ctx.FlushDB() // clean up db before each test case.
 
 		// Enqueue the task first. It should succeed.
-		_, err := c.Enqueue(tc.task, ProcessAt(tc.at), Unique(tc.ttl))
+		_, err := client.Enqueue(tc.task, ProcessAt(tc.at), Unique(tc.ttl))
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		gotTTL := r.TTL(context.Background(), base.UniqueKey(base.DefaultQueueName, tc.task.Type(), tc.task.Payload())).Val()
+		gotTTL := ctx.GetUniqueKeyTTL(base.DefaultQueueName, tc.task.Type(), tc.task.Payload())
 		wantTTL := tc.at.Add(tc.ttl).Sub(time.Now())
 		if !cmp.Equal(wantTTL.Seconds(), gotTTL.Seconds(), cmpopts.EquateApprox(0, 1)) {
 			t.Errorf("TTL = %v, want %v", gotTTL, wantTTL)
@@ -861,7 +885,7 @@ func TestClientEnqueueUniqueWithProcessAtOption(t *testing.T) {
 		}
 
 		// Enqueue the task again. It should fail.
-		_, err = c.Enqueue(tc.task, ProcessAt(tc.at), Unique(tc.ttl))
+		_, err = client.Enqueue(tc.task, ProcessAt(tc.at), Unique(tc.ttl))
 		if err == nil {
 			t.Errorf("Enqueueing %+v did not return an error", tc.task)
 			continue

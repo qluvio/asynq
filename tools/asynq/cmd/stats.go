@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/hibiken/asynq/internal/rdb"
+	"github.com/hibiken/asynq/internal/base"
 	"github.com/spf13/cobra"
 )
 
@@ -73,7 +73,7 @@ func stats(cmd *cobra.Command, args []string) {
 	}
 
 	var aggStats AggregateStats
-	var stats []*rdb.Stats
+	var stats []*base.Stats
 	for _, qname := range queues {
 		s, err := r.CurrentStats(qname)
 		if err != nil {
@@ -132,7 +132,7 @@ func printStatsByState(s *AggregateStats) {
 	tw.Flush()
 }
 
-func printStatsByQueue(stats []*rdb.Stats) {
+func printStatsByQueue(stats []*base.Stats) {
 	var headers, seps, counts []string
 	for _, s := range stats {
 		title := queueTitle(s)
@@ -148,7 +148,7 @@ func printStatsByQueue(stats []*rdb.Stats) {
 	tw.Flush()
 }
 
-func queueTitle(s *rdb.Stats) string {
+func queueTitle(s *base.Stats) string {
 	var b strings.Builder
 	b.WriteString(s.Queue)
 	if s.Paused {

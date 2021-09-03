@@ -15,10 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/log"
-	"github.com/hibiken/asynq/internal/rdb"
 )
 
 // Server is responsible for task processing and task lifecycle management.
@@ -270,6 +268,8 @@ func toInternalLogLevel(l LogLevel) log.Level {
 // DefaultRetryDelayFunc is the default RetryDelayFunc used if one is not specified in Config.
 // It uses exponential back-off strategy to calculate the retry delay.
 func DefaultRetryDelayFunc(n int, e error, t *Task) time.Duration {
+	_ = e
+	_ = t
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	// Formula taken from https://github.com/mperham/sidekiq.
 	s := int(math.Pow(float64(n), 4)) + 15 + (r.Intn(30) * (n + 1))
@@ -288,13 +288,16 @@ const (
 	defaultHealthCheckInterval = 15 * time.Second
 )
 
-// NewServer returns a new Server given a redis connection option
-// and server configuration.
-func NewServer(r RedisConnOpt, cfg Config) *Server {
-	c, ok := r.MakeRedisClient().(redis.UniversalClient)
-	if !ok {
-		panic(fmt.Sprintf("asynq: unsupported RedisConnOpt type %T", r))
+// NewServer returns a new Server given a connection option and server configuration.
+func NewServer(r ClientConnOpt, cfg Config) *Server {
+	broker, err := makeBroker(r)
+	if err != nil {
+		panic(err)
 	}
+	return newServer(broker, cfg)
+}
+
+func newServer(broker base.Broker, cfg Config) *Server {
 	n := cfg.Concurrency
 	if n < 1 {
 		n = runtime.NumCPU()
@@ -338,7 +341,6 @@ func NewServer(r RedisConnOpt, cfg Config) *Server {
 	}
 	logger.SetLevel(toInternalLogLevel(loglevel))
 
-	rdb := rdb.NewRDB(c)
 	starting := make(chan *workerInfo)
 	finished := make(chan *base.TaskMessage)
 	syncCh := make(chan *syncRequest)
@@ -352,7 +354,7 @@ func NewServer(r RedisConnOpt, cfg Config) *Server {
 	})
 	heartbeater := newHeartbeater(heartbeaterParams{
 		logger:         logger,
-		broker:         rdb,
+		broker:         broker,
 		interval:       5 * time.Second,
 		concurrency:    n,
 		queues:         queues,
@@ -363,18 +365,18 @@ func NewServer(r RedisConnOpt, cfg Config) *Server {
 	})
 	forwarder := newForwarder(forwarderParams{
 		logger:   logger,
-		broker:   rdb,
+		broker:   broker,
 		queues:   qnames,
 		interval: 5 * time.Second,
 	})
 	subscriber := newSubscriber(subscriberParams{
 		logger:       logger,
-		broker:       rdb,
+		broker:       broker,
 		cancelations: cancels,
 	})
 	processor := newProcessor(processorParams{
 		logger:          logger,
-		broker:          rdb,
+		broker:          broker,
 		retryDelayFunc:  delayFunc,
 		isFailureFunc:   isFailureFunc,
 		syncCh:          syncCh,
@@ -389,7 +391,7 @@ func NewServer(r RedisConnOpt, cfg Config) *Server {
 	})
 	recoverer := newRecoverer(recovererParams{
 		logger:         logger,
-		broker:         rdb,
+		broker:         broker,
 		retryDelayFunc: delayFunc,
 		isFailureFunc:  isFailureFunc,
 		queues:         qnames,
@@ -397,13 +399,13 @@ func NewServer(r RedisConnOpt, cfg Config) *Server {
 	})
 	healthchecker := newHealthChecker(healthcheckerParams{
 		logger:          logger,
-		broker:          rdb,
+		broker:          broker,
 		interval:        healthcheckInterval,
 		healthcheckFunc: cfg.HealthCheckFunc,
 	})
 	return &Server{
 		logger:        logger,
-		broker:        rdb,
+		broker:        broker,
 		state:         state,
 		forwarder:     forwarder,
 		processor:     processor,
@@ -522,7 +524,7 @@ func (srv *Server) Shutdown() {
 
 	srv.wg.Wait()
 
-	srv.broker.Close()
+	_ = srv.broker.Close()
 	srv.state.Set(base.StateClosed)
 
 	srv.logger.Info("Exiting")

@@ -18,6 +18,7 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/rdb"
+	"github.com/hibiken/asynq/internal/rqlite"
 	"github.com/spf13/cobra"
 
 	homedir "github.com/mitchellh/go-homedir"
@@ -32,9 +33,13 @@ var (
 	db       int
 	password string
 
+	brokerType string // redis | rqlite
+
 	useRedisCluster bool
 	clusterAddrs    string
 	tlsServerName   string
+
+	rqliteConfig rqlite.Config
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -71,6 +76,7 @@ func init() {
 	rootCmd.SetVersionTemplate(versionOutput)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file to set flag defaut values (default is $HOME/.asynq.yaml)")
+	rootCmd.PersistentFlags().StringVarP(&brokerType, "broker_type", "", "redis", "broker type: redis|rqlite")
 	rootCmd.PersistentFlags().StringVarP(&uri, "uri", "u", "127.0.0.1:6379", "redis server URI")
 	rootCmd.PersistentFlags().IntVarP(&db, "db", "n", 0, "redis database number (default is 0)")
 	rootCmd.PersistentFlags().StringVarP(&password, "password", "p", "", "password to use when connecting to redis server")
@@ -80,13 +86,20 @@ func init() {
 		"list of comma-separated redis server addresses")
 	rootCmd.PersistentFlags().StringVar(&tlsServerName, "tls_server",
 		"", "server name for TLS validation")
+
+	rqliteConfig.InitDefaults()
+	rootCmd.PersistentFlags().StringVar(&rqliteConfig.RqliteUrl, "rqlite_addr", "http://localhost:4001", "rqlite address to use")
+	rootCmd.PersistentFlags().StringVar(&rqliteConfig.ConsistencyLevel, "rqlite_consistency_level", "strong", "rqlite consistency level")
+
 	// Bind flags with config.
-	viper.BindPFlag("uri", rootCmd.PersistentFlags().Lookup("uri"))
-	viper.BindPFlag("db", rootCmd.PersistentFlags().Lookup("db"))
-	viper.BindPFlag("password", rootCmd.PersistentFlags().Lookup("password"))
-	viper.BindPFlag("cluster", rootCmd.PersistentFlags().Lookup("cluster"))
-	viper.BindPFlag("cluster_addrs", rootCmd.PersistentFlags().Lookup("cluster_addrs"))
-	viper.BindPFlag("tls_server", rootCmd.PersistentFlags().Lookup("tls_server"))
+	_ = viper.BindPFlag("broker_type", rootCmd.PersistentFlags().Lookup("broker_type"))
+	_ = viper.BindPFlag("uri", rootCmd.PersistentFlags().Lookup("uri"))
+	_ = viper.BindPFlag("db", rootCmd.PersistentFlags().Lookup("db"))
+	_ = viper.BindPFlag("password", rootCmd.PersistentFlags().Lookup("password"))
+	_ = viper.BindPFlag("cluster", rootCmd.PersistentFlags().Lookup("cluster"))
+	_ = viper.BindPFlag("cluster_addrs", rootCmd.PersistentFlags().Lookup("cluster_addrs"))
+	_ = viper.BindPFlag("tls_server", rootCmd.PersistentFlags().Lookup("tls_server"))
+	_ = viper.BindPFlag("rqlite_addr", rootCmd.PersistentFlags().Lookup("rqlite_addr"))
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -138,7 +151,18 @@ func createRDB() *rdb.RDB {
 
 // createRDB creates a Inspector instance using flag values and returns it.
 func createInspector() *asynq.Inspector {
-	return asynq.NewInspector(getRedisConnOpt())
+	return asynq.NewInspector(getClientConnOpt())
+}
+
+func getClientConnOpt() asynq.ClientConnOpt {
+	switch brokerType {
+	case "redis":
+		return getRedisConnOpt()
+	case "rqlite":
+		return asynq.RqliteConnOpt{Config: rqliteConfig}
+	}
+	panic("invalid broker type: " + brokerType)
+	return nil
 }
 
 func getRedisConnOpt() asynq.RedisConnOpt {

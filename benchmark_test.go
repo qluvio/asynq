@@ -26,13 +26,17 @@ func makeTask(n int) *Task {
 
 // Simple E2E Benchmark testing with no scheduled tasks and retries.
 func BenchmarkEndToEndSimple(b *testing.B) {
-	const count = 100000
+	ctx := setupTestContext(b)
+	defer func() { _ = ctx.Close() }()
+
+	const count = 1000 //100000
 	for n := 0; n < b.N; n++ {
 		b.StopTimer() // begin setup
-		setup(b)
-		redis := getRedisConnOpt(b)
-		client := NewClient(redis)
-		srv := NewServer(redis, Config{
+		ctx.FlushDB()
+
+		client := NewClient(getClientConnOpt(b))
+
+		srv := newServer(client.rdb, Config{
 			Concurrency: 10,
 			RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
 				return time.Second
@@ -45,7 +49,6 @@ func BenchmarkEndToEndSimple(b *testing.B) {
 				b.Fatalf("could not enqueue a task: %v", err)
 			}
 		}
-		client.Close()
 
 		var wg sync.WaitGroup
 		wg.Add(count)
@@ -55,24 +58,27 @@ func BenchmarkEndToEndSimple(b *testing.B) {
 		}
 		b.StartTimer() // end setup
 
-		srv.Start(HandlerFunc(handler))
+		_ = srv.Start(HandlerFunc(handler))
 		wg.Wait()
 
 		b.StopTimer() // begin teardown
 		srv.Stop()
+		_ = client.Close()
 		b.StartTimer() // end teardown
 	}
 }
 
 // E2E benchmark with scheduled tasks and retries.
 func BenchmarkEndToEnd(b *testing.B) {
-	const count = 100000
+	ctx := setupTestContext(b)
+	defer func() { _ = ctx.Close() }()
+
+	const count = 1000 //100000
 	for n := 0; n < b.N; n++ {
-		b.StopTimer() // begin setup
-		setup(b)
-		redis := getRedisConnOpt(b)
-		client := NewClient(redis)
-		srv := NewServer(redis, Config{
+		ctx.FlushDB()
+
+		client := NewClient(getClientConnOpt(b))
+		srv := newServer(client.rdb, Config{
 			Concurrency: 10,
 			RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
 				return time.Second
@@ -90,7 +96,6 @@ func BenchmarkEndToEnd(b *testing.B) {
 				b.Fatalf("could not enqueue a task: %v", err)
 			}
 		}
-		client.Close()
 
 		var wg sync.WaitGroup
 		wg.Add(count * 2)
@@ -117,29 +122,34 @@ func BenchmarkEndToEnd(b *testing.B) {
 		}
 		b.StartTimer() // end setup
 
-		srv.Start(HandlerFunc(handler))
+		_ = srv.Start(HandlerFunc(handler))
 		wg.Wait()
 
 		b.StopTimer() // begin teardown
 		srv.Stop()
+		_ = client.Close()
 		b.StartTimer() // end teardown
 	}
 }
 
 // Simple E2E Benchmark testing with no scheduled tasks and retries with multiple queues.
 func BenchmarkEndToEndMultipleQueues(b *testing.B) {
+	ctx := setupTestContext(b)
+	defer func() { _ = ctx.Close() }()
+
 	// number of tasks to create for each queue
 	const (
-		highCount    = 20000
-		defaultCount = 20000
-		lowCount     = 20000
+		highCount    = 1000 //20000
+		defaultCount = 1000 //20000
+		lowCount     = 1000 //20000
 	)
 	for n := 0; n < b.N; n++ {
 		b.StopTimer() // begin setup
-		setup(b)
-		redis := getRedisConnOpt(b)
-		client := NewClient(redis)
-		srv := NewServer(redis, Config{
+
+		ctx.FlushDB()
+
+		client := NewClient(getClientConnOpt(b))
+		srv := newServer(client.rdb, Config{
 			Concurrency: 10,
 			Queues: map[string]int{
 				"high":    6,
@@ -164,7 +174,6 @@ func BenchmarkEndToEndMultipleQueues(b *testing.B) {
 				b.Fatalf("could not enqueue a task: %v", err)
 			}
 		}
-		client.Close()
 
 		var wg sync.WaitGroup
 		wg.Add(highCount + defaultCount + lowCount)
@@ -174,11 +183,12 @@ func BenchmarkEndToEndMultipleQueues(b *testing.B) {
 		}
 		b.StartTimer() // end setup
 
-		srv.Start(HandlerFunc(handler))
+		_ = srv.Start(HandlerFunc(handler))
 		wg.Wait()
 
 		b.StopTimer() // begin teardown
 		srv.Stop()
+		_ = client.Close()
 		b.StartTimer() // end teardown
 	}
 }
@@ -186,13 +196,17 @@ func BenchmarkEndToEndMultipleQueues(b *testing.B) {
 // E2E benchmark to check client enqueue operation performs correctly,
 // while server is busy processing tasks.
 func BenchmarkClientWhileServerRunning(b *testing.B) {
+	ctx := setupTestContext(b)
+	defer func() { _ = ctx.Close() }()
+
 	const count = 10000
+	const enqueueCount = 100000
 	for n := 0; n < b.N; n++ {
 		b.StopTimer() // begin setup
-		setup(b)
-		redis := getRedisConnOpt(b)
-		client := NewClient(redis)
-		srv := NewServer(redis, Config{
+		ctx.FlushDB()
+
+		client := NewClient(getClientConnOpt(b))
+		srv := newServer(client.rdb, Config{
 			Concurrency: 10,
 			RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
 				return time.Second
@@ -215,13 +229,13 @@ func BenchmarkClientWhileServerRunning(b *testing.B) {
 		handler := func(ctx context.Context, t *Task) error {
 			return nil
 		}
-		srv.Start(HandlerFunc(handler))
+		_ = srv.Start(HandlerFunc(handler))
 
 		b.StartTimer() // end setup
 
 		b.Log("Starting enqueueing")
 		enqueued := 0
-		for enqueued < 100000 {
+		for enqueued < enqueueCount {
 			t := NewTask(fmt.Sprintf("enqueued%d", enqueued), h.JSON(map[string]interface{}{"data": enqueued}))
 			if _, err := client.Enqueue(t); err != nil {
 				b.Logf("could not enqueue task %d: %v", enqueued, err)
@@ -233,7 +247,7 @@ func BenchmarkClientWhileServerRunning(b *testing.B) {
 
 		b.StopTimer() // begin teardown
 		srv.Stop()
-		client.Close()
+		_ = client.Close()
 		b.StartTimer() // end teardown
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/hibiken/asynq"
+	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/spf13/cobra"
 )
@@ -82,7 +83,7 @@ func queueList(cmd *cobra.Command, args []string) {
 	type queueInfo struct {
 		name    string
 		keyslot int64
-		nodes   []*asynq.ClusterNode
+		nodes   []*base.ClusterNode
 	}
 	inspector := createInspector()
 	queues, err := inspector.Queues()
@@ -96,13 +97,13 @@ func queueList(cmd *cobra.Command, args []string) {
 		if useRedisCluster {
 			keyslot, err := inspector.ClusterKeySlot(qname)
 			if err != nil {
-				fmt.Errorf("error: Could not get cluster keyslot for %q\n", qname)
+				_ = fmt.Errorf("error: Could not get cluster keyslot for %q\n", qname)
 				continue
 			}
 			q.keyslot = keyslot
 			nodes, err := inspector.ClusterNodes(qname)
 			if err != nil {
-				fmt.Errorf("error: Could not get cluster nodes for %q\n", qname)
+				_ = fmt.Errorf("error: Could not get cluster nodes for %q\n", qname)
 				continue
 			}
 			q.nodes = nodes
@@ -114,7 +115,7 @@ func queueList(cmd *cobra.Command, args []string) {
 			[]string{"Queue", "Cluster KeySlot", "Cluster Nodes"},
 			func(w io.Writer, tmpl string) {
 				for _, q := range qs {
-					fmt.Fprintf(w, tmpl, q.name, q.keyslot, q.nodes)
+					_, _ = fmt.Fprintf(w, tmpl, q.name, q.keyslot, q.nodes)
 				}
 			},
 		)
@@ -142,19 +143,19 @@ func queueInspect(cmd *cobra.Command, args []string) {
 
 func printQueueInfo(info *asynq.QueueInfo) {
 	bold := color.New(color.Bold)
-	bold.Println("Queue Info")
+	_, _ = bold.Println("Queue Info")
 	fmt.Printf("Name:   %s\n", info.Queue)
 	fmt.Printf("Size:   %d\n", info.Size)
 	fmt.Printf("Paused: %t\n\n", info.Paused)
-	bold.Println("Task Count by State")
+	_, _ = bold.Println("Task Count by State")
 	printTable(
 		[]string{"active", "pending", "scheduled", "retry", "archived"},
 		func(w io.Writer, tmpl string) {
-			fmt.Fprintf(w, tmpl, info.Active, info.Pending, info.Scheduled, info.Retry, info.Archived)
+			_, _ = fmt.Fprintf(w, tmpl, info.Active, info.Pending, info.Scheduled, info.Retry, info.Archived)
 		},
 	)
 	fmt.Println()
-	bold.Printf("Daily Stats %s UTC\n", info.Timestamp.UTC().Format("2006-01-02"))
+	_, _ = bold.Printf("Daily Stats %s UTC\n", info.Timestamp.UTC().Format("2006-01-02"))
 	printTable(
 		[]string{"processed", "failed", "error rate"},
 		func(w io.Writer, tmpl string) {
@@ -164,7 +165,7 @@ func printQueueInfo(info *asynq.QueueInfo) {
 			} else {
 				errRate = fmt.Sprintf("%.2f%%", float64(info.Failed)/float64(info.Processed)*100)
 			}
-			fmt.Fprintf(w, tmpl, info.Processed, info.Failed, errRate)
+			_, _ = fmt.Fprintf(w, tmpl, info.Processed, info.Failed, errRate)
 		},
 	)
 }
@@ -172,7 +173,7 @@ func printQueueInfo(info *asynq.QueueInfo) {
 func queueHistory(cmd *cobra.Command, args []string) {
 	days, err := cmd.Flags().GetInt("days")
 	if err != nil {
-		fmt.Printf("error: Internal error: %v\n", err)
+		_, _ = fmt.Printf("error: Internal error: %v\n", err)
 		os.Exit(1)
 	}
 	inspector := createInspector()
@@ -201,7 +202,7 @@ func printDailyStats(stats []*asynq.DailyStats) {
 				} else {
 					errRate = fmt.Sprintf("%.2f%%", float64(s.Failed)/float64(s.Processed)*100)
 				}
-				fmt.Fprintf(w, tmpl, s.Date.Format("2006-01-02"), s.Processed, s.Failed, errRate)
+				_, _ = fmt.Fprintf(w, tmpl, s.Date.Format("2006-01-02"), s.Processed, s.Failed, errRate)
 			}
 		},
 	)

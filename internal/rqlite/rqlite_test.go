@@ -1,72 +1,90 @@
-// Copyright 2020 Kentaro Hibino. All rights reserved.
-// Use of this source code is governed by a MIT license
-// that can be found in the LICENSE file.
-
-package rdb
+package rqlite
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/hibiken/asynq/internal/utc"
+	"github.com/stretchr/testify/require"
 )
 
 // variables used for package testing.
 var (
-	redisAddr string
-	redisDB   int
-
-	useRedisCluster   bool
-	redisClusterAddrs string // comma-separated list of host:port
+	config Config
 )
 
 func init() {
-	flag.StringVar(&redisAddr, "redis_addr", "localhost:6379", "redis address to use in testing")
-	flag.IntVar(&redisDB, "redis_db", 15, "redis db number to use in testing")
-	flag.BoolVar(&useRedisCluster, "redis_cluster", false, "use redis cluster as a broker in testing")
-	flag.StringVar(&redisClusterAddrs, "redis_cluster_addrs", "localhost:7000,localhost:7001,localhost:7002", "comma separated list of redis server addresses")
+	config.InitDefaults()
+	flag.StringVar(&config.RqliteUrl, "rqlite_url", "http://localhost:4001", "rqlite url to use in testing")
+	flag.StringVar(&config.ConsistencyLevel, "consistency_level", "strong", "rqlite consistency level")
 }
 
-func setup(tb testing.TB) (r *RDB) {
+func setup(tb testing.TB) *RQLite {
 	tb.Helper()
-	if useRedisCluster {
-		addrs := strings.Split(redisClusterAddrs, ",")
-		if len(addrs) == 0 {
-			tb.Fatal("No redis cluster addresses provided. Please set addresses using --redis_cluster_addrs flag.")
-		}
-		r = NewRDB(redis.NewClusterClient(&redis.ClusterOptions{
-			Addrs: addrs,
-		}))
-	} else {
-		r = NewRDB(redis.NewClient(&redis.Options{
-			Addr: redisAddr,
-			DB:   redisDB,
-		}))
+	ret := NewRQLite(config, nil, nil)
+	err := ret.Open()
+	if err != nil {
+		tb.Fatal("Unable to connect rqlite", err)
 	}
-	// Start each test with a clean slate.
-	h.FlushDB(tb, r.client)
-	return r
+	FlushDB(tb, ret.conn)
+	return ret
 }
 
-func TestEnqueue(t *testing.T) {
+func TestBasicEnqueueDequeue(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	t1 := h.NewTaskMessage("send_email", h.JSON(map[string]interface{}{"to": "exampleuser@gmail.com", "from": "noreply@example.com"}))
 	t2 := h.NewTaskMessageWithQueue("generate_csv", h.JSON(map[string]interface{}{}), "csv")
 	t3 := h.NewTaskMessageWithQueue("sync", nil, "low")
 
+	for _, tm := range []*base.TaskMessage{t1, t2, t3} {
+		err := r.Enqueue(tm)
+		require.NoError(t, err)
+	}
+
+	for _, q := range []string{"csv", "low", base.DefaultQueueName} {
+		msg, deadline, err := r.Dequeue(q)
+		require.NoError(t, err)
+		require.NotNil(t, msg)
+		require.NotZero(t, deadline)
+
+		require.Equal(t, q, msg.Queue)
+		require.Equal(t, 25, msg.Retry)
+		require.Equal(t, int64(1800), msg.Timeout)
+
+		switch q {
+		case base.DefaultQueueName:
+			require.Equal(t, "send_email", msg.Type)
+		case "csv":
+			require.Equal(t, "generate_csv", msg.Type)
+		case "low":
+			require.Equal(t, "sync", msg.Type)
+		}
+	}
+
+	for _, q := range []string{"csv", "low", base.DefaultQueueName} {
+		_, _, err := r.Dequeue(q)
+		require.Error(t, err)
+		require.True(t, errors.Is(err, errors.ErrNoProcessableTask))
+	}
+}
+
+func TestEnqueue(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	t1 := h.NewTaskMessage("send_email", h.JSON(map[string]interface{}{"to": "exampleuser@gmail.com", "from": "noreply@example.com"}))
+	t2 := h.NewTaskMessageWithQueue("generate_csv", h.JSON(map[string]interface{}{}), "csv")
+	t3 := h.NewTaskMessageWithQueue("sync", nil, "low")
 	tests := []struct {
 		msg *base.TaskMessage
 	}{
@@ -76,56 +94,31 @@ func TestEnqueue(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client) // clean up db before each test case.
+		FlushDB(t, r.conn)
 
 		err := r.Enqueue(tc.msg)
-		if err != nil {
-			t.Errorf("(*RDB).Enqueue(msg) = %v, want nil", err)
-			continue
-		}
+		require.NoError(t, err)
 
 		// Check Pending list has task ID.
-		pendingKey := base.PendingKey(tc.msg.Queue)
-		pendingIDs := r.client.LRange(context.Background(), pendingKey, 0, -1).Val()
-		if n := len(pendingIDs); n != 1 {
-			t.Errorf("Redis LIST %q contains %d IDs, want 1", pendingKey, n)
-			continue
-		}
-		if pendingIDs[0] != tc.msg.ID.String() {
-			t.Errorf("Redis LIST %q: got %v, want %v", pendingKey, pendingIDs, []string{tc.msg.ID.String()})
-			continue
-		}
-
+		pending, err := getPending(r.conn, tc.msg.Queue)
+		require.NoError(t, err)
+		msg, err := decodeMessage([]byte(pending.msg))
+		require.NoError(t, err)
+		require.Equal(t, tc.msg.ID.String(), msg.ID.String())
 		// Check the value under the task key.
-		taskKey := base.TaskKey(tc.msg.Queue, tc.msg.ID.String())
-		encoded := r.client.HGet(context.Background(), taskKey, "msg").Val() // "msg" field
-		decoded := h.MustUnmarshal(t, encoded)
-		if diff := cmp.Diff(tc.msg, decoded); diff != "" {
-			t.Errorf("persisted message was %v, want %v; (-want, +got)\n%s", decoded, tc.msg, diff)
-		}
-		state := r.client.HGet(context.Background(), taskKey, "state").Val() // "state" field
-		if state != "pending" {
-			t.Errorf("state field under task-key is set to %q, want %q", state, "pending")
-		}
-		timeout := r.client.HGet(context.Background(), taskKey, "timeout").Val() // "timeout" field
-		if want := strconv.Itoa(int(tc.msg.Timeout)); timeout != want {
-			t.Errorf("timeout field under task-key is set to %v, want %v", timeout, want)
-		}
-		deadline := r.client.HGet(context.Background(), taskKey, "deadline").Val() // "deadline" field
-		if want := strconv.Itoa(int(tc.msg.Deadline)); deadline != want {
-			t.Errorf("deadline field under task-key is set to %v, want %v", deadline, want)
-		}
+		diff := cmp.Diff(tc.msg, msg)
+		require.Equal(t, "", diff, "persisted message was %v, want %v; (-want, +got)\n%s", msg, tc.msg, diff)
 
-		// Check queue is in the AllQueues set.
-		if !r.client.SIsMember(context.Background(), base.AllQueues, tc.msg.Queue).Val() {
-			t.Errorf("%q is not a member of SET %q", tc.msg.Queue, base.AllQueues)
-		}
+		// Check queue is in the AllQueues table.
+		ok, err := r.QueueExist(tc.msg.Queue)
+		require.NoError(t, err)
+		require.True(t, ok, "%s queue not found in table %s", tc.msg.Queue, QueuesTable)
 	}
 }
 
 func TestEnqueueUnique(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	m1 := base.TaskMessage{
 		ID:        uuid.New(),
 		Type:      "email",
@@ -133,95 +126,72 @@ func TestEnqueueUnique(t *testing.T) {
 		Queue:     base.DefaultQueueName,
 		UniqueKey: base.UniqueKey(base.DefaultQueueName, "email", h.JSON(map[string]interface{}{"user_id": 123})),
 	}
+	m2 := base.TaskMessage{
+		ID:        uuid.New(),
+		Type:      "email",
+		Payload:   h.JSON(map[string]interface{}{"user_id": json.Number("456")}),
+		Queue:     base.DefaultQueueName,
+		UniqueKey: base.UniqueKey(base.DefaultQueueName, "email", h.JSON(map[string]interface{}{"user_id": 456})),
+	}
 
 	tests := []struct {
-		msg *base.TaskMessage
-		ttl time.Duration // uniqueness ttl
+		msg                     *base.TaskMessage
+		ttl                     time.Duration // uniqueness ttl
+		waitBeforeSecondEnqueue bool
+		failUnique              bool
 	}{
-		{&m1, time.Minute},
+		{msg: &m1, ttl: time.Minute, failUnique: true},
+		{msg: &m2, ttl: time.Second, failUnique: false, waitBeforeSecondEnqueue: true},
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client) // clean up db before each test case.
+		FlushDB(t, r.conn)
 
 		// Enqueue the first message, should succeed.
 		err := r.EnqueueUnique(tc.msg, tc.ttl)
-		if err != nil {
-			t.Errorf("First message: (*RDB).EnqueueUnique(%v, %v) = %v, want nil",
-				tc.msg, tc.ttl, err)
-			continue
-		}
-		gotPending := h.GetPendingMessages(t, r.client, tc.msg.Queue)
-		if len(gotPending) != 1 {
-			t.Errorf("%q has length %d, want 1", base.PendingKey(tc.msg.Queue), len(gotPending))
-			continue
-		}
-		if diff := cmp.Diff(tc.msg, gotPending[0]); diff != "" {
-			t.Errorf("persisted data differed from the original input (-want, +got)\n%s", diff)
-		}
-		if !r.client.SIsMember(context.Background(), base.AllQueues, tc.msg.Queue).Val() {
-			t.Errorf("%q is not a member of SET %q", tc.msg.Queue, base.AllQueues)
-		}
+		require.NoError(t, err)
 
 		// Check Pending list has task ID.
-		pendingKey := base.PendingKey(tc.msg.Queue)
-		pendingIDs := r.client.LRange(context.Background(), pendingKey, 0, -1).Val()
-		if len(pendingIDs) != 1 {
-			t.Errorf("Redis LIST %q contains %d IDs, want 1", pendingKey, len(pendingIDs))
-			continue
-		}
-		if pendingIDs[0] != tc.msg.ID.String() {
-			t.Errorf("Redis LIST %q: got %v, want %v", pendingKey, pendingIDs, []string{tc.msg.ID.String()})
-			continue
-		}
-
+		pending, err := getPending(r.conn, tc.msg.Queue)
+		require.NoError(t, err)
+		msg, err := decodeMessage([]byte(pending.msg))
+		require.NoError(t, err)
+		require.Equal(t, tc.msg.ID.String(), msg.ID.String())
 		// Check the value under the task key.
-		taskKey := base.TaskKey(tc.msg.Queue, tc.msg.ID.String())
-		encoded := r.client.HGet(context.Background(), taskKey, "msg").Val() // "msg" field
-		decoded := h.MustUnmarshal(t, encoded)
-		if diff := cmp.Diff(tc.msg, decoded); diff != "" {
-			t.Errorf("persisted message was %v, want %v; (-want, +got)\n%s", decoded, tc.msg, diff)
-		}
-		state := r.client.HGet(context.Background(), taskKey, "state").Val() // "state" field
-		if state != "pending" {
-			t.Errorf("state field under task-key is set to %q, want %q", state, "pending")
-		}
-		timeout := r.client.HGet(context.Background(), taskKey, "timeout").Val() // "timeout" field
-		if want := strconv.Itoa(int(tc.msg.Timeout)); timeout != want {
-			t.Errorf("timeout field under task-key is set to %v, want %v", timeout, want)
-		}
-		deadline := r.client.HGet(context.Background(), taskKey, "deadline").Val() // "deadline" field
-		if want := strconv.Itoa(int(tc.msg.Deadline)); deadline != want {
-			t.Errorf("deadline field under task-key is set to %v, want %v", deadline, want)
-		}
-		uniqueKey := r.client.HGet(context.Background(), taskKey, "unique_key").Val() // "unique_key" field
-		if uniqueKey != tc.msg.UniqueKey {
-			t.Errorf("uniqueue_key field under task key is set to %q, want %q", uniqueKey, tc.msg.UniqueKey)
+		diff := cmp.Diff(tc.msg, msg)
+		require.Equal(t, "", diff, "persisted message was %v, want %v; (-want, +got)\n%s", msg, tc.msg, diff)
+
+		// Check queue is in the AllQueues table.
+		ok, err := r.QueueExist(tc.msg.Queue)
+		require.NoError(t, err)
+		require.True(t, ok, "%s queue not found in table %s", tc.msg.Queue, QueuesTable)
+
+		if tc.waitBeforeSecondEnqueue {
+			time.Sleep(tc.ttl)
 		}
 
-		// Check queue is in the AllQueues set.
-		if !r.client.SIsMember(context.Background(), base.AllQueues, tc.msg.Queue).Val() {
-			t.Errorf("%q is not a member of SET %q", tc.msg.Queue, base.AllQueues)
-		}
-
-		// Enqueue the second message, should fail.
-		got := r.EnqueueUnique(tc.msg, tc.ttl)
-		if !errors.Is(got, errors.ErrDuplicateTask) {
-			t.Errorf("Second message: (*RDB).EnqueueUnique(msg, ttl) = %v, want %v", got, errors.ErrDuplicateTask)
-			continue
-		}
-		gotTTL := r.client.TTL(context.Background(), tc.msg.UniqueKey).Val()
-		if !cmp.Equal(tc.ttl.Seconds(), gotTTL.Seconds(), cmpopts.EquateApprox(0, 2)) {
-			t.Errorf("TTL %q = %v, want %v", tc.msg.UniqueKey, gotTTL, tc.ttl)
-			continue
+		err = r.EnqueueUnique(tc.msg, tc.ttl)
+		if tc.failUnique {
+			// Enqueue the second message, should fail.
+			require.True(t, errors.Is(err, errors.ErrDuplicateTask),
+				"Second message: (*Rqlite).EnqueueUnique(msg, ttl) = %v, want %v", err, errors.ErrDuplicateTask)
+		} else {
+			// the unique_key constraint is ignored when the unique_key_deadline is expired
+			require.NoError(t, err)
 		}
 	}
 }
 
 func TestDequeue(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
-	now := time.Now()
+	defer func() { _ = r.Close() }()
+
+	// use utc.MockNow in order to avoid the one-second approximation of the
+	// deadline that results from the delay between the start of the test
+	// function and the invocation of 'Dequeue'
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
 	t1 := &base.TaskMessage{
 		ID:       uuid.New(),
 		Type:     "send_email",
@@ -237,7 +207,7 @@ func TestDequeue(t *testing.T) {
 		Payload:  nil,
 		Queue:    "critical",
 		Timeout:  0,
-		Deadline: 1593021600,
+		Deadline: 1593021600, //2020-06-24T18:00:00.000Z
 	}
 	t2Deadline := t2.Deadline
 	t3 := &base.TaskMessage{
@@ -246,7 +216,7 @@ func TestDequeue(t *testing.T) {
 		Payload:  nil,
 		Queue:    "low",
 		Timeout:  int64((5 * time.Minute).Seconds()),
-		Deadline: time.Now().Add(10 * time.Minute).Unix(),
+		Deadline: now.Add(10 * time.Minute).Unix(),
 	}
 
 	tests := []struct {
@@ -264,7 +234,7 @@ func TestDequeue(t *testing.T) {
 			},
 			args:         []string{"default"},
 			wantMsg:      t1,
-			wantDeadline: time.Unix(t1Deadline, 0),
+			wantDeadline: utc.Unix(t1Deadline, 0).Time,
 			wantPending: map[string][]*base.TaskMessage{
 				"default": {},
 			},
@@ -283,7 +253,7 @@ func TestDequeue(t *testing.T) {
 			},
 			args:         []string{"critical", "default", "low"},
 			wantMsg:      t2,
-			wantDeadline: time.Unix(t2Deadline, 0),
+			wantDeadline: utc.Unix(t2Deadline, 0).Time,
 			wantPending: map[string][]*base.TaskMessage{
 				"default":  {t1},
 				"critical": {},
@@ -308,7 +278,7 @@ func TestDequeue(t *testing.T) {
 			},
 			args:         []string{"critical", "default", "low"},
 			wantMsg:      t1,
-			wantDeadline: time.Unix(t1Deadline, 0),
+			wantDeadline: utc.Unix(t1Deadline, 0).Time,
 			wantPending: map[string][]*base.TaskMessage{
 				"default":  {},
 				"critical": {},
@@ -328,41 +298,42 @@ func TestDequeue(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client) // clean up db before each test case
-		h.SeedAllPendingQueues(t, r.client, tc.pending)
+
+		FlushDB(t, r.conn)
+		SeedAllPendingQueues(t, r, tc.pending)
 
 		gotMsg, gotDeadline, err := r.Dequeue(tc.args...)
-		if err != nil {
-			t.Errorf("(*RDB).Dequeue(%v) returned error %v", tc.args, err)
-			continue
-		}
+		require.NoError(t, err, "(*RQLite.Dequeue(%v) returned error %v", tc.args, err)
+
 		if !cmp.Equal(gotMsg, tc.wantMsg) {
-			t.Errorf("(*RDB).Dequeue(%v) returned message %v; want %v",
+			t.Errorf("(*RQLite).Dequeue(%v) returned message %v; want %v",
 				tc.args, gotMsg, tc.wantMsg)
 			continue
 		}
-		if !cmp.Equal(gotDeadline, tc.wantDeadline, cmpopts.EquateApproxTime(1*time.Second)) {
-			t.Errorf("(*RDB).Dequeue(%v) returned deadline %v; want %v",
+		//if !cmp.Equal(gotDeadline, tc.wantDeadline, cmpopts.EquateApproxTime(1*time.Second)) {
+		if !cmp.Equal(gotDeadline, tc.wantDeadline) {
+			t.Errorf("(*RQLite).Dequeue(%v) returned deadline %v; want %v",
 				tc.args, gotDeadline, tc.wantDeadline)
 			continue
 		}
 
 		for queue, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r.client, queue)
+			gotPending := GetPendingMessages(t, r, queue)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.PendingKey(queue), diff)
 			}
 		}
 		for queue, want := range tc.wantActive {
-			gotActive := h.GetActiveMessages(t, r.client, queue)
+			gotActive := GetActiveMessages(t, r, queue)
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.ActiveKey(queue), diff)
 			}
 		}
 		for queue, want := range tc.wantDeadlines {
-			gotDeadlines := h.GetDeadlinesEntries(t, r.client, queue)
-			if diff := cmp.Diff(want, gotDeadlines, h.SortZSetEntryOpt); diff != "" {
-				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.DeadlinesKey(queue), diff)
+			gotDeadlines := GetDeadlinesEntries(t, r, queue)
+			//if diff := cmp.Diff(want, gotDeadlines, cmpopts.EquateApproxTime(1*time.Second)); diff != "" {
+			if diff := cmp.Diff(want, gotDeadlines); diff != "" {
+				t.Errorf("mismatch deadline found in %q: (-want,+got):\n%s", queue, diff)
 			}
 		}
 	}
@@ -370,7 +341,7 @@ func TestDequeue(t *testing.T) {
 
 func TestDequeueError(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	tests := []struct {
 		pending       map[string][]*base.TaskMessage
@@ -423,40 +394,40 @@ func TestDequeueError(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client) // clean up db before each test case
-		h.SeedAllPendingQueues(t, r.client, tc.pending)
+		FlushDB(t, r.conn)
+		SeedAllPendingQueues(t, r, tc.pending)
 
 		gotMsg, gotDeadline, gotErr := r.Dequeue(tc.args...)
 		if !errors.Is(gotErr, tc.wantErr) {
-			t.Errorf("(*RDB).Dequeue(%v) returned error %v; want %v",
+			t.Errorf("(*RQLite).Dequeue(%v) returned error %v; want %v",
 				tc.args, gotErr, tc.wantErr)
 			continue
 		}
 		if gotMsg != nil {
-			t.Errorf("(*RDB).Dequeue(%v) returned message %v; want nil", tc.args, gotMsg)
+			t.Errorf("(*RQLite).Dequeue(%v) returned message %v; want nil", tc.args, gotMsg)
 			continue
 		}
 		if !gotDeadline.IsZero() {
-			t.Errorf("(*RDB).Dequeue(%v) returned deadline %v; want %v", tc.args, gotDeadline, time.Time{})
+			t.Errorf("(*RQLite).Dequeue(%v) returned deadline %v; want %v", tc.args, gotDeadline, time.Time{})
 			continue
 		}
 
 		for queue, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r.client, queue)
+			gotPending := GetPendingMessages(t, r, queue)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.PendingKey(queue), diff)
 			}
 		}
 		for queue, want := range tc.wantActive {
-			gotActive := h.GetActiveMessages(t, r.client, queue)
+			gotActive := GetActiveMessages(t, r, queue)
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.ActiveKey(queue), diff)
 			}
 		}
 		for queue, want := range tc.wantDeadlines {
-			gotDeadlines := h.GetDeadlinesEntries(t, r.client, queue)
-			if diff := cmp.Diff(want, gotDeadlines, h.SortZSetEntryOpt); diff != "" {
-				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.DeadlinesKey(queue), diff)
+			gotDeadlines := GetDeadlinesEntries(t, r, queue)
+			if diff := cmp.Diff(want, gotDeadlines); diff != "" {
+				t.Errorf("mismatch deadline found in %q: (-want,+got):\n%s", queue, diff)
 			}
 		}
 	}
@@ -464,7 +435,8 @@ func TestDequeueError(t *testing.T) {
 
 func TestDequeueIgnoresPausedQueues(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
+
 	t1 := &base.TaskMessage{
 		ID:       uuid.New(),
 		Type:     "send_email",
@@ -545,13 +517,17 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client) // clean up db before each test case
+		FlushDB(t, r.conn)
+
+		//TODO: is this a problem ??
+		// queues are created lazily: hence need to populate tasks first
+		SeedAllPendingQueues(t, r, tc.pending)
+
 		for _, qname := range tc.paused {
 			if err := r.Pause(qname); err != nil {
 				t.Fatal(err)
 			}
 		}
-		h.SeedAllPendingQueues(t, r.client, tc.pending)
 
 		got, _, err := r.Dequeue(tc.args...)
 		if !cmp.Equal(got, tc.wantMsg) || !errors.Is(err, tc.wantErr) {
@@ -561,13 +537,13 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 		}
 
 		for queue, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r.client, queue)
+			gotPending := GetPendingMessages(t, r, queue)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.PendingKey(queue), diff)
 			}
 		}
 		for queue, want := range tc.wantActive {
-			gotActive := h.GetActiveMessages(t, r.client, queue)
+			gotActive := GetActiveMessages(t, r, queue)
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want,+got):\n%s", base.ActiveKey(queue), diff)
 			}
@@ -577,8 +553,11 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 
 func TestDone(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
-	now := time.Now()
+	defer func() { _ = r.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
 	t1 := &base.TaskMessage{
 		ID:       uuid.New(),
 		Type:     "send_email",
@@ -592,7 +571,7 @@ func TestDone(t *testing.T) {
 		Type:     "export_csv",
 		Payload:  nil,
 		Timeout:  0,
-		Deadline: 1592485787,
+		Deadline: 1592485787, //2020-06-18T13:09:47.000Z
 		Queue:    "custom",
 	}
 	t3 := &base.TaskMessage{
@@ -675,54 +654,47 @@ func TestDone(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client) // clean up db before each test case
-		h.SeedAllDeadlines(t, r.client, tc.deadlines)
-		h.SeedAllActiveQueues(t, r.client, tc.active)
-		for _, msgs := range tc.active {
-			for _, msg := range msgs {
-				// Set uniqueness lock if unique key is present.
-				if len(msg.UniqueKey) > 0 {
-					err := r.client.SetNX(context.Background(), msg.UniqueKey, msg.ID.String(), time.Minute).Err()
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-		}
+		FlushDB(t, r.conn)
+		// fill active queues and deadline with 1 minute TTL for unique keys
+		SeedAllDeadlines(t, r, tc.deadlines, time.Minute)
+		SeedAllActiveQueues(t, r, tc.active)
 
 		err := r.Done(tc.target)
 		if err != nil {
-			t.Errorf("%s; (*RDB).Done(task) = %v, want nil", tc.desc, err)
+			t.Errorf("%s; (*RQLite).Done(task) = %v, want nil", tc.desc, err)
 			continue
 		}
 
 		for queue, want := range tc.wantActive {
-			gotActive := h.GetActiveMessages(t, r.client, queue)
+			gotActive := GetActiveMessages(t, r, queue)
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("%s; mismatch found in %q: (-want, +got):\n%s", tc.desc, base.ActiveKey(queue), diff)
 				continue
 			}
 		}
 		for queue, want := range tc.wantDeadlines {
-			gotDeadlines := h.GetDeadlinesEntries(t, r.client, queue)
-			if diff := cmp.Diff(want, gotDeadlines, h.SortZSetEntryOpt); diff != "" {
+			gotDeadlines := GetDeadlinesEntries(t, r, queue)
+			if diff := cmp.Diff(want, gotDeadlines); diff != "" {
 				t.Errorf("%s; mismatch found in %q: (-want, +got):\n%s", tc.desc, base.DeadlinesKey(queue), diff)
 				continue
 			}
 		}
 
-		processedKey := base.ProcessedKey(tc.target.Queue, time.Now())
-		gotProcessed := r.client.Get(context.Background(), processedKey).Val()
-		if gotProcessed != "1" {
-			t.Errorf("%s; GET %q = %q, want 1", tc.desc, processedKey, gotProcessed)
+		gotProcessed, err := listTasks(r.conn, tc.target.Queue, processed)
+		require.NoError(t, err)
+		if len(gotProcessed) != 1 {
+			t.Errorf("%s; GET %q, want 1", tc.desc, len(gotProcessed))
 		}
 
-		gotTTL := r.client.TTL(context.Background(), processedKey).Val()
+		cleanupAt := gotProcessed[0].cleanupAt
+		doneAt := gotProcessed[0].doneAt
+		gotTTL := time.Duration(cleanupAt - doneAt)
+
 		if gotTTL > statsTTL {
-			t.Errorf("%s; TTL %q = %v, want less than or equal to %v", tc.desc, processedKey, gotTTL, statsTTL)
+			t.Errorf("%s; TTL %q = %v, want less than or equal to %v", tc.desc, gotProcessed[0].taskUuid, gotTTL, statsTTL)
 		}
 
-		if len(tc.target.UniqueKey) > 0 && r.client.Exists(context.Background(), tc.target.UniqueKey).Val() != 0 {
+		if len(tc.target.UniqueKey) > 0 && gotProcessed[0].uniqueKeyDeadline > 0 {
 			t.Errorf("%s; Uniqueness lock %q still exists", tc.desc, tc.target.UniqueKey)
 		}
 	}
@@ -730,8 +702,11 @@ func TestDone(t *testing.T) {
 
 func TestRequeue(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
-	now := time.Now()
+	defer func() { _ = r.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
 	t1 := &base.TaskMessage{
 		ID:      uuid.New(),
 		Type:    "send_email",
@@ -845,32 +820,33 @@ func TestRequeue(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client) // clean up db before each test case
-		h.SeedAllPendingQueues(t, r.client, tc.pending)
-		h.SeedAllActiveQueues(t, r.client, tc.active)
-		h.SeedAllDeadlines(t, r.client, tc.deadlines)
+		FlushDB(t, r.conn)
+
+		SeedAllPendingQueues(t, r, tc.pending)
+		SeedAllDeadlines(t, r, tc.deadlines, 0)
+		SeedAllActiveQueues(t, r, tc.active)
 
 		err := r.Requeue(tc.target)
 		if err != nil {
-			t.Errorf("(*RDB).Requeue(task) = %v, want nil", err)
+			t.Errorf("(*RQLite).Requeue(task) = %v, want nil", err)
 			continue
 		}
 
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r.client, qname)
+			gotPending := GetPendingMessages(t, r, qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.PendingKey(qname), diff)
 			}
 		}
 		for qname, want := range tc.wantActive {
-			gotActive := h.GetActiveMessages(t, r.client, qname)
+			gotActive := GetActiveMessages(t, r, qname)
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want, +got):\n%s", base.ActiveKey(qname), diff)
 			}
 		}
 		for qname, want := range tc.wantDeadlines {
-			gotDeadlines := h.GetDeadlinesEntries(t, r.client, qname)
-			if diff := cmp.Diff(want, gotDeadlines, h.SortZSetEntryOpt); diff != "" {
+			gotDeadlines := GetDeadlinesEntries(t, r, qname)
+			if diff := cmp.Diff(want, gotDeadlines); diff != "" {
 				t.Errorf("mismatch found in %q: (-want, +got):\n%s", base.DeadlinesKey(qname), diff)
 			}
 		}
@@ -879,76 +855,58 @@ func TestRequeue(t *testing.T) {
 
 func TestSchedule(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
+
 	msg := h.NewTaskMessage("send_email", h.JSON(map[string]interface{}{"subject": "hello"}))
 	tests := []struct {
 		msg       *base.TaskMessage
 		processAt time.Time
 	}{
-		{msg, time.Now().Add(15 * time.Minute)},
+		{msg, time.Now().Add(15 * time.Minute).UTC()},
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client) // clean up db before each test case
+		FlushDB(t, r.conn)
 
 		err := r.Schedule(tc.msg, tc.processAt)
 		if err != nil {
-			t.Errorf("(*RDB).Schedule(%v, %v) = %v, want nil",
+			t.Errorf("(*RQLite).Schedule(%v, %v) = %v, want nil",
 				tc.msg, tc.processAt, err)
 			continue
 		}
 
-		// Check Scheduled zset has task ID.
-		scheduledKey := base.ScheduledKey(tc.msg.Queue)
-		zs := r.client.ZRangeWithScores(context.Background(), scheduledKey, 0, -1).Val()
-		if n := len(zs); n != 1 {
-			t.Errorf("Redis ZSET %q contains %d elements, want 1",
-				scheduledKey, n)
-			continue
-		}
-		if got := zs[0].Member.(string); got != tc.msg.ID.String() {
-			t.Errorf("Redis ZSET %q member: got %v, want %v",
-				scheduledKey, got, tc.msg.ID.String())
-			continue
-		}
-		if got := int64(zs[0].Score); got != tc.processAt.Unix() {
-			t.Errorf("Redis ZSET %q score: got %d, want %d",
-				scheduledKey, got, tc.processAt.Unix())
-			continue
-		}
+		msgs, err := listTasks(r.conn, tc.msg.Queue, scheduled)
+		require.NoError(t, err)
+		require.Equal(t, 1, len(msgs), "expects 1 element, got %d", len(msgs))
+		require.Equal(t, msgs[0].taskUuid, tc.msg.ID.String())
+		require.Equal(t, tc.processAt.Unix(), msgs[0].scheduledAt)
 
 		// Check the values under the task key.
-		taskKey := base.TaskKey(tc.msg.Queue, tc.msg.ID.String())
-		encoded := r.client.HGet(context.Background(), taskKey, "msg").Val() // "msg" field
-		decoded := h.MustUnmarshal(t, encoded)
+		decoded := msgs[0].msg
 		if diff := cmp.Diff(tc.msg, decoded); diff != "" {
 			t.Errorf("persisted message was %v, want %v; (-want, +got)\n%s",
 				decoded, tc.msg, diff)
 		}
-		state := r.client.HGet(context.Background(), taskKey, "state").Val() // "state" field
-		if want := "scheduled"; state != want {
-			t.Errorf("state field under task-key is set to %q, want %q",
-				state, want)
-		}
-		timeout := r.client.HGet(context.Background(), taskKey, "timeout").Val() // "timeout" field
-		if want := strconv.Itoa(int(tc.msg.Timeout)); timeout != want {
+		timeout := msgs[0].taskTimeout // "timeout" field
+		if want := tc.msg.Timeout; timeout != want {
 			t.Errorf("timeout field under task-key is set to %v, want %v", timeout, want)
 		}
-		deadline := r.client.HGet(context.Background(), taskKey, "deadline").Val() // "deadline" field
-		if want := strconv.Itoa(int(tc.msg.Deadline)); deadline != want {
+		deadline := msgs[0].deadline // "deadline" field
+		if want := tc.msg.Deadline; deadline != want {
 			t.Errorf("deadline field under task-ke is set to %v, want %v", deadline, want)
 		}
 
 		// Check queue is in the AllQueues set.
-		if !r.client.SIsMember(context.Background(), base.AllQueues, tc.msg.Queue).Val() {
-			t.Errorf("%q is not a member of SET %q", tc.msg.Queue, base.AllQueues)
-		}
+		queues, err := listQueues(r.conn, tc.msg.Queue)
+		require.NoError(t, err)
+		require.Equal(t, 1, len(queues))
 	}
 }
 
 func TestScheduleUnique(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
+
 	m1 := base.TaskMessage{
 		ID:        uuid.New(),
 		Type:      "email",
@@ -962,13 +920,14 @@ func TestScheduleUnique(t *testing.T) {
 		processAt time.Time
 		ttl       time.Duration // uniqueness lock ttl
 	}{
-		{&m1, time.Now().Add(15 * time.Minute), time.Minute},
+		{&m1, time.Now().UTC().Add(15 * time.Minute), time.Minute},
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client) // clean up db before each test case
+		FlushDB(t, r.conn)
 
-		desc := "(*RDB).ScheduleUnique(msg, processAt, ttl)"
+		desc := "(*RQLite).ScheduleUnique(msg, processAt, ttl)"
+		expectUniqueKeyDeadline := time.Now().UTC().Add(tc.ttl).Unix()
 		err := r.ScheduleUnique(tc.msg, tc.processAt, tc.ttl)
 		if err != nil {
 			t.Errorf("Frist task: %s = %v, want nil", desc, err)
@@ -976,54 +935,36 @@ func TestScheduleUnique(t *testing.T) {
 		}
 
 		// Check Scheduled zset has task ID.
-		scheduledKey := base.ScheduledKey(tc.msg.Queue)
-		zs := r.client.ZRangeWithScores(context.Background(), scheduledKey, 0, -1).Val()
-		if n := len(zs); n != 1 {
-			t.Errorf("Redis ZSET %q contains %d elements, want 1",
-				scheduledKey, n)
-			continue
-		}
-		if got := zs[0].Member.(string); got != tc.msg.ID.String() {
-			t.Errorf("Redis ZSET %q member: got %v, want %v",
-				scheduledKey, got, tc.msg.ID.String())
-			continue
-		}
-		if got := int64(zs[0].Score); got != tc.processAt.Unix() {
-			t.Errorf("Redis ZSET %q score: got %d, want %d",
-				scheduledKey, got, tc.processAt.Unix())
-			continue
-		}
+		msgs, err := listTasks(r.conn, tc.msg.Queue, scheduled)
+		require.NoError(t, err)
+		require.Equal(t, 1, len(msgs), "expects 1 element, got %d", len(msgs))
+		require.Equal(t, msgs[0].taskUuid, tc.msg.ID.String())
+		require.Equal(t, tc.processAt.Unix(), msgs[0].scheduledAt)
 
 		// Check the values under the task key.
-		taskKey := base.TaskKey(tc.msg.Queue, tc.msg.ID.String())
-		encoded := r.client.HGet(context.Background(), taskKey, "msg").Val() // "msg" field
-		decoded := h.MustUnmarshal(t, encoded)
+		decoded := msgs[0].msg
 		if diff := cmp.Diff(tc.msg, decoded); diff != "" {
 			t.Errorf("persisted message was %v, want %v; (-want, +got)\n%s",
 				decoded, tc.msg, diff)
 		}
-		state := r.client.HGet(context.Background(), taskKey, "state").Val() // "state" field
-		if want := "scheduled"; state != want {
-			t.Errorf("state field under task-key is set to %q, want %q",
-				state, want)
-		}
-		timeout := r.client.HGet(context.Background(), taskKey, "timeout").Val() // "timeout" field
-		if want := strconv.Itoa(int(tc.msg.Timeout)); timeout != want {
+		timeout := msgs[0].taskTimeout // "timeout" field
+		if want := tc.msg.Timeout; timeout != want {
 			t.Errorf("timeout field under task-key is set to %v, want %v", timeout, want)
 		}
-		deadline := r.client.HGet(context.Background(), taskKey, "deadline").Val() // "deadline" field
-		if want := strconv.Itoa(int(tc.msg.Deadline)); deadline != want {
-			t.Errorf("deadline field under task-key is set to %v, want %v", deadline, want)
+		deadline := msgs[0].deadline // "deadline" field
+		if want := tc.msg.Deadline; deadline != want {
+			t.Errorf("deadline field under task-ke is set to %v, want %v", deadline, want)
 		}
-		uniqueKey := r.client.HGet(context.Background(), taskKey, "unique_key").Val() // "unique_key" field
+
+		uniqueKey := msgs[0].uniqueKey // "unique_key" field
 		if uniqueKey != tc.msg.UniqueKey {
 			t.Errorf("uniqueue_key field under task key is set to %q, want %q", uniqueKey, tc.msg.UniqueKey)
 		}
 
 		// Check queue is in the AllQueues set.
-		if !r.client.SIsMember(context.Background(), base.AllQueues, tc.msg.Queue).Val() {
-			t.Errorf("%q is not a member of SET %q", tc.msg.Queue, base.AllQueues)
-		}
+		queues, err := listQueues(r.conn, tc.msg.Queue)
+		require.NoError(t, err)
+		require.Equal(t, 1, len(queues))
 
 		// Enqueue the second message, should fail.
 		got := r.ScheduleUnique(tc.msg, tc.processAt, tc.ttl)
@@ -1032,8 +973,8 @@ func TestScheduleUnique(t *testing.T) {
 			continue
 		}
 
-		gotTTL := r.client.TTL(context.Background(), tc.msg.UniqueKey).Val()
-		if !cmp.Equal(tc.ttl.Seconds(), gotTTL.Seconds(), cmpopts.EquateApprox(0, 1)) {
+		gotTTL := msgs[0].uniqueKeyDeadline
+		if !cmp.Equal(expectUniqueKeyDeadline, gotTTL, cmpopts.EquateApprox(0, 1)) {
 			t.Errorf("TTL %q = %v, want %v", tc.msg.UniqueKey, gotTTL, tc.ttl)
 			continue
 		}
@@ -1042,8 +983,11 @@ func TestScheduleUnique(t *testing.T) {
 
 func TestRetry(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
-	now := time.Now()
+	defer func() { _ = r.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
 	t1 := &base.TaskMessage{
 		ID:      uuid.New(),
 		Type:    "send_email",
@@ -1100,7 +1044,7 @@ func TestRetry(t *testing.T) {
 				"default": {{Message: t3, Score: now.Add(time.Minute).Unix()}},
 			},
 			msg:       t1,
-			processAt: now.Add(5 * time.Minute),
+			processAt: now.Add(5 * time.Minute).Time,
 			errMsg:    errMsg,
 			wantActive: map[string][]*base.TaskMessage{
 				"default": {t2},
@@ -1131,7 +1075,7 @@ func TestRetry(t *testing.T) {
 				"custom":  {},
 			},
 			msg:       t4,
-			processAt: now.Add(5 * time.Minute),
+			processAt: now.Add(5 * time.Minute).Time,
 			errMsg:    errMsg,
 			wantActive: map[string][]*base.TaskMessage{
 				"default": {t1, t2},
@@ -1153,235 +1097,70 @@ func TestRetry(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client)
-		h.SeedAllActiveQueues(t, r.client, tc.active)
-		h.SeedAllDeadlines(t, r.client, tc.deadlines)
-		h.SeedAllRetryQueues(t, r.client, tc.retry)
 
-		callTime := time.Now() // time when method was called
-		err := r.Retry(tc.msg, tc.processAt, tc.errMsg, true /*isFailure*/)
+		FlushDB(t, r.conn)
+		SeedAllDeadlines(t, r, tc.deadlines, 0)
+		SeedAllActiveQueues(t, r, tc.active)
+		SeedAllRetryQueues(t, r, tc.retry)
+
+		callTime := now // time when method is called
+		err := r.Retry(tc.msg, tc.processAt, tc.errMsg, true)
 		if err != nil {
-			t.Errorf("(*RDB).Retry = %v, want nil", err)
+			t.Errorf("(*RQLite).Retry = %v, want nil", err)
 			continue
 		}
 
 		for queue, want := range tc.wantActive {
-			gotActive := h.GetActiveMessages(t, r.client, queue)
+			gotActive := GetActiveMessages(t, r, queue)
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.ActiveKey(queue), diff)
 			}
 		}
 		for queue, want := range tc.wantDeadlines {
-			gotDeadlines := h.GetDeadlinesEntries(t, r.client, queue)
-			if diff := cmp.Diff(want, gotDeadlines, h.SortZSetEntryOpt); diff != "" {
+			gotDeadlines := GetDeadlinesEntries(t, r, queue)
+			if diff := cmp.Diff(want, gotDeadlines, SortDeadlineEntryOpt); diff != "" {
 				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.DeadlinesKey(queue), diff)
 			}
 		}
 		cmpOpts := []cmp.Option{
-			h.SortZSetEntryOpt,
-			cmpopts.EquateApproxTime(5 * time.Second), // for LastFailedAt field
+			SortDeadlineEntryOpt,
+			//cmpopts.EquateApproxTime(5 * time.Second), // for LastFailedAt field
 		}
-		wantRetry := tc.getWantRetry(callTime)
+		wantRetry := tc.getWantRetry(callTime.Time)
 		for queue, want := range wantRetry {
-			gotRetry := h.GetRetryEntries(t, r.client, queue)
+			gotRetry := GetRetryEntries(t, r, queue)
 			if diff := cmp.Diff(want, gotRetry, cmpOpts...); diff != "" {
 				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.RetryKey(queue), diff)
 			}
 		}
 
-		processedKey := base.ProcessedKey(tc.msg.Queue, time.Now())
-		gotProcessed := r.client.Get(context.Background(), processedKey).Val()
-		if gotProcessed != "1" {
-			t.Errorf("GET %q = %q, want 1", processedKey, gotProcessed)
-		}
-		gotTTL := r.client.TTL(context.Background(), processedKey).Val()
+		/* PENDING(GIL): to revisit. In redis world there's a key associated with
+		    the queue put in 'processed' state with an expiration after 90 days
+		    that tracks count of processed tasks => add column 'processed_tasks'
+		msgs, err := listTasks(r.conn, tc.msg.Queue, processed)
+		require.NoError(t, err)
+		require.Equal(t, 1, len(msgs))
+		gotProcessed := msgs[0]
+
+		cleanupAt := gotProcessed.cleanupAt
+		doneAt := gotProcessed.doneAt
+		gotTTL := time.Duration(cleanupAt - doneAt)
+
 		if gotTTL > statsTTL {
-			t.Errorf("TTL %q = %v, want less than or equal to %v", processedKey, gotTTL, statsTTL)
+			t.Errorf("TTL %q = %v, want less than or equal to %v", gotProcessed.taskUuid, gotTTL, statsTTL)
 		}
-
-		failedKey := base.FailedKey(tc.msg.Queue, time.Now())
-		gotFailed := r.client.Get(context.Background(), failedKey).Val()
-		if gotFailed != "1" {
-			t.Errorf("GET %q = %q, want 1", failedKey, gotFailed)
-		}
-		gotTTL = r.client.TTL(context.Background(), failedKey).Val()
-		if gotTTL > statsTTL {
-			t.Errorf("TTL %q = %v, want less than or equal to %v", failedKey, gotTTL, statsTTL)
-		}
-	}
-}
-
-func TestRetryWithNonFailureError(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	now := time.Now()
-	t1 := &base.TaskMessage{
-		ID:      uuid.New(),
-		Type:    "send_email",
-		Payload: h.JSON(map[string]interface{}{"subject": "Hola!"}),
-		Retried: 10,
-		Timeout: 1800,
-		Queue:   "default",
-	}
-	t2 := &base.TaskMessage{
-		ID:      uuid.New(),
-		Type:    "gen_thumbnail",
-		Payload: h.JSON(map[string]interface{}{"path": "some/path/to/image.jpg"}),
-		Timeout: 3000,
-		Queue:   "default",
-	}
-	t3 := &base.TaskMessage{
-		ID:      uuid.New(),
-		Type:    "reindex",
-		Payload: nil,
-		Timeout: 60,
-		Queue:   "default",
-	}
-	t4 := &base.TaskMessage{
-		ID:      uuid.New(),
-		Type:    "send_notification",
-		Payload: nil,
-		Timeout: 1800,
-		Queue:   "custom",
-	}
-	t1Deadline := now.Unix() + t1.Timeout
-	t2Deadline := now.Unix() + t2.Timeout
-	t4Deadline := now.Unix() + t4.Timeout
-	errMsg := "SMTP server is not responding"
-
-	tests := []struct {
-		active        map[string][]*base.TaskMessage
-		deadlines     map[string][]base.Z
-		retry         map[string][]base.Z
-		msg           *base.TaskMessage
-		processAt     time.Time
-		errMsg        string
-		wantActive    map[string][]*base.TaskMessage
-		wantDeadlines map[string][]base.Z
-		getWantRetry  func(failedAt time.Time) map[string][]base.Z
-	}{
-		{
-			active: map[string][]*base.TaskMessage{
-				"default": {t1, t2},
-			},
-			deadlines: map[string][]base.Z{
-				"default": {{Message: t1, Score: t1Deadline}, {Message: t2, Score: t2Deadline}},
-			},
-			retry: map[string][]base.Z{
-				"default": {{Message: t3, Score: now.Add(time.Minute).Unix()}},
-			},
-			msg:       t1,
-			processAt: now.Add(5 * time.Minute),
-			errMsg:    errMsg,
-			wantActive: map[string][]*base.TaskMessage{
-				"default": {t2},
-			},
-			wantDeadlines: map[string][]base.Z{
-				"default": {{Message: t2, Score: t2Deadline}},
-			},
-			getWantRetry: func(failedAt time.Time) map[string][]base.Z {
-				return map[string][]base.Z{
-					"default": {
-						// Task message should include the error message but without incrementing the retry count.
-						{Message: h.TaskMessageWithError(*t1, errMsg, failedAt), Score: now.Add(5 * time.Minute).Unix()},
-						{Message: t3, Score: now.Add(time.Minute).Unix()},
-					},
-				}
-			},
-		},
-		{
-			active: map[string][]*base.TaskMessage{
-				"default": {t1, t2},
-				"custom":  {t4},
-			},
-			deadlines: map[string][]base.Z{
-				"default": {{Message: t1, Score: t1Deadline}, {Message: t2, Score: t2Deadline}},
-				"custom":  {{Message: t4, Score: t4Deadline}},
-			},
-			retry: map[string][]base.Z{
-				"default": {},
-				"custom":  {},
-			},
-			msg:       t4,
-			processAt: now.Add(5 * time.Minute),
-			errMsg:    errMsg,
-			wantActive: map[string][]*base.TaskMessage{
-				"default": {t1, t2},
-				"custom":  {},
-			},
-			wantDeadlines: map[string][]base.Z{
-				"default": {{Message: t1, Score: t1Deadline}, {Message: t2, Score: t2Deadline}},
-				"custom":  {},
-			},
-			getWantRetry: func(failedAt time.Time) map[string][]base.Z {
-				return map[string][]base.Z{
-					"default": {},
-					"custom": {
-						// Task message should include the error message but without incrementing the retry count.
-						{Message: h.TaskMessageWithError(*t4, errMsg, failedAt), Score: now.Add(5 * time.Minute).Unix()},
-					},
-				}
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		h.FlushDB(t, r.client)
-		h.SeedAllActiveQueues(t, r.client, tc.active)
-		h.SeedAllDeadlines(t, r.client, tc.deadlines)
-		h.SeedAllRetryQueues(t, r.client, tc.retry)
-
-		callTime := time.Now() // time when method was called
-		err := r.Retry(tc.msg, tc.processAt, tc.errMsg, false /*isFailure*/)
-		if err != nil {
-			t.Errorf("(*RDB).Retry = %v, want nil", err)
-			continue
-		}
-
-		for queue, want := range tc.wantActive {
-			gotActive := h.GetActiveMessages(t, r.client, queue)
-			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
-				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.ActiveKey(queue), diff)
-			}
-		}
-		for queue, want := range tc.wantDeadlines {
-			gotDeadlines := h.GetDeadlinesEntries(t, r.client, queue)
-			if diff := cmp.Diff(want, gotDeadlines, h.SortZSetEntryOpt); diff != "" {
-				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.DeadlinesKey(queue), diff)
-			}
-		}
-		cmpOpts := []cmp.Option{
-			h.SortZSetEntryOpt,
-			cmpopts.EquateApproxTime(5 * time.Second), // for LastFailedAt field
-		}
-		wantRetry := tc.getWantRetry(callTime)
-		for queue, want := range wantRetry {
-			gotRetry := h.GetRetryEntries(t, r.client, queue)
-			if diff := cmp.Diff(want, gotRetry, cmpOpts...); diff != "" {
-				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.RetryKey(queue), diff)
-			}
-		}
-
-		// If isFailure is set to false, no stats should be recorded to avoid skewing the error rate.
-		processedKey := base.ProcessedKey(tc.msg.Queue, time.Now())
-		gotProcessed := r.client.Get(context.Background(), processedKey).Val()
-		if gotProcessed != "" {
-			t.Errorf("GET %q = %q, want empty", processedKey, gotProcessed)
-		}
-
-		// If isFailure is set to false, no stats should be recorded to avoid skewing the error rate.
-		failedKey := base.FailedKey(tc.msg.Queue, time.Now())
-		gotFailed := r.client.Get(context.Background(), failedKey).Val()
-		if gotFailed != "" {
-			t.Errorf("GET %q = %q, want empty", failedKey, gotFailed)
-		}
+		require.True(t, gotProcessed.failed)
+		*/
 	}
 }
 
 func TestArchive(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
-	now := time.Now()
+	defer func() { _ = r.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
 	t1 := &base.TaskMessage{
 		ID:      uuid.New(),
 		Type:    "send_email",
@@ -1424,7 +1203,6 @@ func TestArchive(t *testing.T) {
 	t4Deadline := now.Unix() + t4.Timeout
 	errMsg := "SMTP server not responding"
 
-	// TODO(hibiken): add test cases for trimming
 	tests := []struct {
 		active          map[string][]*base.TaskMessage
 		deadlines       map[string][]base.Z
@@ -1535,69 +1313,73 @@ func TestArchive(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client) // clean up db before each test case
-		h.SeedAllActiveQueues(t, r.client, tc.active)
-		h.SeedAllDeadlines(t, r.client, tc.deadlines)
-		h.SeedAllArchivedQueues(t, r.client, tc.archived)
 
-		callTime := time.Now() // record time `Archive` was called
+		FlushDB(t, r.conn)
+		SeedAllDeadlines(t, r, tc.deadlines, 0)
+		SeedAllActiveQueues(t, r, tc.active)
+		SeedAllArchivedQueues(t, r, tc.archived)
+
+		callTime := now // record time `Archive` was called
 		err := r.Archive(tc.target, errMsg)
 		if err != nil {
-			t.Errorf("(*RDB).Archive(%v, %v) = %v, want nil", tc.target, errMsg, err)
+			t.Errorf("(*RQLite).Archive(%v, %v) = %v, want nil", tc.target, errMsg, err)
 			continue
 		}
 
 		for queue, want := range tc.wantActive {
-			gotActive := h.GetActiveMessages(t, r.client, queue)
+			gotActive := GetActiveMessages(t, r, queue)
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q: (-want, +got)\n%s", base.ActiveKey(queue), diff)
 			}
 		}
 		for queue, want := range tc.wantDeadlines {
-			gotDeadlines := h.GetDeadlinesEntries(t, r.client, queue)
-			if diff := cmp.Diff(want, gotDeadlines, h.SortZSetEntryOpt); diff != "" {
-				t.Errorf("mismatch found in %q after calling (*RDB).Archive: (-want, +got):\n%s", base.DeadlinesKey(queue), diff)
+			gotDeadlines := GetDeadlinesEntries(t, r, queue)
+			if diff := cmp.Diff(want, gotDeadlines, SortDeadlineEntryOpt); diff != "" {
+				t.Errorf("mismatch found in %q after calling (*RQLite).Archive: (-want, +got):\n%s", base.DeadlinesKey(queue), diff)
 			}
 		}
-		for queue, want := range tc.getWantArchived(callTime) {
-			gotArchived := h.GetArchivedEntries(t, r.client, queue)
-			if diff := cmp.Diff(want, gotArchived, h.SortZSetEntryOpt, zScoreCmpOpt, timeCmpOpt); diff != "" {
-				t.Errorf("mismatch found in %q after calling (*RDB).Archive: (-want, +got):\n%s", base.ArchivedKey(queue), diff)
+		for queue, want := range tc.getWantArchived(callTime.Time) {
+			gotArchived := GetArchivedEntries(t, r, queue)
+			//if diff := cmp.Diff(want, gotArchived, SortDeadlineEntryOpt, zScoreCmpOpt, timeCmpOpt); diff != "" {
+			if diff := cmp.Diff(want, gotArchived, SortDeadlineEntryOpt); diff != "" {
+
+				t.Errorf("mismatch found in %q after calling (*RQLite).Archive: (-want, +got):\n%s", base.ArchivedKey(queue), diff)
 			}
 		}
 
-		processedKey := base.ProcessedKey(tc.target.Queue, time.Now())
-		gotProcessed := r.client.Get(context.Background(), processedKey).Val()
-		if gotProcessed != "1" {
-			t.Errorf("GET %q = %q, want 1", processedKey, gotProcessed)
-		}
-		gotTTL := r.client.TTL(context.Background(), processedKey).Val()
-		if gotTTL > statsTTL {
-			t.Errorf("TTL %q = %v, want less than or equal to %v", processedKey, gotTTL, statsTTL)
-		}
+		/* PENDING(GIL): to revisit. see same comment in TestRetry ==
+		msgs, err := listTasks(r.conn, tc.target.Queue, processed)
+		require.NoError(t, err)
+		require.Equal(t, 1, len(msgs))
+		gotProcessed := msgs[0]
 
-		failedKey := base.FailedKey(tc.target.Queue, time.Now())
-		gotFailed := r.client.Get(context.Background(), failedKey).Val()
-		if gotFailed != "1" {
-			t.Errorf("GET %q = %q, want 1", failedKey, gotFailed)
-		}
-		gotTTL = r.client.TTL(context.Background(), processedKey).Val()
+		cleanupAt := gotProcessed.cleanupAt
+		doneAt := gotProcessed.doneAt
+		gotTTL := time.Duration(cleanupAt - doneAt)
+
 		if gotTTL > statsTTL {
-			t.Errorf("TTL %q = %v, want less than or equal to %v", failedKey, gotTTL, statsTTL)
+			t.Errorf("TTL %q = %v, want less than or equal to %v", gotProcessed.taskUuid, gotTTL, statsTTL)
 		}
+		require.True(t, gotProcessed.failed)
+		*/
 	}
 }
 
 func TestForwardIfReady(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
+
 	t1 := h.NewTaskMessage("send_email", nil)
 	t2 := h.NewTaskMessage("generate_csv", nil)
 	t3 := h.NewTaskMessage("gen_thumbnail", nil)
 	t4 := h.NewTaskMessageWithQueue("important_task", nil, "critical")
 	t5 := h.NewTaskMessageWithQueue("minor_task", nil, "low")
-	secondAgo := time.Now().Add(-time.Second)
-	hourFromNow := time.Now().Add(time.Hour)
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
+	secondAgo := now.Add(-time.Second)
+	hourFromNow := now.Add(time.Hour)
 
 	tests := []struct {
 		scheduled     map[string][]base.Z
@@ -1701,30 +1483,30 @@ func TestForwardIfReady(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r.client) // clean up db before each test case
-		h.SeedAllScheduledQueues(t, r.client, tc.scheduled)
-		h.SeedAllRetryQueues(t, r.client, tc.retry)
+		FlushDB(t, r.conn)
+		SeedAllScheduledQueues(t, r, tc.scheduled)
+		SeedAllRetryQueues(t, r, tc.retry)
 
 		err := r.ForwardIfReady(tc.qnames...)
 		if err != nil {
-			t.Errorf("(*RDB).CheckScheduled(%v) = %v, want nil", tc.qnames, err)
+			t.Errorf("(*RQLite).CheckScheduled(%v) = %v, want nil", tc.qnames, err)
 			continue
 		}
 
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r.client, qname)
+			gotPending := GetPendingMessages(t, r, qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.PendingKey(qname), diff)
 			}
 		}
 		for qname, want := range tc.wantScheduled {
-			gotScheduled := h.GetScheduledMessages(t, r.client, qname)
+			gotScheduled := GetScheduledMessages(t, r, qname)
 			if diff := cmp.Diff(want, gotScheduled, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.ScheduledKey(qname), diff)
 			}
 		}
 		for qname, want := range tc.wantRetry {
-			gotRetry := h.GetRetryMessages(t, r.client, qname)
+			gotRetry := GetRetryMessages(t, r, qname)
 			if diff := cmp.Diff(want, gotRetry, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.RetryKey(qname), diff)
 			}
@@ -1737,7 +1519,9 @@ func TestListDeadlineExceeded(t *testing.T) {
 	t2 := h.NewTaskMessageWithQueue("task2", nil, "default")
 	t3 := h.NewTaskMessageWithQueue("task3", nil, "critical")
 
-	now := time.Now()
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
 	oneHourFromNow := now.Add(1 * time.Hour)
 	fiveMinutesFromNow := now.Add(5 * time.Minute)
 	fiveMinutesAgo := now.Add(-5 * time.Minute)
@@ -1802,10 +1586,11 @@ func TestListDeadlineExceeded(t *testing.T) {
 	}
 
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
+
 	for _, tc := range tests {
-		h.FlushDB(t, r.client)
-		h.SeedAllDeadlines(t, r.client, tc.deadlines)
+		FlushDB(t, r.conn)
+		SeedAllDeadlines(t, r, tc.deadlines, 0)
 
 		got, err := r.ListDeadlineExceeded(tc.t, tc.qnames...)
 		if err != nil {
@@ -1820,26 +1605,42 @@ func TestListDeadlineExceeded(t *testing.T) {
 	}
 }
 
+func assertServer(t *testing.T, info *base.ServerInfo, srv *serverRow, ttl time.Duration) {
+	if diff := cmp.Diff(info, srv.server); diff != "" {
+		t.Errorf("persisted ServerInfo was %v, want %v; (-want,+got)\n%s",
+			srv.server, info, diff)
+	}
+	// Check ServerInfo TTL was set correctly.
+	expectExpireAt := utc.Now().Add(ttl).Unix()
+	if !cmp.Equal(expectExpireAt, srv.expireAt, cmpopts.EquateApprox(0, 1)) {
+		t.Errorf("Expiration of %q was %v, want %v", srv.sid, expectExpireAt, srv.expireAt)
+	}
+
+	// Check WorkersInfo was written correctly.
+	require.Equal(t, info.ServerID, srv.sid)
+	require.Equal(t, info.Host, srv.host)
+	require.Equal(t, info.PID, srv.pid)
+}
+
 func TestWriteServerState(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
 
 	var (
-		host     = "localhost"
-		pid      = 4242
-		serverID = "server123"
-
 		ttl = 5 * time.Second
 	)
 
 	info := base.ServerInfo{
-		Host:              host,
-		PID:               pid,
-		ServerID:          serverID,
+		Host:              "localhost",
+		PID:               4242,
+		ServerID:          "server123",
 		Concurrency:       10,
 		Queues:            map[string]int{"default": 2, "email": 5, "low": 1},
 		StrictPriority:    false,
-		Started:           time.Now().UTC(),
+		Started:           now.Time,
 		Status:            "active",
 		ActiveWorkerCount: 0,
 	}
@@ -1850,50 +1651,22 @@ func TestWriteServerState(t *testing.T) {
 	}
 
 	// Check ServerInfo was written correctly.
-	skey := base.ServerInfoKey(host, pid, serverID)
-	data := r.client.Get(context.Background(), skey).Val()
-	got, err := base.DecodeServerInfo([]byte(data))
-	if err != nil {
-		t.Fatalf("could not decode server info: %v", err)
-	}
-	if diff := cmp.Diff(info, *got); diff != "" {
-		t.Errorf("persisted ServerInfo was %v, want %v; (-want,+got)\n%s",
-			got, info, diff)
-	}
-	// Check ServerInfo TTL was set correctly.
-	gotTTL := r.client.TTL(context.Background(), skey).Val()
-	if !cmp.Equal(ttl.Seconds(), gotTTL.Seconds(), cmpopts.EquateApprox(0, 1)) {
-		t.Errorf("TTL of %q was %v, want %v", skey, gotTTL, ttl)
-	}
-	// Check ServerInfo key was added to the set all server keys correctly.
-	gotServerKeys := r.client.ZRange(context.Background(), base.AllServers, 0, -1).Val()
-	wantServerKeys := []string{skey}
-	if diff := cmp.Diff(wantServerKeys, gotServerKeys); diff != "" {
-		t.Errorf("%q contained %v, want %v", base.AllServers, gotServerKeys, wantServerKeys)
-	}
-
-	// Check WorkersInfo was written correctly.
-	wkey := base.WorkersKey(host, pid, serverID)
-	workerExist := r.client.Exists(context.Background(), wkey).Val()
-	if workerExist != 0 {
-		t.Errorf("%q key exists", wkey)
-	}
-	// Check WorkersInfo key was added to the set correctly.
-	gotWorkerKeys := r.client.ZRange(context.Background(), base.AllWorkers, 0, -1).Val()
-	wantWorkerKeys := []string{wkey}
-	if diff := cmp.Diff(wantWorkerKeys, gotWorkerKeys); diff != "" {
-		t.Errorf("%q contained %v, want %v", base.AllWorkers, gotWorkerKeys, wantWorkerKeys)
-	}
+	srvs, err := getServer(r.conn, &info)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(srvs))
+	assertServer(t, &info, srvs[0], ttl)
 }
 
 func TestWriteServerStateWithWorkers(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
 
 	var (
-		host     = "127.0.0.1"
-		pid      = 4242
-		serverID = "server123"
+		host = "127.0.0.1"
+		pid  = 4242
 
 		msg1 = h.NewTaskMessage("send_email", h.JSON(map[string]interface{}{"user_id": "123"}))
 		msg2 = h.NewTaskMessage("gen_thumbnail", h.JSON(map[string]interface{}{"path": "some/path/to/imgfile"}))
@@ -1909,7 +1682,7 @@ func TestWriteServerStateWithWorkers(t *testing.T) {
 			Type:    msg1.Type,
 			Queue:   msg1.Queue,
 			Payload: msg1.Payload,
-			Started: time.Now().Add(-10 * time.Second),
+			Started: now.Add(-10 * time.Second).Time,
 		},
 		{
 			Host:    host,
@@ -1918,18 +1691,18 @@ func TestWriteServerStateWithWorkers(t *testing.T) {
 			Type:    msg2.Type,
 			Queue:   msg2.Queue,
 			Payload: msg2.Payload,
-			Started: time.Now().Add(-2 * time.Minute),
+			Started: now.Add(-2 * time.Minute).Time,
 		},
 	}
 
 	serverInfo := base.ServerInfo{
 		Host:              host,
 		PID:               pid,
-		ServerID:          serverID,
+		ServerID:          "server123",
 		Concurrency:       10,
 		Queues:            map[string]int{"default": 2, "email": 5, "low": 1},
 		StrictPriority:    false,
-		Started:           time.Now().Add(-10 * time.Minute).UTC(),
+		Started:           now.Add(-10 * time.Minute).Time,
 		Status:            "active",
 		ActiveWorkerCount: len(workers),
 	}
@@ -1940,41 +1713,19 @@ func TestWriteServerStateWithWorkers(t *testing.T) {
 	}
 
 	// Check ServerInfo was written correctly.
-	skey := base.ServerInfoKey(host, pid, serverID)
-	data := r.client.Get(context.Background(), skey).Val()
-	got, err := base.DecodeServerInfo([]byte(data))
-	if err != nil {
-		t.Fatalf("could not decode server info: %v", err)
-	}
-	if diff := cmp.Diff(serverInfo, *got); diff != "" {
-		t.Errorf("persisted ServerInfo was %v, want %v; (-want,+got)\n%s",
-			got, serverInfo, diff)
-	}
-	// Check ServerInfo TTL was set correctly.
-	gotTTL := r.client.TTL(context.Background(), skey).Val()
-	if !cmp.Equal(ttl.Seconds(), gotTTL.Seconds(), cmpopts.EquateApprox(0, 1)) {
-		t.Errorf("TTL of %q was %v, want %v", skey, gotTTL, ttl)
-	}
-	// Check ServerInfo key was added to the set correctly.
-	gotServerKeys := r.client.ZRange(context.Background(), base.AllServers, 0, -1).Val()
-	wantServerKeys := []string{skey}
-	if diff := cmp.Diff(wantServerKeys, gotServerKeys); diff != "" {
-		t.Errorf("%q contained %v, want %v", base.AllServers, gotServerKeys, wantServerKeys)
-	}
+	srvs, err := getServer(r.conn, &serverInfo)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(srvs))
+	assertServer(t, &serverInfo, srvs[0], ttl)
 
 	// Check WorkersInfo was written correctly.
-	wkey := base.WorkersKey(host, pid, serverID)
-	wdata := r.client.HGetAll(context.Background(), wkey).Val()
-	if len(wdata) != 2 {
-		t.Fatalf("HGETALL %q returned a hash of size %d, want 2", wkey, len(wdata))
-	}
+	workerRows, err := getWorkers(r.conn, serverInfo.ServerID)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(workerRows))
+
 	var gotWorkers []*base.WorkerInfo
-	for _, val := range wdata {
-		w, err := base.DecodeWorkerInfo([]byte(val))
-		if err != nil {
-			t.Fatalf("could not unmarshal worker's data: %v", err)
-		}
-		gotWorkers = append(gotWorkers, w)
+	for _, w := range workerRows {
+		gotWorkers = append(gotWorkers, w.worker)
 	}
 	if diff := cmp.Diff(workers, gotWorkers, h.SortWorkerInfoOpt); diff != "" {
 		t.Errorf("persisted workers info was %v, want %v; (-want,+got)\n%s",
@@ -1982,21 +1733,20 @@ func TestWriteServerStateWithWorkers(t *testing.T) {
 	}
 
 	// Check WorkersInfo TTL was set correctly.
-	gotTTL = r.client.TTL(context.Background(), wkey).Val()
-	if !cmp.Equal(ttl.Seconds(), gotTTL.Seconds(), cmpopts.EquateApprox(0, 1)) {
-		t.Errorf("TTL of %q was %v, want %v", wkey, gotTTL, ttl)
-	}
-	// Check WorkersInfo key was added to the set correctly.
-	gotWorkerKeys := r.client.ZRange(context.Background(), base.AllWorkers, 0, -1).Val()
-	wantWorkerKeys := []string{wkey}
-	if diff := cmp.Diff(wantWorkerKeys, gotWorkerKeys); diff != "" {
-		t.Errorf("%q contained %v, want %v", base.AllWorkers, gotWorkerKeys, wantWorkerKeys)
+	expectExpireAt := now.Add(ttl).Unix()
+	for _, w := range workerRows {
+		if !cmp.Equal(expectExpireAt, w.expireAt, cmpopts.EquateApprox(0, 1)) {
+			t.Errorf("Expiration of %q was %v, want %v", w.taskUuid, expectExpireAt, w.expireAt)
+		}
 	}
 }
 
 func TestClearServerState(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
 
 	var (
 		host     = "127.0.0.1"
@@ -2021,7 +1771,7 @@ func TestClearServerState(t *testing.T) {
 			Type:    msg1.Type,
 			Queue:   msg1.Queue,
 			Payload: msg1.Payload,
-			Started: time.Now().Add(-10 * time.Second),
+			Started: now.Add(-10 * time.Second).Time,
 		},
 	}
 	serverInfo1 := base.ServerInfo{
@@ -2031,7 +1781,7 @@ func TestClearServerState(t *testing.T) {
 		Concurrency:       10,
 		Queues:            map[string]int{"default": 2, "email": 5, "low": 1},
 		StrictPriority:    false,
-		Started:           time.Now().Add(-10 * time.Minute),
+		Started:           now.Add(-10 * time.Minute).Time,
 		Status:            "active",
 		ActiveWorkerCount: len(workers1),
 	}
@@ -2044,7 +1794,7 @@ func TestClearServerState(t *testing.T) {
 			Type:    msg2.Type,
 			Queue:   msg2.Queue,
 			Payload: msg2.Payload,
-			Started: time.Now().Add(-30 * time.Second),
+			Started: now.Add(-30 * time.Second).Time,
 		},
 	}
 	serverInfo2 := base.ServerInfo{
@@ -2054,7 +1804,7 @@ func TestClearServerState(t *testing.T) {
 		Concurrency:       10,
 		Queues:            map[string]int{"default": 2, "email": 5, "low": 1},
 		StrictPriority:    false,
-		Started:           time.Now().Add(-15 * time.Minute),
+		Started:           now.Add(-15 * time.Minute).Time,
 		Status:            "active",
 		ActiveWorkerCount: len(workers2),
 	}
@@ -2063,45 +1813,49 @@ func TestClearServerState(t *testing.T) {
 	if err := r.WriteServerState(&serverInfo1, workers1, ttl); err != nil {
 		t.Fatalf("could not write server state: %v", err)
 	}
+	srvs1, err := getServer(r.conn, &serverInfo1)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(srvs1))
+
+	workerRows1, err := getWorkers(r.conn, serverInfo1.ServerID)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(workerRows1))
+
 	if err := r.WriteServerState(&serverInfo2, workers2, ttl); err != nil {
 		t.Fatalf("could not write server state: %v", err)
 	}
+	srvs2, err := getServer(r.conn, &serverInfo1)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(srvs2))
 
-	err := r.ClearServerState(host, pid, serverID)
-	if err != nil {
-		t.Fatalf("(*RDB).ClearServerState failed: %v", err)
-	}
+	workerRows2, err := getWorkers(r.conn, serverInfo2.ServerID)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(workerRows2))
 
-	skey := base.ServerInfoKey(host, pid, serverID)
-	wkey := base.WorkersKey(host, pid, serverID)
-	otherSKey := base.ServerInfoKey(otherHost, otherPID, otherServerID)
-	otherWKey := base.WorkersKey(otherHost, otherPID, otherServerID)
-	// Check all keys are cleared.
-	if r.client.Exists(context.Background(), skey).Val() != 0 {
-		t.Errorf("Redis key %q exists", skey)
-	}
-	if r.client.Exists(context.Background(), wkey).Val() != 0 {
-		t.Errorf("Redis key %q exists", wkey)
-	}
-	gotServerKeys := r.client.ZRange(context.Background(), base.AllServers, 0, -1).Val()
-	wantServerKeys := []string{otherSKey}
-	if diff := cmp.Diff(wantServerKeys, gotServerKeys); diff != "" {
-		t.Errorf("%q contained %v, want %v", base.AllServers, gotServerKeys, wantServerKeys)
-	}
-	gotWorkerKeys := r.client.ZRange(context.Background(), base.AllWorkers, 0, -1).Val()
-	wantWorkerKeys := []string{otherWKey}
-	if diff := cmp.Diff(wantWorkerKeys, gotWorkerKeys); diff != "" {
-		t.Errorf("%q contained %v, want %v", base.AllWorkers, gotWorkerKeys, wantWorkerKeys)
-	}
+	err = r.ClearServerState(host, pid, serverID)
+	require.NoError(t, err, "(*RQLite).ClearServerState failed")
+
+	srvs, err := listAllServers(r.conn)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(srvs))
+	require.Equal(t, otherServerID, srvs[0].sid)
+	require.Equal(t, otherPID, srvs[0].pid)
+
+	workerRows, err := listAllWorkers(r.conn)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(workerRows))
+	require.Equal(t, workers2[0].ID, workerRows[0].taskUuid)
+
 }
 
 func TestCancelationPubSub(t *testing.T) {
+
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
 	pubsub, err := r.CancelationPubSub()
 	if err != nil {
-		t.Fatalf("(*RDB).CancelationPubSub() returned an error: %v", err)
+		t.Fatalf("(*RQLite).CancelationPubSub() returned an error: %v", err)
 	}
 
 	cancelCh := pubsub.Channel()
@@ -2122,13 +1876,15 @@ func TestCancelationPubSub(t *testing.T) {
 	publish := []string{"one", "two", "three"}
 
 	for _, msg := range publish {
-		_ = r.PublishCancelation(msg)
+		err = r.PublishCancelation(msg)
+		require.NoError(t, err)
 	}
 
 	// allow for message to reach subscribers.
 	time.Sleep(time.Second)
 
-	_ = pubsub.Close()
+	err = pubsub.Close()
+	require.NoError(t, err)
 
 	mu.Lock()
 	if diff := cmp.Diff(publish, received, h.SortStringSliceOpt); diff != "" {

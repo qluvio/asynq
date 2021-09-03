@@ -12,13 +12,14 @@ import (
 	"github.com/google/go-cmp/cmp"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/rdb"
 )
 
 func TestRecoverer(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	rdbClient := rdb.NewRDB(r)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
 
 	t1 := h.NewTaskMessageWithQueue("task1", nil, "default")
 	t2 := h.NewTaskMessageWithQueue("task2", nil, "default")
@@ -222,15 +223,15 @@ func TestRecoverer(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)
-		h.SeedAllActiveQueues(t, r, tc.inProgress)
-		h.SeedAllDeadlines(t, r, tc.deadlines)
-		h.SeedAllRetryQueues(t, r, tc.retry)
-		h.SeedAllArchivedQueues(t, r, tc.archived)
+		ctx.FlushDB()
+		ctx.SeedAllActiveQueues(tc.inProgress)
+		ctx.SeedAllDeadlines(tc.deadlines)
+		ctx.SeedAllRetryQueues(tc.retry)
+		ctx.SeedAllArchivedQueues(tc.archived)
 
 		recoverer := newRecoverer(recovererParams{
 			logger:         testLogger,
-			broker:         rdbClient,
+			broker:         client.rdb,
 			queues:         []string{"default", "critical"},
 			interval:       1 * time.Second,
 			retryDelayFunc: func(n int, err error, task *Task) time.Duration { return 30 * time.Second },
@@ -244,20 +245,20 @@ func TestRecoverer(t *testing.T) {
 		recoverer.shutdown()
 
 		for qname, want := range tc.wantActive {
-			gotActive := h.GetActiveMessages(t, r, qname)
+			gotActive := ctx.GetActiveMessages(qname)
 			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
 				t.Errorf("%s; mismatch found in %q; (-want,+got)\n%s", tc.desc, base.ActiveKey(qname), diff)
 			}
 		}
 		for qname, want := range tc.wantDeadlines {
-			gotDeadlines := h.GetDeadlinesEntries(t, r, qname)
+			gotDeadlines := ctx.GetDeadlinesEntries(qname)
 			if diff := cmp.Diff(want, gotDeadlines, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("%s; mismatch found in %q; (-want,+got)\n%s", tc.desc, base.DeadlinesKey(qname), diff)
 			}
 		}
 		cmpOpt := h.EquateInt64Approx(2) // allow up to two-second difference in `LastFailedAt`
 		for qname, msgs := range tc.wantRetry {
-			gotRetry := h.GetRetryMessages(t, r, qname)
+			gotRetry := ctx.GetRetryMessages(qname)
 			var wantRetry []*base.TaskMessage // Note: construct message here since `LastFailedAt` is relative to each test run
 			for _, msg := range msgs {
 				wantRetry = append(wantRetry, h.TaskMessageAfterRetry(*msg, "context deadline exceeded", runTime))
@@ -267,7 +268,7 @@ func TestRecoverer(t *testing.T) {
 			}
 		}
 		for qname, msgs := range tc.wantArchived {
-			gotArchived := h.GetArchivedMessages(t, r, qname)
+			gotArchived := ctx.GetArchivedMessages(qname)
 			var wantArchived []*base.TaskMessage
 			for _, msg := range msgs {
 				wantArchived = append(wantArchived, h.TaskMessageWithError(*msg, "context deadline exceeded", runTime))

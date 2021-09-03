@@ -12,6 +12,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSchedulerRegister(t *testing.T) {
@@ -55,24 +56,34 @@ func TestSchedulerRegister(t *testing.T) {
 		},
 	}
 
-	r := setup(t)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	scheduler, ok := client.rdb.(base.Scheduler)
+	require.True(t, ok)
 
 	for _, tc := range tests {
-		scheduler := NewScheduler(getRedisConnOpt(t), nil)
-		if _, err := scheduler.Register(tc.cronspec, tc.task, tc.opts...); err != nil {
-			t.Fatal(err)
-		}
+		t.Run(tc.cronspec, func(t *testing.T) {
+			ctx.FlushDB()
+			scheduler := newScheduler(scheduler, nil)
+			if _, err := scheduler.Register(tc.cronspec, tc.task, tc.opts...); err != nil {
+				t.Fatal(err)
+			}
 
-		if err := scheduler.Start(); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(tc.wait)
-		scheduler.Shutdown()
+			if err := scheduler.Start(); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(tc.wait)
+			scheduler.Shutdown()
 
-		got := asynqtest.GetPendingMessages(t, r, tc.queue)
-		if diff := cmp.Diff(tc.want, got, asynqtest.IgnoreIDOpt); diff != "" {
-			t.Errorf("mismatch found in queue %q: (-want,+got)\n%s", tc.queue, diff)
-		}
+			got := ctx.GetPendingMessages(tc.queue)
+			if diff := cmp.Diff(tc.want, got, asynqtest.IgnoreIDOpt); diff != "" {
+				t.Errorf("mismatch found in queue %q: (-want,+got)\n%s", tc.queue, diff)
+			}
+		})
 	}
 }
 
@@ -130,27 +141,37 @@ func TestSchedulerUnregister(t *testing.T) {
 		},
 	}
 
-	r := setup(t)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	scheduler, ok := client.rdb.(base.Scheduler)
+	require.True(t, ok)
 
 	for _, tc := range tests {
-		scheduler := NewScheduler(getRedisConnOpt(t), nil)
-		entryID, err := scheduler.Register(tc.cronspec, tc.task, tc.opts...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := scheduler.Unregister(entryID); err != nil {
-			t.Fatal(err)
-		}
+		t.Run(tc.cronspec, func(t *testing.T) {
+			ctx.FlushDB()
+			scheduler := newScheduler(scheduler, nil)
+			entryID, err := scheduler.Register(tc.cronspec, tc.task, tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := scheduler.Unregister(entryID); err != nil {
+				t.Fatal(err)
+			}
 
-		if err := scheduler.Start(); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(tc.wait)
-		scheduler.Shutdown()
+			if err := scheduler.Start(); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(tc.wait)
+			scheduler.Shutdown()
 
-		got := asynqtest.GetPendingMessages(t, r, tc.queue)
-		if len(got) != 0 {
-			t.Errorf("%d tasks were enqueued, want zero", len(got))
-		}
+			got := ctx.GetPendingMessages(tc.queue)
+			if len(got) != 0 {
+				t.Errorf("%d tasks were enqueued, want zero", len(got))
+			}
+		})
 	}
 }

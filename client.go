@@ -15,6 +15,7 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/rdb"
+	"github.com/hibiken/asynq/internal/rqlite"
 )
 
 // A Client is responsible for scheduling tasks.
@@ -26,19 +27,45 @@ import (
 type Client struct {
 	mu   sync.Mutex
 	opts map[string][]Option
-	rdb  *rdb.RDB
+	rdb  base.Broker
+	loc  *time.Location
 }
 
-// NewClient returns a new Client instance given a redis connection option.
-func NewClient(r RedisConnOpt) *Client {
-	c, ok := r.MakeRedisClient().(redis.UniversalClient)
-	if !ok {
-		panic(fmt.Sprintf("asynq: unsupported RedisConnOpt type %T", r))
+// makeBroker returns a base.Broker instance given a client connection option.
+func makeBroker(r ClientConnOpt) (base.Broker, error) {
+	c := r.MakeClient()
+
+	switch cl := c.(type) {
+	case redis.UniversalClient:
+		return rdb.NewRDB(cl), nil
+	case *rqlite.RQLite:
+		return cl, nil
+	default:
+		return nil, errors.E("makeBroker", errors.Internal, fmt.Sprintf("asynq: unsupported ClientConnOpt type %T", r))
 	}
-	rdb := rdb.NewRDB(c)
+}
+
+func NewClientWithBroker(broker base.Broker) *Client {
 	return &Client{
 		opts: make(map[string][]Option),
-		rdb:  rdb,
+		rdb:  broker,
+	}
+}
+
+// NewClient returns a new Client instance given a client connection option.
+func NewClient(r ClientConnOpt, loc ...*time.Location) *Client {
+	broker, err := makeBroker(r)
+	if err != nil {
+		panic(err)
+	}
+	var l *time.Location
+	if len(loc) > 0 {
+		l = loc[0]
+	}
+	return &Client{
+		opts: make(map[string][]Option),
+		rdb:  broker,
+		loc:  l,
 	}
 }
 
@@ -196,7 +223,7 @@ func composeOptions(opts ...Option) (option, error) {
 	res := option{
 		retry:     defaultMaxRetry,
 		queue:     base.DefaultQueueName,
-		timeout:   0, // do not set to deafultTimeout here
+		timeout:   0, // do not set to defaultTimeout here
 		deadline:  time.Time{},
 		processAt: time.Now(),
 	}
@@ -263,7 +290,7 @@ func (c *Client) Close() error {
 //
 // The argument opts specifies the behavior of task processing.
 // If there are conflicting Option values the last one overrides others.
-// By deafult, max retry is set to 25 and timeout is set to 30 minutes.
+// By default, max retry is set to 25 and timeout is set to 30 minutes.
 //
 // If no ProcessAt or ProcessIn options are provided, the task will be pending immediately.
 func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
@@ -309,6 +336,9 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 	var state base.TaskState
 	if opt.processAt.Before(now) || opt.processAt.Equal(now) {
 		opt.processAt = now
+		if c.loc != nil {
+			opt.processAt = now.In(c.loc)
+		}
 		err = c.enqueue(msg, opt.uniqueTTL)
 		state = base.TaskStatePending
 	} else {

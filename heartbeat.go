@@ -115,7 +115,7 @@ func (h *heartbeater) start(wg *sync.WaitGroup) {
 		for {
 			select {
 			case <-h.done:
-				h.broker.ClearServerState(h.host, h.pid, h.serverID)
+				_ = h.broker.ClearServerState(h.host, h.pid, h.serverID)
 				h.logger.Debug("Heartbeater done")
 				timer.Stop()
 				return

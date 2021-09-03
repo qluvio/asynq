@@ -12,17 +12,19 @@ import (
 	"github.com/google/go-cmp/cmp"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/rdb"
 )
 
 func TestForwarder(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	rdbClient := rdb.NewRDB(r)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
 	const pollInterval = time.Second
 	s := newForwarder(forwarderParams{
 		logger:   testLogger,
-		broker:   rdbClient,
+		broker:   client.rdb,
 		queues:   []string{"default", "critical"},
 		interval: pollInterval,
 	})
@@ -103,10 +105,10 @@ func TestForwarder(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)                                  // clean up db before each test case.
-		h.SeedAllScheduledQueues(t, r, tc.initScheduled) // initialize scheduled queue
-		h.SeedAllRetryQueues(t, r, tc.initRetry)         // initialize retry queue
-		h.SeedAllPendingQueues(t, r, tc.initPending)     // initialize default queue
+		ctx.FlushDB()                                // clean up db before each test case.
+		ctx.SeedAllScheduledQueues(tc.initScheduled) // initialize scheduled queue
+		ctx.SeedAllRetryQueues(tc.initRetry)         // initialize retry queue
+		ctx.SeedAllPendingQueues(tc.initPending)     // initialize default queue
 
 		var wg sync.WaitGroup
 		s.start(&wg)
@@ -114,21 +116,21 @@ func TestForwarder(t *testing.T) {
 		s.shutdown()
 
 		for qname, want := range tc.wantScheduled {
-			gotScheduled := h.GetScheduledMessages(t, r, qname)
+			gotScheduled := ctx.GetScheduledMessages(qname)
 			if diff := cmp.Diff(want, gotScheduled, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q after running forwarder: (-want, +got)\n%s", base.ScheduledKey(qname), diff)
 			}
 		}
 
 		for qname, want := range tc.wantRetry {
-			gotRetry := h.GetRetryMessages(t, r, qname)
+			gotRetry := ctx.GetRetryMessages(qname)
 			if diff := cmp.Diff(want, gotRetry, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q after running forwarder: (-want, +got)\n%s", base.RetryKey(qname), diff)
 			}
 		}
 
 		for qname, want := range tc.wantPending {
-			gotPending := h.GetPendingMessages(t, r, qname)
+			gotPending := ctx.GetPendingMessages(qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q after running forwarder: (-want, +got)\n%s", base.PendingKey(qname), diff)
 			}

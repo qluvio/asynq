@@ -10,14 +10,15 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/rdb"
 	"github.com/hibiken/asynq/internal/testbroker"
 )
 
 func TestSubscriber(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	rdbClient := rdb.NewRDB(r)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
 
 	tests := []struct {
 		registeredID string // ID for which cancel func is registered
@@ -29,44 +30,47 @@ func TestSubscriber(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		var mu sync.Mutex
-		called := false
-		fakeCancelFunc := func() {
-			mu.Lock()
-			defer mu.Unlock()
-			called = true
-		}
-		cancelations := base.NewCancelations()
-		cancelations.Add(tc.registeredID, fakeCancelFunc)
-
-		subscriber := newSubscriber(subscriberParams{
-			logger:       testLogger,
-			broker:       rdbClient,
-			cancelations: cancelations,
-		})
-		var wg sync.WaitGroup
-		subscriber.start(&wg)
-		defer subscriber.shutdown()
-
-		// wait for subscriber to establish connection to pubsub channel
-		time.Sleep(time.Second)
-
-		if err := rdbClient.PublishCancelation(tc.publishID); err != nil {
-			t.Fatalf("could not publish cancelation message: %v", err)
-		}
-
-		// wait for redis to publish message
-		time.Sleep(time.Second)
-
-		mu.Lock()
-		if called != tc.wantCalled {
-			if tc.wantCalled {
-				t.Errorf("fakeCancelFunc was not called, want the function to be called")
-			} else {
-				t.Errorf("fakeCancelFunc was called, want the function to not be called")
+		t.Run(tc.registeredID, func(t *testing.T) {
+			ctx.FlushDB()
+			var mu sync.Mutex
+			called := false
+			fakeCancelFunc := func() {
+				mu.Lock()
+				defer mu.Unlock()
+				called = true
 			}
-		}
-		mu.Unlock()
+			cancelations := base.NewCancelations()
+			cancelations.Add(tc.registeredID, fakeCancelFunc)
+
+			subscriber := newSubscriber(subscriberParams{
+				logger:       testLogger,
+				broker:       client.rdb,
+				cancelations: cancelations,
+			})
+			var wg sync.WaitGroup
+			subscriber.start(&wg)
+			defer subscriber.shutdown()
+
+			// wait for subscriber to establish connection to pubsub channel
+			time.Sleep(time.Second)
+
+			if err := client.rdb.PublishCancelation(tc.publishID); err != nil {
+				t.Fatalf("could not publish cancelation message: %v", err)
+			}
+
+			// wait for redis to publish message
+			time.Sleep(time.Second)
+
+			mu.Lock()
+			if called != tc.wantCalled {
+				if tc.wantCalled {
+					t.Errorf("fakeCancelFunc was not called, want the function to be called")
+				} else {
+					t.Errorf("fakeCancelFunc was called, want the function to not be called")
+				}
+			}
+			mu.Unlock()
+		})
 	}
 }
 
@@ -76,9 +80,11 @@ func TestSubscriberWithRedisDown(t *testing.T) {
 			t.Errorf("panic occurred: %v", r)
 		}
 	}()
-	r := rdb.NewRDB(setup(t))
-	defer r.Close()
-	testBroker := testbroker.NewTestBroker(r)
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	testBroker := testbroker.NewTestBroker(client.rdb)
 
 	cancelations := base.NewCancelations()
 	subscriber := newSubscriber(subscriberParams{
@@ -110,7 +116,7 @@ func TestSubscriberWithRedisDown(t *testing.T) {
 		called = true
 	})
 
-	if err := r.PublishCancelation(id); err != nil {
+	if err := client.rdb.PublishCancelation(id); err != nil {
 		t.Fatalf("could not publish cancelation message: %v", err)
 	}
 

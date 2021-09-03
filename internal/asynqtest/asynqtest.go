@@ -446,3 +446,8 @@ func getMessagesFromZSetWithScores(tb testing.TB, r redis.UniversalClient,
 	}
 	return res
 }
+
+func GetUniqueKeyTTL(r redis.UniversalClient,
+	qname string, taskType string, taskPayload []byte) time.Duration {
+	return r.TTL(context.Background(), base.UniqueKey(qname, taskType, taskPayload)).Val()
+}

@@ -12,7 +12,6 @@ import (
 
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/rdb"
 )
 
 func TestSyncer(t *testing.T) {
@@ -21,10 +20,13 @@ func TestSyncer(t *testing.T) {
 		h.NewTaskMessage("reindex", nil),
 		h.NewTaskMessage("gen_thumbnail", nil),
 	}
-	r := setup(t)
-	defer r.Close()
-	rdbClient := rdb.NewRDB(r)
-	h.SeedActiveQueue(t, r, inProgress, base.DefaultQueueName)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	ctx.SeedActiveQueue(inProgress, base.DefaultQueueName)
 
 	const interval = time.Second
 	syncRequestCh := make(chan *syncRequest)
@@ -41,7 +43,7 @@ func TestSyncer(t *testing.T) {
 		m := msg
 		syncRequestCh <- &syncRequest{
 			fn: func() error {
-				return rdbClient.Done(m)
+				return client.rdb.Done(m)
 			},
 			deadline: time.Now().Add(5 * time.Minute),
 		}
@@ -49,7 +51,7 @@ func TestSyncer(t *testing.T) {
 
 	time.Sleep(2 * interval) // ensure that syncer runs at least once
 
-	gotActive := h.GetActiveMessages(t, r, base.DefaultQueueName)
+	gotActive := ctx.GetActiveMessages(base.DefaultQueueName)
 	if l := len(gotActive); l != 0 {
 		t.Errorf("%q has length %d; want 0", base.ActiveKey(base.DefaultQueueName), l)
 	}

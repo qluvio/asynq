@@ -16,7 +16,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/rdb"
 )
 
 // fakeHeartbeater receives from starting and finished channels and do nothing.
@@ -43,9 +42,11 @@ func fakeSyncer(syncCh <-chan *syncRequest, done <-chan struct{}) {
 }
 
 func TestProcessorSuccessWithSingleQueue(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	rdbClient := rdb.NewRDB(r)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
 
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
@@ -75,8 +76,8 @@ func TestProcessorSuccessWithSingleQueue(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)                                             // clean up db before each test case.
-		h.SeedPendingQueue(t, r, tc.pending, base.DefaultQueueName) // initialize default queue.
+		ctx.FlushDB()                                           // clean up db before each test case.
+		ctx.SeedPendingQueue(tc.pending, base.DefaultQueueName) // initialize default queue.
 
 		// instantiate a new processor
 		var mu sync.Mutex
@@ -96,7 +97,7 @@ func TestProcessorSuccessWithSingleQueue(t *testing.T) {
 		go fakeSyncer(syncCh, done)
 		p := newProcessor(processorParams{
 			logger:          testLogger,
-			broker:          rdbClient,
+			broker:          client.rdb,
 			retryDelayFunc:  DefaultRetryDelayFunc,
 			isFailureFunc:   defaultIsFailureFunc,
 			syncCh:          syncCh,
@@ -113,15 +114,16 @@ func TestProcessorSuccessWithSingleQueue(t *testing.T) {
 
 		p.start(&sync.WaitGroup{})
 		for _, msg := range tc.incoming {
-			err := rdbClient.Enqueue(msg)
+			err := client.rdb.Enqueue(msg)
 			if err != nil {
 				p.shutdown()
 				t.Fatal(err)
 			}
 		}
 		time.Sleep(2 * time.Second) // wait for two second to allow all pending tasks to be processed.
-		if l := r.LLen(context.Background(), base.ActiveKey(base.DefaultQueueName)).Val(); l != 0 {
-			t.Errorf("%q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), l)
+		active := ctx.GetActiveMessages(base.DefaultQueueName)
+		if len(active) != 0 {
+			t.Errorf("%q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), len(active))
 		}
 		p.shutdown()
 
@@ -135,8 +137,8 @@ func TestProcessorSuccessWithSingleQueue(t *testing.T) {
 
 func TestProcessorSuccessWithMultipleQueues(t *testing.T) {
 	var (
-		r         = setup(t)
-		rdbClient = rdb.NewRDB(r)
+		ctx    = setupTestContext(t)
+		client = NewClient(getClientConnOpt(t))
 
 		m1 = h.NewTaskMessage("task1", nil)
 		m2 = h.NewTaskMessage("task2", nil)
@@ -148,7 +150,8 @@ func TestProcessorSuccessWithMultipleQueues(t *testing.T) {
 		t3 = NewTask(m3.Type, m3.Payload)
 		t4 = NewTask(m4.Type, m4.Payload)
 	)
-	defer r.Close()
+	defer func() { _ = ctx.Close() }()
+	defer func() { _ = client.Close() }()
 
 	tests := []struct {
 		pending       map[string][]*base.TaskMessage
@@ -168,8 +171,8 @@ func TestProcessorSuccessWithMultipleQueues(t *testing.T) {
 
 	for _, tc := range tests {
 		// Set up test case.
-		h.FlushDB(t, r)
-		h.SeedAllPendingQueues(t, r, tc.pending)
+		ctx.FlushDB()
+		ctx.SeedAllPendingQueues(tc.pending)
 
 		// Instantiate a new processor.
 		var mu sync.Mutex
@@ -189,7 +192,7 @@ func TestProcessorSuccessWithMultipleQueues(t *testing.T) {
 		go fakeSyncer(syncCh, done)
 		p := newProcessor(processorParams{
 			logger:         testLogger,
-			broker:         rdbClient,
+			broker:         client.rdb,
 			retryDelayFunc: DefaultRetryDelayFunc,
 			isFailureFunc:  defaultIsFailureFunc,
 			syncCh:         syncCh,
@@ -213,8 +216,9 @@ func TestProcessorSuccessWithMultipleQueues(t *testing.T) {
 		time.Sleep(2 * time.Second)
 		// Make sure no messages are stuck in active list.
 		for _, qname := range tc.queues {
-			if l := r.LLen(context.Background(), base.ActiveKey(qname)).Val(); l != 0 {
-				t.Errorf("%q has %d tasks, want 0", base.ActiveKey(qname), l)
+			active := ctx.GetActiveMessages(qname)
+			if len(active) != 0 {
+				t.Errorf("%q has %d tasks, want 0", base.ActiveKey(qname), len(active))
 			}
 		}
 		p.shutdown()
@@ -229,9 +233,11 @@ func TestProcessorSuccessWithMultipleQueues(t *testing.T) {
 
 // https://github.com/hibiken/asynq/issues/166
 func TestProcessTasksWithLargeNumberInPayload(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	rdbClient := rdb.NewRDB(r)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
 
 	m1 := h.NewTaskMessage("large_number", h.JSON(map[string]interface{}{"data": 111111111111111111}))
 	t1 := NewTask(m1.Type, m1.Payload)
@@ -247,8 +253,8 @@ func TestProcessTasksWithLargeNumberInPayload(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)                                             // clean up db before each test case.
-		h.SeedPendingQueue(t, r, tc.pending, base.DefaultQueueName) // initialize default queue.
+		ctx.FlushDB()                                           // clean up db before each test case.
+		ctx.SeedPendingQueue(tc.pending, base.DefaultQueueName) // initialize default queue.
 
 		var mu sync.Mutex
 		var processed []*Task
@@ -276,7 +282,7 @@ func TestProcessTasksWithLargeNumberInPayload(t *testing.T) {
 		go fakeSyncer(syncCh, done)
 		p := newProcessor(processorParams{
 			logger:          testLogger,
-			broker:          rdbClient,
+			broker:          client.rdb,
 			retryDelayFunc:  DefaultRetryDelayFunc,
 			isFailureFunc:   defaultIsFailureFunc,
 			syncCh:          syncCh,
@@ -293,8 +299,9 @@ func TestProcessTasksWithLargeNumberInPayload(t *testing.T) {
 
 		p.start(&sync.WaitGroup{})
 		time.Sleep(2 * time.Second) // wait for two second to allow all pending tasks to be processed.
-		if l := r.LLen(context.Background(), base.ActiveKey(base.DefaultQueueName)).Val(); l != 0 {
-			t.Errorf("%q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), l)
+		active := ctx.GetActiveMessages(base.DefaultQueueName)
+		if len(active) != 0 {
+			t.Errorf("%q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), len(active))
 		}
 		p.shutdown()
 
@@ -307,9 +314,11 @@ func TestProcessTasksWithLargeNumberInPayload(t *testing.T) {
 }
 
 func TestProcessorRetry(t *testing.T) {
-	r := setup(t)
-	defer r.Close()
-	rdbClient := rdb.NewRDB(r)
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
 
 	m1 := h.NewTaskMessage("send_email", nil)
 	m1.Retried = m1.Retry // m1 has reached its max retry count
@@ -373,8 +382,8 @@ func TestProcessorRetry(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r)                                             // clean up db before each test case.
-		h.SeedPendingQueue(t, r, tc.pending, base.DefaultQueueName) // initialize default queue.
+		ctx.FlushDB()                                           // clean up db before each test case.
+		ctx.SeedPendingQueue(tc.pending, base.DefaultQueueName) // initialize default queue.
 
 		// instantiate a new processor
 		delayFunc := func(n int, e error, t *Task) time.Duration {
@@ -396,7 +405,7 @@ func TestProcessorRetry(t *testing.T) {
 		go fakeHeartbeater(starting, finished, done)
 		p := newProcessor(processorParams{
 			logger:          testLogger,
-			broker:          rdbClient,
+			broker:          client.rdb,
 			retryDelayFunc:  delayFunc,
 			isFailureFunc:   defaultIsFailureFunc,
 			syncCh:          nil,
@@ -417,7 +426,7 @@ func TestProcessorRetry(t *testing.T) {
 		p.shutdown()
 
 		cmpOpt := h.EquateInt64Approx(int64(tc.wait.Seconds())) // allow up to a wait-second difference in zset score
-		gotRetry := h.GetRetryEntries(t, r, base.DefaultQueueName)
+		gotRetry := ctx.GetRetryEntries(base.DefaultQueueName)
 		var wantRetry []base.Z // Note: construct wantRetry here since `LastFailedAt` and ZSCORE is relative to each test run.
 		for _, msg := range tc.wantRetry {
 			wantRetry = append(wantRetry,
@@ -430,7 +439,7 @@ func TestProcessorRetry(t *testing.T) {
 			t.Errorf("%s: mismatch found in %q after running processor; (-want, +got)\n%s", tc.desc, base.RetryKey(base.DefaultQueueName), diff)
 		}
 
-		gotArchived := h.GetArchivedEntries(t, r, base.DefaultQueueName)
+		gotArchived := ctx.GetArchivedEntries(base.DefaultQueueName)
 		var wantArchived []base.Z // Note: construct wantArchived here since `LastFailedAt` and ZSCORE is relative to each test run.
 		for _, msg := range tc.wantArchived {
 			wantArchived = append(wantArchived,
@@ -443,8 +452,9 @@ func TestProcessorRetry(t *testing.T) {
 			t.Errorf("%s: mismatch found in %q after running processor; (-want, +got)\n%s", tc.desc, base.ArchivedKey(base.DefaultQueueName), diff)
 		}
 
-		if l := r.LLen(context.Background(), base.ActiveKey(base.DefaultQueueName)).Val(); l != 0 {
-			t.Errorf("%s: %q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), tc.desc, l)
+		active := ctx.GetActiveMessages(base.DefaultQueueName)
+		if len(active) != 0 {
+			t.Errorf("%s: %q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), tc.desc, len(active))
 		}
 
 		if n != tc.wantErrCount {
@@ -511,9 +521,8 @@ func TestProcessorQueues(t *testing.T) {
 
 func TestProcessorWithStrictPriority(t *testing.T) {
 	var (
-		r = setup(t)
-
-		rdbClient = rdb.NewRDB(r)
+		ctx    = setupTestContext(t)
+		client = NewClient(getClientConnOpt(t))
 
 		m1 = h.NewTaskMessageWithQueue("task1", nil, "critical")
 		m2 = h.NewTaskMessageWithQueue("task2", nil, "critical")
@@ -531,7 +540,8 @@ func TestProcessorWithStrictPriority(t *testing.T) {
 		t6 = NewTask(m6.Type, m6.Payload)
 		t7 = NewTask(m7.Type, m7.Payload)
 	)
-	defer r.Close()
+	defer func() { _ = ctx.Close() }()
+	defer func() { _ = client.Close() }()
 
 	tests := []struct {
 		pending       map[string][]*base.TaskMessage // initial queues state
@@ -552,9 +562,9 @@ func TestProcessorWithStrictPriority(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		h.FlushDB(t, r) // clean up db before each test case.
+		ctx.FlushDB() // clean up db before each test case.
 		for qname, msgs := range tc.pending {
-			h.SeedPendingQueue(t, r, msgs, qname)
+			ctx.SeedPendingQueue(msgs, qname)
 		}
 
 		// instantiate a new processor
@@ -580,7 +590,7 @@ func TestProcessorWithStrictPriority(t *testing.T) {
 		go fakeSyncer(syncCh, done)
 		p := newProcessor(processorParams{
 			logger:          testLogger,
-			broker:          rdbClient,
+			broker:          client.rdb,
 			retryDelayFunc:  DefaultRetryDelayFunc,
 			isFailureFunc:   defaultIsFailureFunc,
 			syncCh:          syncCh,
@@ -599,8 +609,9 @@ func TestProcessorWithStrictPriority(t *testing.T) {
 		time.Sleep(tc.wait)
 		// Make sure no tasks are stuck in active list.
 		for _, qname := range tc.queues {
-			if l := r.LLen(context.Background(), base.ActiveKey(qname)).Val(); l != 0 {
-				t.Errorf("%q has %d tasks, want 0", base.ActiveKey(qname), l)
+			active := ctx.GetActiveMessages(qname)
+			if len(active) != 0 {
+				t.Errorf("%q has %d tasks, want 0", base.ActiveKey(qname), len(active))
 			}
 		}
 		p.shutdown()
