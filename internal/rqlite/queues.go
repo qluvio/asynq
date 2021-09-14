@@ -16,18 +16,18 @@ type queueRow struct {
 	state     string
 }
 
-func ensureQueueStatement(queue string) string {
-	return fmt.Sprintf(
-		"INSERT INTO "+QueuesTable+" (queue_name, state) VALUES('%s', 'active') "+
+func ensureQueueStatement(queue string) *gorqlite.Statement {
+	return Statement(
+		"INSERT INTO "+QueuesTable+" (queue_name, state) VALUES(?, 'active') "+
 			" ON CONFLICT(queue_name) DO NOTHING;",
 		queue)
 }
 
 func EnsureQueue(conn *gorqlite.Connection, queue string) error {
 	st := ensureQueueStatement(queue)
-	res, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return NewRqliteWError("EnsureQueue", res, err, st)
+		return NewRqliteWError("EnsureQueue", wrs[0], err, st)
 	}
 	return nil
 }
@@ -35,13 +35,14 @@ func EnsureQueue(conn *gorqlite.Connection, queue string) error {
 func GetQueue(conn *gorqlite.Connection, qname string) (*queueRow, error) {
 	var op errors.Op = "getQueue"
 
-	st := fmt.Sprintf(
-		"SELECT queue_name,state FROM "+QueuesTable+" WHERE queue_name='%s'",
+	st := Statement(
+		"SELECT queue_name,state FROM "+QueuesTable+" WHERE queue_name=?",
 		qname)
-	res, err := conn.QueryOne(st)
+	qrs, err := conn.Queries(st)
 	if err != nil {
-		return nil, NewRqliteRError("getQueue", res, err, st)
+		return nil, NewRqliteRError("getQueue", qrs[0], err, st)
 	}
+	res := qrs[0]
 	if res.NumRows() > 1 {
 		return nil, errors.E(op, fmt.Sprintf("multiple queues: [%s], res: %v", qname, res))
 	}
@@ -64,53 +65,53 @@ func pauseQueue(conn *gorqlite.Connection, queue string, b bool) error {
 	if !b {
 		val = active
 	}
-	st := fmt.Sprintf("UPDATE "+QueuesTable+" SET state='%s' "+
-		" WHERE queue_name='%s' AND state!='%s' ",
+	st := Statement("UPDATE "+QueuesTable+" SET state=? "+
+		" WHERE queue_name=? AND state!=? ",
 		val,
 		queue,
 		val)
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return NewRqliteWError(op, wr, err, st)
+		return NewRqliteWError(op, wrs[0], err, st)
 	}
-	switch wr.RowsAffected {
+	switch wrs[0].RowsAffected {
 	case 1:
 		return nil
 	case 0:
 		return errors.E(op, errors.NotFound, fmt.Sprintf("queue %v not changed to %s", queue, val))
 	default:
-		return errors.E(op, errors.Internal, fmt.Sprintf("queue %v:%d rows changed to %s", queue, wr.RowsAffected, val))
+		return errors.E(op, errors.Internal, fmt.Sprintf("queue %v:%d rows changed to %s", queue, wrs[0].RowsAffected, val))
 	}
 }
 
 func removeQueue(conn *gorqlite.Connection, queue string, force bool) (int64, error) {
 	op := errors.Op("removeQueue")
 
-	st := fmt.Sprintf(
+	st := Statement(
 		"DELETE FROM "+QueuesTable+
-			" WHERE queue_name='%s' AND (SELECT COUNT(*) FROM "+TasksTable+
-			" WHERE "+TasksTable+".queue_name='%s')=0",
+			" WHERE queue_name=? AND (SELECT COUNT(*) FROM "+TasksTable+
+			" WHERE "+TasksTable+".queue_name=?)=0",
 		queue,
 		queue)
 	if force {
-		st = fmt.Sprintf(
+		st = Statement(
 			"DELETE FROM "+QueuesTable+
-				" WHERE queue_name='%s' AND (SELECT COUNT(*) FROM "+TasksTable+
-				" WHERE "+TasksTable+".queue_name='%s' AND "+TasksTable+".state='active')=0",
+				" WHERE queue_name=? AND (SELECT COUNT(*) FROM "+TasksTable+
+				" WHERE "+TasksTable+".queue_name=? AND "+TasksTable+".state='active')=0",
 			queue,
 			queue)
 	}
-	stmts := []string{
+	stmts := []*gorqlite.Statement{
 		st,
-		fmt.Sprintf(
+		Statement(
 			"DELETE FROM "+TasksTable+
-				" WHERE queue_name='%s' AND NOT EXISTS (SELECT queue_name FROM "+QueuesTable+
-				" WHERE "+QueuesTable+".queue_name='%s')",
+				" WHERE queue_name=? AND NOT EXISTS (SELECT queue_name FROM "+QueuesTable+
+				" WHERE "+QueuesTable+".queue_name=?)",
 			queue,
 			queue),
 	}
 
-	wrs, err := conn.Write(stmts)
+	wrs, err := conn.Writes(stmts...)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, stmts)
 	}
@@ -118,7 +119,7 @@ func removeQueue(conn *gorqlite.Connection, queue string, force bool) (int64, er
 	ret := wrs[0].RowsAffected
 	if ret > 1 {
 		// something really wrong there
-		return ret, errors.E(op, "multiple rows updated ("+st+")")
+		return ret, errors.E(op, "multiple rows updated ("+st.String()+")")
 	}
 	// enforce conventional return values for inspector
 	if ret == 0 {
@@ -135,17 +136,18 @@ func removeQueue(conn *gorqlite.Connection, queue string, force bool) (int64, er
 
 func listQueues(conn *gorqlite.Connection, queue ...string) ([]*queueRow, error) {
 	op := errors.Op("listQueues")
-	st := "SELECT queue_name, state " +
-		" FROM " + QueuesTable
+	st := Statement("SELECT queue_name, state " +
+		" FROM " + QueuesTable + " ")
 	if len(queue) > 0 {
-		st += fmt.Sprintf(" WHERE queue_name='%s' ", queue[0])
+		st = st.Append(" WHERE queue_name=? ", queue[0])
 	}
 
-	qr, err := conn.QueryOne(st)
+	qrs, err := conn.Queries(st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qr, err, st)
+		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
 
+	qr := qrs[0]
 	// no row
 	if qr.NumRows() == 0 {
 		return nil, nil
@@ -167,16 +169,16 @@ func listQueues(conn *gorqlite.Connection, queue ...string) ([]*queueRow, error)
 
 func currentStats(conn *gorqlite.Connection, queue string) (*base.Stats, error) {
 	op := errors.Op("currentStats")
-	stmts := []string{
-		fmt.Sprintf(
+	stmts := []*gorqlite.Statement{
+		Statement(
 			"SELECT queue_name, state "+
-				" FROM "+QueuesTable+" WHERE queue_name='%s' ", queue),
-		fmt.Sprintf(
+				" FROM "+QueuesTable+" WHERE queue_name=? ", queue),
+		Statement(
 			"SELECT ndx, queue_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at "+
 				" FROM "+TasksTable+
-				" WHERE queue_name='%s' ", queue),
+				" WHERE queue_name=? ", queue),
 	}
-	qrs, err := conn.Query(stmts)
+	qrs, err := conn.Queries(stmts...)
 	if err != nil {
 		return nil, NewRqliteRsError(op, qrs, err, stmts)
 	}
@@ -241,7 +243,7 @@ func historicalStats(conn *gorqlite.Connection, queue string, ndays int) ([]*bas
 	op := errors.Op("historicalStats")
 	const day = 24 * time.Hour
 
-	stmts := make([]string, 0, ndays*3)
+	stmts := make([]*gorqlite.Statement, 0, ndays*3)
 	now := utc.Now()
 	last := now.Unix()
 
@@ -249,30 +251,30 @@ func historicalStats(conn *gorqlite.Connection, queue string, ndays int) ([]*bas
 		first := now.Add(-time.Duration(i+1) * day).Unix()
 
 		// processed
-		stmts = append(stmts, fmt.Sprintf("SELECT COUNT(*) "+
+		stmts = append(stmts, Statement("SELECT COUNT(*) "+
 			" FROM "+TasksTable+
-			" WHERE queue_name='%s' AND state='processed' AND done_at>%d AND done_at<=%d",
+			" WHERE queue_name=? AND state='processed' AND done_at>? AND done_at<=?",
 			queue,
 			first,
 			last))
 		// retry/failed
-		stmts = append(stmts, fmt.Sprintf("SELECT COUNT(*) "+
+		stmts = append(stmts, Statement("SELECT COUNT(*) "+
 			" FROM "+TasksTable+
-			" WHERE queue_name='%s' AND state='retry' AND failed=true AND done_at>%d AND done_at<=%d",
+			" WHERE queue_name=? AND state='retry' AND failed=true AND done_at>? AND done_at<=?",
 			queue,
 			first,
 			last))
 		// archived/failed
-		stmts = append(stmts, fmt.Sprintf("SELECT COUNT(*) "+
+		stmts = append(stmts, Statement("SELECT COUNT(*) "+
 			" FROM "+TasksTable+
-			" WHERE queue_name='%s' AND state='archived' AND failed=true AND archived_at>%d AND archived_at<=%d",
+			" WHERE queue_name=? AND state='archived' AND failed=true AND archived_at>? AND archived_at<=?",
 			queue,
 			first,
 			last))
 		last = first
 	}
 
-	qrs, err := conn.Query(stmts)
+	qrs, err := conn.Queries(stmts...)
 	if err != nil {
 		return nil, NewRqliteRsError(op, qrs, err, stmts)
 	}

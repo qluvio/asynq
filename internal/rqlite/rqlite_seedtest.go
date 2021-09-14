@@ -1,12 +1,12 @@
 package rqlite
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/rqlite/gorqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,7 +45,7 @@ func seedDeadlines(tb testing.TB, r *RQLite, deadlines []base.Z, qname string, u
 		count, err := getTaskCount(
 			r.conn,
 			qname,
-			fmt.Sprintf("task_uuid='%s'", msg.Message.ID.String()))
+			"task_uuid", msg.Message.ID.String())
 		require.NoError(tb, err)
 
 		if count == 0 {
@@ -58,12 +58,12 @@ func seedDeadlines(tb testing.TB, r *RQLite, deadlines []base.Z, qname string, u
 		}
 
 		deadline := msg.Score
-		st := fmt.Sprintf(
-			"UPDATE "+TasksTable+" SET deadline=%d WHERE task_uuid='%s'",
+		st := Statement(
+			"UPDATE "+TasksTable+" SET deadline=? WHERE task_uuid=?",
 			deadline,
 			msg.Message.ID.String())
-		wr, err := r.conn.WriteOne(st)
-		require.NoError(tb, err, "error %v", wr.Err)
+		wrs, err := r.conn.Writes(st)
+		require.NoError(tb, err, "error %v", wrs[0].Err)
 	}
 }
 
@@ -96,12 +96,12 @@ func SeedActiveQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname s
 		//}
 		//require.NoError(tb, err)
 
-		st := fmt.Sprintf(
-			"UPDATE "+TasksTable+" SET state='active' WHERE task_uuid='%s'",
+		st := Statement(
+			"UPDATE "+TasksTable+" SET state='active' WHERE task_uuid=?",
 			msg.ID.String())
-		wr, err := r.conn.WriteOne(st)
-		require.Equal(tb, int64(1), wr.RowsAffected)
-		require.NoError(tb, err, "error %v", wr.Err)
+		wrs, err := r.conn.Writes(st)
+		require.Equal(tb, int64(1), wrs[0].RowsAffected)
+		require.NoError(tb, err, "error %v", wrs[0].Err)
 	}
 }
 
@@ -131,12 +131,12 @@ func SeedRetryQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 		require.NoError(tb, err)
 
 		retryAt := msg.Score
-		st := fmt.Sprintf(
-			"UPDATE "+TasksTable+" SET state='retry', retry_at=%d WHERE task_uuid='%s'",
+		st := Statement(
+			"UPDATE "+TasksTable+" SET state='retry', retry_at=? WHERE task_uuid=?",
 			retryAt,
 			msg.Message.ID.String())
-		wr, err := r.conn.WriteOne(st)
-		require.NoError(tb, err, "error %v", wr.Err)
+		wrs, err := r.conn.Writes(st)
+		require.NoError(tb, err, "error %v", wrs[0].Err)
 	}
 }
 
@@ -166,12 +166,12 @@ func SeedArchivedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 		require.NoError(tb, err)
 
 		deadline := msg.Score
-		st := fmt.Sprintf(
-			"UPDATE "+TasksTable+" SET state='archived', archived_at=%d WHERE task_uuid='%s'",
+		st := Statement(
+			"UPDATE "+TasksTable+" SET state='archived', archived_at=? WHERE task_uuid=?",
 			deadline,
 			msg.Message.ID.String())
-		wr, err := r.conn.WriteOne(st)
-		require.NoError(tb, err, "error %v", wr.Err)
+		wrs, err := r.conn.Writes(st)
+		require.NoError(tb, err, "error %v", wrs[0].Err)
 
 		require.NoError(tb, err)
 
@@ -222,32 +222,33 @@ func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneA
 	err := EnsureQueue(r.conn, qname)
 	require.NoError(tb, err)
 
-	stmts := make([]string, 0, count)
+	stmts := make([]*gorqlite.Statement, 0, count)
 	for i := 0; i < count; i++ {
 
 		task := h.NewTaskMessage("", nil)
-		st, err := encodeMessage(task)
+		em, err := encodeMessage(task)
 		require.NoError(tb, err)
+		var st *gorqlite.Statement
 		if !failed {
-			st = fmt.Sprintf(
+			st = Statement(
 				"INSERT INTO "+TasksTable+"(queue_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, pndx, state, done_at) "+
-					"VALUES ('%s', '%s', '%s', '%s', %d, %d, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, '%s', %d)",
+					"VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, ?, ?)",
 				qname,
 				task.ID.String(),
 				task.ID.String(),
-				st,
+				em,
 				0,
 				0,
 				processed,
 				doneAt)
 		} else {
-			st = fmt.Sprintf(
+			st = Statement(
 				"INSERT INTO "+TasksTable+"(queue_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, pndx, state, done_at, failed) "+
-					"VALUES ('%s', '%s', '%s', '%s', %d, %d, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, '%s', %d, %v)",
+					"VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, ?, ?, ?)",
 				qname,
 				task.ID.String(),
 				task.ID.String(),
-				st,
+				em,
 				0,
 				0,
 				retry,
@@ -258,7 +259,7 @@ func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneA
 	}
 
 	if len(stmts) > 0 {
-		_, err = r.conn.Write(stmts)
+		_, err = r.conn.Writes(stmts...)
 		require.NoError(tb, err, "error %v", err)
 	}
 }

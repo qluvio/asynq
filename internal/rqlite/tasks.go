@@ -80,36 +80,40 @@ func listTasks(conn *gorqlite.Connection, queue string, state string) ([]*taskRo
 
 func listTasksPaged(conn *gorqlite.Connection, queue string, state string, page *base.Pagination, orderBy string) ([]*taskRow, error) {
 	op := errors.Op("listTasks")
-	st := fmt.Sprintf(
+	st := Statement(
 		"SELECT ndx, queue_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at "+
 			" FROM "+TasksTable+
-			" WHERE queue_name='%s' "+
-			" AND state='%s'", queue, state)
+			" WHERE queue_name=? "+
+			" AND state=? ",
+		queue,
+		state)
 	if page != nil {
 		if len(orderBy) == 0 {
 			orderBy = "ndx"
 		}
-		st += fmt.Sprintf("ORDER BY %s LIMIT %d OFFSET %d", orderBy, page.Size, page.Start())
+		st = st.Append(fmt.Sprintf(" ORDER BY %s LIMIT %d OFFSET %d", orderBy, page.Size, page.Start()))
 	}
-	qr, err := conn.QueryOne(st)
+	qrs, err := conn.Queries(st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qr, err, st)
+		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
-	return parseTaskRows(qr)
+	return parseTaskRows(qrs[0])
 }
 
 func getTask(conn *gorqlite.Connection, queue string, id string) (*taskRow, error) {
 	op := errors.Op("rqlite.getTask")
-	st := fmt.Sprintf(
+	st := Statement(
 		"SELECT ndx, queue_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at "+
 			" FROM "+TasksTable+
-			" WHERE queue_name='%s' "+
-			" AND task_uuid='%s'", queue, id)
-	qr, err := conn.QueryOne(st)
+			" WHERE queue_name=? "+
+			" AND task_uuid=?",
+		queue,
+		id)
+	qrs, err := conn.Queries(st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qr, err, st)
+		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
-	rows, err := parseTaskRows(qr)
+	rows, err := parseTaskRows(qrs[0])
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}
@@ -124,23 +128,24 @@ func getTask(conn *gorqlite.Connection, queue string, id string) (*taskRow, erro
 	}
 }
 
-func getTaskCount(conn *gorqlite.Connection, queue string, where string) (int64, error) {
+func getTaskCount(conn *gorqlite.Connection, queue string, andWhere, whereValue string) (int64, error) {
 	op := errors.Op("rqlite.getTaskCount")
-	st := fmt.Sprintf(
+	st := Statement(
 		"SELECT COUNT(*) "+
 			" FROM "+TasksTable+
-			" WHERE queue_name='%s' ", queue)
-	if len(where) > 0 {
-		st += fmt.Sprintf(" AND %s", where)
+			" WHERE queue_name=? ",
+		queue)
+	if len(andWhere) > 0 {
+		st = st.Append(fmt.Sprintf(" AND %s=?", andWhere), whereValue)
 	}
 
-	qr, err := conn.QueryOne(st)
+	qrs, err := conn.Queries(st)
 	if err != nil {
-		return 0, NewRqliteRError(op, qr, err, st)
+		return 0, NewRqliteRError(op, qrs[0], err, st)
 	}
 	count := int64(0)
-	qr.Next()
-	err = qr.Scan(&count)
+	qrs[0].Next()
+	err = qrs[0].Scan(&count)
 	if err != nil {
 		return 0, errors.E(op, errors.Internal, err)
 	}
@@ -161,19 +166,21 @@ type dequeueRow struct {
 func getPending(conn *gorqlite.Connection, queue string) (*dequeueRow, error) {
 	op := errors.Op("rqlite.getPending")
 
-	st := fmt.Sprintf(
-		"SELECT task_uuid,ndx,pndx,task_msg,task_timeout,task_deadline FROM " + TasksTable +
-			" INNER JOIN " + QueuesTable +
-			" ON " + QueuesTable + ".queue_name=" + TasksTable + ".queue_name" +
-			" WHERE " +
-			fmt.Sprintf(QueuesTable+".queue_name='%s' ", queue) +
-			fmt.Sprintf(" AND pndx=(SELECT COALESCE(MIN(pndx),0) FROM "+TasksTable+" WHERE state='pending' AND queue_name='%s')", queue) +
-			" AND " + QueuesTable + ".state='active'")
-	qr, err := conn.QueryOne(st)
+	st := Statement(
+		"SELECT task_uuid,ndx,pndx,task_msg,task_timeout,task_deadline FROM "+TasksTable+
+			" INNER JOIN "+QueuesTable+
+			" ON "+QueuesTable+".queue_name="+TasksTable+".queue_name"+
+			" WHERE "+QueuesTable+".queue_name=? "+
+			" AND pndx=(SELECT COALESCE(MIN(pndx),0) FROM "+TasksTable+" WHERE state='pending' AND queue_name=?)"+
+			" AND "+QueuesTable+".state='active'",
+		queue,
+		queue)
+	qrs, err := conn.Queries(st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qr, err, st)
+		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
 
+	qr := qrs[0]
 	// no row
 	if qr.NumRows() == 0 {
 		return nil, nil
@@ -201,31 +208,31 @@ func getPending(conn *gorqlite.Connection, queue string) (*dequeueRow, error) {
 func deleteTasks(conn *gorqlite.Connection, queue string, state string) (int64, error) {
 	op := errors.Op("rqlite.deleteTasks")
 
-	st := fmt.Sprintf(
-		"DELETE FROM "+TasksTable+" WHERE queue_name='%s' AND state='%s'",
+	st := Statement(
+		"DELETE FROM "+TasksTable+" WHERE queue_name=? AND state=?",
 		queue,
 		state)
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wr, err, st)
+		return 0, NewRqliteWError(op, wrs[0], err, st)
 	}
 
-	return wr.RowsAffected, nil
+	return wrs[0].RowsAffected, nil
 }
 
 func deleteTask(conn *gorqlite.Connection, queue string, taskid string) (int64, error) {
 	op := errors.Op("rqlite.deleteTask")
 
-	st := fmt.Sprintf(
+	st := Statement(
 		"DELETE FROM "+TasksTable+
-			" WHERE queue_name='%s' AND task_uuid='%s' AND state!='active'",
+			" WHERE queue_name=? AND task_uuid=? AND state!='active'",
 		queue,
 		taskid)
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wr, err, st)
+		return 0, NewRqliteWError(op, wrs[0], err, st)
 	}
-	ret := wr.RowsAffected
+	ret := wrs[0].RowsAffected
 
 	// enforce conventional return values for inspector
 	if ret == 0 {
@@ -240,17 +247,17 @@ func deleteTask(conn *gorqlite.Connection, queue string, taskid string) (int64, 
 
 func setTaskPending(conn *gorqlite.Connection, queue string, taskid string) (int64, error) {
 	op := errors.Op("rqlite.setTaskPending")
-	st := fmt.Sprintf(
+	st := Statement(
 		"UPDATE "+TasksTable+" SET state='pending', deadline=0 "+
-			" WHERE queue_name='%s' AND task_uuid='%s' AND state != 'pending' AND state!='active'",
+			" WHERE queue_name=? AND task_uuid=? AND state != 'pending' AND state!='active'",
 		queue,
 		taskid)
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wr, err, st)
+		return 0, NewRqliteWError(op, wrs[0], err, st)
 	}
 
-	ret := wr.RowsAffected
+	ret := wrs[0].RowsAffected
 	// enforce conventional return values for inspector
 	if ret == 0 {
 		qs, err := getTask(conn, queue, taskid)
@@ -268,55 +275,55 @@ func setTaskPending(conn *gorqlite.Connection, queue string, taskid string) (int
 
 func setPending(conn *gorqlite.Connection, queue string, state string) (int64, error) {
 	op := errors.Op("rqlite.setPending")
-	st := fmt.Sprintf(
+	st := Statement(
 		"UPDATE "+TasksTable+" SET state='pending', deadline=0 "+
-			" WHERE queue_name='%s' AND state='%s'",
+			" WHERE queue_name=? AND state=?",
 		queue,
 		state)
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wr, err, st)
+		return 0, NewRqliteWError(op, wrs[0], err, st)
 	}
-	return wr.RowsAffected, nil
+	return wrs[0].RowsAffected, nil
 }
 
 func setArchived(conn *gorqlite.Connection, queue string, state string) (int64, error) {
 	op := errors.Op("rqlite.setArchived")
 
 	now := utc.Now()
-	st := fmt.Sprintf(
+	st := Statement(
 		"UPDATE "+TasksTable+" SET state='archived', "+
-			" archived_at=%d, cleanup_at=%d "+
-			" WHERE queue_name='%s' AND state='%s'",
+			" archived_at=?, cleanup_at=? "+
+			" WHERE queue_name=? AND state=?",
 		now.Unix(),
 		now.AddDate(0, 0, archivedExpirationInDays).Unix(),
 		queue,
 		state)
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wr, err, st)
+		return 0, NewRqliteWError(op, wrs[0], err, st)
 	}
-	return wr.RowsAffected, nil
+	return wrs[0].RowsAffected, nil
 }
 
 func setTaskArchived(conn *gorqlite.Connection, queue string, taskid string) (int64, error) {
 	op := errors.Op("rqlite.setTaskArchived")
 
 	now := utc.Now()
-	st := fmt.Sprintf(
+	st := Statement(
 		"UPDATE "+TasksTable+" SET state='archived', "+
-			" archived_at=%d, cleanup_at=%d "+
-			" WHERE queue_name='%s' AND task_uuid='%s' AND state != 'archived' AND state!='active'",
+			" archived_at=?, cleanup_at=? "+
+			" WHERE queue_name=? AND task_uuid=? AND state != 'archived' AND state!='active'",
 		now.Unix(),
 		now.AddDate(0, 0, archivedExpirationInDays).Unix(),
 		queue,
 		taskid)
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wr, err, st)
+		return 0, NewRqliteWError(op, wrs[0], err, st)
 	}
 
-	ret := wr.RowsAffected
+	ret := wrs[0].RowsAffected
 	// enforce conventional return values for inspector
 	if ret == 0 {
 		qs, err := getTask(conn, queue, taskid)
@@ -340,7 +347,7 @@ func enqueueMessages(conn *gorqlite.Connection, msgs ...*base.TaskMessage) error
 	}
 
 	queues := make(map[string]bool)
-	stmts := make([]string, 0, len(msgs)*2)
+	stmts := make([]*gorqlite.Statement, 0, len(msgs)*2)
 	msgNdx := make([]int, 0, len(msgs))
 
 	for _, msg := range msgs {
@@ -353,9 +360,9 @@ func enqueueMessages(conn *gorqlite.Connection, msgs ...*base.TaskMessage) error
 			return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode message: %v", err))
 		}
 		msgNdx = append(msgNdx, len(stmts))
-		stmts = append(stmts, fmt.Sprintf(
+		stmts = append(stmts, Statement(
 			"INSERT INTO "+TasksTable+"(queue_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, pndx, state) "+
-				"VALUES ('%s', '%s', '%s', '%s', %d, %d, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, '%s')",
+				"VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, ?)",
 			msg.Queue,
 			msg.ID.String(),
 			msg.ID.String(),
@@ -365,7 +372,7 @@ func enqueueMessages(conn *gorqlite.Connection, msgs ...*base.TaskMessage) error
 			pending))
 	}
 
-	wrs, err := conn.Write(stmts)
+	wrs, err := conn.Writes(stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}
@@ -396,7 +403,7 @@ func enqueueUniqueMessages(conn *gorqlite.Connection, ttl time.Duration, msgs ..
 	}
 
 	queues := make(map[string]bool)
-	stmts := make([]string, 0, len(msgs)*2)
+	stmts := make([]*gorqlite.Statement, 0, len(msgs)*2)
 	msgNdx := make([]int, 0, len(msgs))
 
 	for _, msg := range msgs {
@@ -414,9 +421,9 @@ func enqueueUniqueMessages(conn *gorqlite.Connection, ttl time.Duration, msgs ..
 
 		// if the unique_key_deadline is expired we ignore the constraint
 		// https://www.sqlite.org/lang_UPSERT.html
-		stmts = append(stmts, fmt.Sprintf(
+		stmts = append(stmts, Statement(
 			"INSERT INTO "+TasksTable+" (queue_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, unique_key_deadline, pndx, state)"+
-				" VALUES ('%s', '%s', '%s', '%s', %d, %d, %d, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, '%s') "+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, ?) "+
 				" ON CONFLICT(unique_key) DO UPDATE SET "+
 				"   queue_name=excluded.queue_name, "+
 				"   task_uuid=excluded.task_uuid, "+
@@ -427,7 +434,7 @@ func enqueueUniqueMessages(conn *gorqlite.Connection, ttl time.Duration, msgs ..
 				"   unique_key_deadline=excluded.unique_key_deadline, "+
 				"   pndx=excluded.pndx, "+
 				"   state=excluded.state"+
-				" WHERE "+TasksTable+".unique_key_deadline<=%d",
+				" WHERE "+TasksTable+".unique_key_deadline<=?",
 			msg.Queue,
 			msg.ID.String(),
 			msg.UniqueKey,
@@ -439,7 +446,7 @@ func enqueueUniqueMessages(conn *gorqlite.Connection, ttl time.Duration, msgs ..
 			now.Unix()))
 	}
 
-	wrs, err := conn.Write(stmts)
+	wrs, err := conn.Writes(stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}
@@ -468,16 +475,16 @@ type dequeueResult struct {
 func setTaskActive(conn *gorqlite.Connection, ndx, deadline int64) (bool, error) {
 	op := errors.Op("rqlite.setTaskActive")
 
-	st := fmt.Sprintf(
-		"UPDATE "+TasksTable+" SET state='active', deadline=%d WHERE state='pending' AND ndx=%d",
+	st := Statement(
+		"UPDATE "+TasksTable+" SET state='active', deadline=? WHERE state='pending' AND ndx=?",
 		deadline,
 		ndx)
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return false, NewRqliteWError(op, wr, err, st)
+		return false, NewRqliteWError(op, wrs[0], err, st)
 	}
 	// if the row was changed (by another rqlite) no row is affected
-	return wr.RowsAffected == 1, nil
+	return wrs[0].RowsAffected == 1, nil
 }
 
 // dequeueMessage finds a processable task in the given queue.
@@ -534,30 +541,30 @@ func setTaskDone(conn *gorqlite.Connection, msg *base.TaskMessage) error {
 	now := utc.Now()
 	expireAt := now.Add(statsTTL)
 
-	st := ""
+	var st *gorqlite.Statement
 	if len(msg.UniqueKey) > 0 {
-		st = fmt.Sprintf(
+		st = Statement(
 			"UPDATE "+TasksTable+" SET state='processed', deadline=0, unique_key_deadline=0, "+
-				"done_at=%d, cleanup_at=%d, unique_key='%s' "+
-				"WHERE task_uuid='%s'",
+				"done_at=?, cleanup_at=?, unique_key=? "+
+				"WHERE task_uuid=?",
 			now.Unix(),
 			expireAt.Unix(),
 			msg.ID.String(),
 			msg.ID.String())
 
 	} else {
-		st = fmt.Sprintf(
-			"UPDATE "+TasksTable+" SET state='processed', deadline=0, done_at=%d, cleanup_at=%d WHERE task_uuid='%s'",
+		st = Statement(
+			"UPDATE "+TasksTable+" SET state='processed', deadline=0, done_at=?, cleanup_at=? WHERE task_uuid=?",
 			now.Unix(),
 			expireAt.Unix(),
 			msg.ID.String())
 	}
 
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return NewRqliteWError(op, wr, err, st)
+		return NewRqliteWError(op, wrs[0], err, st)
 	}
-	err = expectOneRowUpdated(op, wr, st)
+	err = expectOneRowUpdated(op, wrs[0], st)
 	if err != nil {
 		return err
 	}
@@ -568,17 +575,17 @@ func setTaskDone(conn *gorqlite.Connection, msg *base.TaskMessage) error {
 func requeueTask(conn *gorqlite.Connection, msg *base.TaskMessage) error {
 	op := errors.Op("rqlite.requeueTask")
 
-	st := fmt.Sprintf(
+	st := Statement(
 		"UPDATE "+TasksTable+" SET state='pending', deadline=0, "+
 			" pndx=(SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1 "+ // changed pndx=
-			" WHERE queue_name='%s' AND state='active' AND task_uuid='%s'",
+			" WHERE queue_name=? AND state='active' AND task_uuid=?",
 		msg.Queue,
 		msg.ID.String())
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return NewRqliteWError(op, wr, err, st)
+		return NewRqliteWError(op, wrs[0], err, st)
 	}
-	err = expectOneRowUpdated(op, wr, st)
+	err = expectOneRowUpdated(op, wrs[0], st)
 	if err != nil {
 		return err
 	}
@@ -595,9 +602,9 @@ func scheduleTask(conn *gorqlite.Connection, msg *base.TaskMessage, processAt ti
 
 	// NOTE: set 'pndx' in order to preserve order of insertion: when the task
 	//       is put in pending state it keeps it.
-	st := fmt.Sprintf(
+	st := Statement(
 		"INSERT INTO "+TasksTable+"(queue_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, scheduled_at, pndx, state) "+
-			"VALUES ('%s', '%s', '%s', '%s', %d, %d, %d, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, '%s')",
+			"VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, ?)",
 		msg.Queue,
 		msg.ID.String(),
 		msg.ID.String(),
@@ -607,8 +614,8 @@ func scheduleTask(conn *gorqlite.Connection, msg *base.TaskMessage, processAt ti
 		processAt.UTC().Unix(),
 		scheduled)
 
-	stmts := []string{ensureQueueStatement(msg.Queue), st}
-	wrs, err := conn.Write(stmts)
+	stmts := []*gorqlite.Statement{ensureQueueStatement(msg.Queue), st}
+	wrs, err := conn.Writes(stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}
@@ -636,9 +643,9 @@ func scheduleUniqueTask(conn *gorqlite.Connection, msg *base.TaskMessage, proces
 	}
 	now := utc.Now()
 
-	st := fmt.Sprintf(
+	st := Statement(
 		"INSERT INTO "+TasksTable+" (queue_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, unique_key_deadline, scheduled_at, pndx, state)"+
-			" VALUES ('%s', '%s', '%s', '%s', %d, %d, %d, %d, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, '%s') "+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, ?) "+
 			" ON CONFLICT(unique_key) DO UPDATE SET"+
 			"   queue_name=excluded.queue_name, "+
 			"   task_uuid=excluded.task_uuid, "+
@@ -650,7 +657,7 @@ func scheduleUniqueTask(conn *gorqlite.Connection, msg *base.TaskMessage, proces
 			"   scheduled_at=excluded.scheduled_at, "+
 			"   pndx=excluded.pndx, "+
 			"   state=excluded.state"+
-			" WHERE "+TasksTable+".unique_key_deadline<=%d",
+			" WHERE "+TasksTable+".unique_key_deadline<=?",
 		msg.Queue,
 		msg.ID.String(),
 		msg.UniqueKey,
@@ -662,8 +669,8 @@ func scheduleUniqueTask(conn *gorqlite.Connection, msg *base.TaskMessage, proces
 		scheduled,
 		now.Unix())
 
-	stmts := []string{ensureQueueStatement(msg.Queue), st}
-	wrs, err := conn.Write(stmts)
+	stmts := []*gorqlite.Statement{ensureQueueStatement(msg.Queue), st}
+	wrs, err := conn.Writes(stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}
@@ -694,10 +701,10 @@ func retryTask(conn *gorqlite.Connection, msg *base.TaskMessage, processAt time.
 		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode message: %v", err))
 	}
 
-	st := fmt.Sprintf(
-		"UPDATE "+TasksTable+" SET task_msg='%s', state='retry', "+
-			" done_at=%d, retry_at=%d, failed=%v, cleanup_at=%d "+
-			" WHERE queue_name='%s' AND state='active' AND task_uuid='%s'",
+	st := Statement(
+		"UPDATE "+TasksTable+" SET task_msg=?, state='retry', "+
+			" done_at=?, retry_at=?, failed=?, cleanup_at=? "+
+			" WHERE queue_name=? AND state='active' AND task_uuid=?",
 		encoded,
 		now.Unix(),
 		processAt.UTC().Unix(),
@@ -705,12 +712,12 @@ func retryTask(conn *gorqlite.Connection, msg *base.TaskMessage, processAt time.
 		now.Add(statsTTL).Unix(), //expireAt
 		msg.Queue,
 		msg.ID.String())
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return NewRqliteWError(op, wr, err, st)
+		return NewRqliteWError(op, wrs[0], err, st)
 	}
 
-	err = expectOneRowUpdated(op, wr, st)
+	err = expectOneRowUpdated(op, wrs[0], st)
 	if err != nil {
 		return err
 	}
@@ -732,16 +739,16 @@ func archiveTask(conn *gorqlite.Connection, msg *base.TaskMessage, errMsg string
 
 	//PENDING(GIL) - TODO: add cleanup to respect max number of tasks in archive
 	_ = maxArchiveSize
-	stmts := []string{
-		fmt.Sprintf(
+	stmts := []*gorqlite.Statement{
+		Statement(
 			"DELETE FROM "+TasksTable+
-				" WHERE archived_at<%d OR cleanup_at<%d",
+				" WHERE archived_at<? OR cleanup_at<?",
 			cutoff.Unix(),
 			now.Unix()),
-		fmt.Sprintf(
-			"UPDATE "+TasksTable+" SET state='archived', task_msg='%s', "+
-				" archived_at=%d, cleanup_at=%d, failed=%v "+
-				" WHERE queue_name='%s' AND state='active' AND task_uuid='%s'",
+		Statement(
+			"UPDATE "+TasksTable+" SET state='archived', task_msg=?, "+
+				" archived_at=?, cleanup_at=?, failed=? "+
+				" WHERE queue_name=? AND state='active' AND task_uuid=?",
 			encoded,
 			now.Unix(),
 			now.Add(statsTTL).Unix(), //expireAt
@@ -749,7 +756,7 @@ func archiveTask(conn *gorqlite.Connection, msg *base.TaskMessage, errMsg string
 			msg.Queue,
 			msg.ID.String()),
 	}
-	wrs, err := conn.Write(stmts)
+	wrs, err := conn.Writes(stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}
@@ -764,19 +771,19 @@ func archiveTask(conn *gorqlite.Connection, msg *base.TaskMessage, errMsg string
 func forwardTasks(conn *gorqlite.Connection, qname, src string) (int, error) {
 	op := errors.Op("rqlite.forwardTask")
 
-	st := fmt.Sprintf(
+	srcAt := src + "_at"
+	st := Statement(
 		"UPDATE "+TasksTable+" SET state='pending' "+
-			" WHERE queue_name='%s' AND state='%s' AND %s<%d",
+			" WHERE queue_name=? AND state=? AND "+srcAt+"<?",
 		qname,
 		src,
-		src+"_at",
 		utc.Now().Unix())
-	wr, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wr, err, st)
+		return 0, NewRqliteWError(op, wrs[0], err, st)
 	}
 
-	return int(wr.RowsAffected), nil
+	return int(wrs[0].RowsAffected), nil
 }
 
 // KEYS[0] -> queue name
@@ -784,16 +791,17 @@ func forwardTasks(conn *gorqlite.Connection, qname, src string) (int, error) {
 func listDeadlineExceededTasks(conn *gorqlite.Connection, qname string, deadline time.Time) ([]*base.TaskMessage, error) {
 	op := errors.Op("rqlite.listDeadlineExceededTasks")
 
-	st := fmt.Sprintf(
+	st := Statement(
 		"SELECT task_msg FROM "+TasksTable+
-			" WHERE queue_name='%s' AND deadline<=%d",
+			" WHERE queue_name=? AND deadline<=?",
 		qname,
 		deadline.Unix())
-	qr, err := conn.QueryOne(st)
+	qrs, err := conn.Queries(st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qr, err, st)
+		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
 
+	qr := qrs[0]
 	if qr.NumRows() == 0 {
 		return nil, nil
 	}

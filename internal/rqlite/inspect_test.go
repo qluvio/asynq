@@ -3177,7 +3177,7 @@ func TestDeleteTaskWithUniqueLock(t *testing.T) {
 			}
 		}
 
-		count, err := getTaskCount(r.conn, tc.qname, fmt.Sprintf("unique_key='%s'", tc.id.String()))
+		count, err := getTaskCount(r.conn, tc.qname, "unique_key", tc.id.String())
 		require.NoError(t, err)
 		require.Equal(t, int64(0), count)
 	}
@@ -3413,7 +3413,7 @@ func TestDeleteAllArchivedTasksWithUniqueKey(t *testing.T) {
 		}
 
 		for _, uniqueKey := range tc.uniqueKeys {
-			count, err := getTaskCount(r.conn, tc.qname, fmt.Sprintf("unique_key='%s'", uniqueKey))
+			count, err := getTaskCount(r.conn, tc.qname, "unique_key", uniqueKey)
 			require.NoError(t, err)
 			require.Equal(t, int64(0), count, "Uniqueness lock %q still exists", uniqueKey)
 		}
@@ -3722,7 +3722,7 @@ func TestRemoveQueue(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, 0, len(qs), "queues %q still exist", tc.qname)
 
-		count, err := getTaskCount(r.conn, tc.qname, "")
+		count, err := getTaskCount(r.conn, tc.qname, "", "")
 		require.NoError(t, err)
 		require.Equal(t, int64(0), count, "some task in queue %q still exists", tc.qname)
 	}

@@ -1,7 +1,6 @@
 package rqlite
 
 import (
-	"fmt"
 	"sort"
 	"testing"
 	"time"
@@ -34,15 +33,16 @@ func GetScheduledMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMe
 
 func getMessages(tb testing.TB, r *RQLite, queue string, state string) []*base.TaskMessage {
 	require.NotNil(tb, r.conn)
-	st := fmt.Sprintf(
+	st := Statement(
 		"SELECT ndx,pndx,task_msg,task_timeout,task_deadline FROM "+TasksTable+
-			" WHERE "+TasksTable+".queue_name='%s' "+
-			" AND state='%s'",
+			" WHERE "+TasksTable+".queue_name=? "+
+			" AND state=?",
 		queue,
 		state)
-	qr, err := r.conn.QueryOne(st)
+	qrs, err := r.conn.Queries(st)
 	require.NoError(tb, err)
 
+	qr := qrs[0]
 	ret := make([]*base.TaskMessage, 0)
 	for qr.Next() {
 		deq := &dequeueRow{}
@@ -57,14 +57,15 @@ func getMessages(tb testing.TB, r *RQLite, queue string, state string) []*base.T
 
 func GetDeadlinesEntries(tb testing.TB, r *RQLite, queue string) []base.Z {
 	require.NotNil(tb, r.conn)
-	st := fmt.Sprintf(
+	st := Statement(
 		"SELECT task_msg,deadline FROM "+TasksTable+
-			" WHERE "+TasksTable+".queue_name='%s' "+
+			" WHERE "+TasksTable+".queue_name=? "+
 			" AND state='active'",
 		queue)
-	qr, err := r.conn.QueryOne(st)
+	qrs, err := r.conn.Queries(st)
 	require.NoError(tb, err)
 
+	qr := qrs[0]
 	ret := make([]base.Z, 0)
 	for qr.Next() {
 		deq := &dequeueResult{}
@@ -135,13 +136,16 @@ func GetUniqueKeyTTL(tb testing.TB, r *RQLite, queue string, taskType string, ta
 	require.NotNil(tb, r.conn)
 	uniqueKey := base.UniqueKey(queue, taskType, taskPayload)
 
-	st := fmt.Sprintf(
+	st := Statement(
 		"SELECT ndx, queue_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at "+
 			" FROM "+TasksTable+
-			" WHERE queue_name='%s' "+
-			" AND unique_key='%s'", queue, uniqueKey)
-	qr, err := r.conn.QueryOne(st)
+			" WHERE queue_name=? "+
+			" AND unique_key=?",
+		queue,
+		uniqueKey)
+	qrs, err := r.conn.Queries(st)
 	require.NoError(tb, err)
+	qr := qrs[0]
 	rows, err := parseTaskRows(qr)
 	require.NoError(tb, err)
 	require.Equal(tb, 1, len(rows))

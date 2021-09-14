@@ -421,9 +421,9 @@ func (r *RQLite) CancelationPubSub() (base.PubSub, error) {
 				close(ret.ch)
 				break out
 			case <-ticker.C:
-				st := "SELECT uuid FROM " + CancellationTable +
-					" WHERE ndx = (SELECT COALESCE(MAX(ndx),0) FROM " + CancellationTable + ")"
-				qr, err := conn.QueryOne(st)
+				st := Statement("SELECT uuid FROM " + CancellationTable +
+					" WHERE ndx = (SELECT COALESCE(MAX(ndx),0) FROM " + CancellationTable + ")")
+				qrs, err := conn.Queries(st)
 				if err != nil {
 					r.logger.Error(fmt.Sprintf("cancellation channel query failed: %v", err))
 					if strings.Contains(err.Error(), "gorqlite: connection is closed") {
@@ -432,6 +432,7 @@ func (r *RQLite) CancelationPubSub() (base.PubSub, error) {
 					// assume a temporary error
 					continue
 				}
+				qr := qrs[0]
 				if qr.NumRows() == 0 {
 					continue
 				}
@@ -444,11 +445,12 @@ func (r *RQLite) CancelationPubSub() (base.PubSub, error) {
 				}
 				ret.ch <- uuid
 
-				st = fmt.Sprintf("DELETE FROM "+CancellationTable+
-					" WHERE uuid='%s'", uuid)
-				qw, err := conn.WriteOne(st)
+				st = Statement("DELETE FROM "+CancellationTable+
+					" WHERE uuid=?",
+					uuid)
+				wrs, err := conn.Writes(st)
 				if err != nil {
-					r.logger.Error(fmt.Sprintf("cancellation channel delete failed: %v", NewRqliteWError(op, qw, err, st)))
+					r.logger.Error(fmt.Sprintf("cancellation channel delete failed: %v", NewRqliteWError(op, wrs[0], err, st)))
 				}
 
 			}
@@ -466,13 +468,13 @@ func (r *RQLite) PublishCancelation(id string) error {
 		return err
 	}
 
-	st := fmt.Sprintf(
-		"INSERT INTO "+CancellationTable+"(uuid, cancelled_at) VALUES('%s', %d) ",
+	st := Statement(
+		"INSERT INTO "+CancellationTable+"(uuid, cancelled_at) VALUES(?, ?) ",
 		id,
 		utc.Now().Unix())
-	res, err := conn.WriteOne(st)
+	wrs, err := conn.Writes(st)
 	if err != nil {
-		return NewRqliteWError(op, res, err, st)
+		return NewRqliteWError(op, wrs[0], err, st)
 	}
 	return nil
 }

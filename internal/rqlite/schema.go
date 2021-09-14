@@ -105,3 +105,7 @@ func DropTables(conn *gorqlite.Connection) error {
 	_, err := conn.Write(stmts)
 	return err
 }
+
+func Statement(sql string, params ...interface{}) *gorqlite.Statement {
+	return gorqlite.NewStatement(sql, params...)
+}

@@ -8,14 +8,14 @@ import (
 )
 
 type StatementError struct {
-	Error     error  // specific error
-	Statement string // SQL statement if available
+	Error     error       // specific error
+	Statement interface{} // SQL statement if available
 }
 
 func (s StatementError) String() string {
 	ret := fmt.Sprintf("%v", s.Error)
-	if len(s.Statement) > 0 {
-		ret += "- " + s.Statement
+	if s.Statement != nil {
+		ret += fmt.Sprintf("- %v", s.Statement)
 	}
 	return ret
 }
@@ -43,7 +43,7 @@ func (e *RqliteError) Error() string {
 
 func (e *RqliteError) Unwrap() error { return e.Err }
 
-func NewRqliteWError(op errors.Op, wr gorqlite.WriteResult, err error, stmt string) error {
+func NewRqliteWError(op errors.Op, wr gorqlite.WriteResult, err error, stmt interface{}) error {
 	return &RqliteError{
 		Op:         op,
 		Err:        err,
@@ -51,7 +51,7 @@ func NewRqliteWError(op errors.Op, wr gorqlite.WriteResult, err error, stmt stri
 	}
 }
 
-func NewRqliteWsError(op errors.Op, wrs []gorqlite.WriteResult, err error, stmts []string) error {
+func NewRqliteWsError(op errors.Op, wrs []gorqlite.WriteResult, err error, stmts []*gorqlite.Statement) error {
 	statements := make([]StatementError, 0)
 	for ndx, wr := range wrs {
 		if wr.Err != nil {
@@ -65,7 +65,7 @@ func NewRqliteWsError(op errors.Op, wrs []gorqlite.WriteResult, err error, stmts
 	}
 }
 
-func NewRqliteRError(op errors.Op, qr gorqlite.QueryResult, err error, stmt string) error {
+func NewRqliteRError(op errors.Op, qr gorqlite.QueryResult, err error, stmt interface{}) error {
 	return &RqliteError{
 		Op:         op,
 		Err:        err,
@@ -73,7 +73,7 @@ func NewRqliteRError(op errors.Op, qr gorqlite.QueryResult, err error, stmt stri
 	}
 }
 
-func NewRqliteRsError(op errors.Op, qrs []gorqlite.QueryResult, err error, stmts []string) error {
+func NewRqliteRsError(op errors.Op, qrs []gorqlite.QueryResult, err error, stmts []*gorqlite.Statement) error {
 	statements := make([]StatementError, 0)
 	for ndx, qr := range qrs {
 		if qr.Err != nil {
@@ -101,15 +101,15 @@ func expectQueryResultCount(op errors.Op, expectedCount int, qrs []gorqlite.Quer
 
 // expectOneRowUpdated returns an error if the write-result indicates zero or
 // more than one row was updated
-func expectOneRowUpdated(op errors.Op, wr gorqlite.WriteResult, st string) error {
+func expectOneRowUpdated(op errors.Op, wr gorqlite.WriteResult, st interface{}) error {
 	switch wr.RowsAffected {
 	case 0:
-		return errors.E(op, errors.NotFound, "row not found ("+st+")")
+		return errors.E(op, errors.NotFound, fmt.Sprintf("row not found (%v)", st))
 	case 1:
 	default:
 		return errors.E(op,
 			fmt.Sprintf("updated rows count does not match - expected: %d,"+
-				" actual: %d ("+st+")", 1, wr.RowsAffected))
+				" actual: %d (%v)", 1, wr.RowsAffected, st))
 	}
 	return nil
 }

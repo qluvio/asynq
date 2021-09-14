@@ -17,20 +17,21 @@ type schedulerRow struct {
 	entry          *base.SchedulerEntry
 }
 
-func listSchedulerEntries(conn *gorqlite.Connection, where string) ([]*schedulerRow, error) {
+func listSchedulerEntries(conn *gorqlite.Connection, where string, whereParams ...interface{}) ([]*schedulerRow, error) {
 	op := errors.Op("listSchedulerEntries")
 
-	st := "SELECT scheduler_id, expire_at, scheduler_entry" +
-		" FROM " + SchedulersTable
+	st := Statement("SELECT scheduler_id, expire_at, scheduler_entry" +
+		" FROM " + SchedulersTable + " ")
 	if len(where) > 0 {
-		st += where
+		st = st.Append(" WHERE "+where, whereParams...)
 	}
 
-	qr, err := conn.QueryOne(st)
+	qrs, err := conn.Queries(st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qr, err, st)
+		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
 
+	qr := qrs[0]
 	// no row
 	if qr.NumRows() == 0 {
 		return nil, nil
@@ -97,34 +98,34 @@ func parseSchedulerEnqueueEvents(qr gorqlite.QueryResult) ([]*schedulerEnqueueEv
 func listSchedulerEnqueueEvents(conn *gorqlite.Connection, entryID string, page base.Pagination) ([]*schedulerEnqueueEventRow, error) {
 	op := errors.Op("listSchedulerEnqueueEvents")
 	// most recent events first
-	st := fmt.Sprintf(
+	st := Statement(
 		"SELECT ndx, uuid, task_id, enqueued_at, scheduler_enqueue_event FROM "+SchedulerHistoryTable+
-			" WHERE uuid='%s' "+
-			" ORDER BY -enqueued_at LIMIT %d OFFSET %d",
+			" WHERE uuid=? "+
+			" ORDER BY -enqueued_at LIMIT ? OFFSET ?",
 		entryID,
 		page.Size,
 		page.Start())
 
-	qr, err := conn.QueryOne(st)
+	qrs, err := conn.Queries(st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qr, err, st)
+		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
-	return parseSchedulerEnqueueEvents(qr)
+	return parseSchedulerEnqueueEvents(qrs[0])
 }
 
 func listAllSchedulerEnqueueEvents(conn *gorqlite.Connection, entryID string) ([]*schedulerEnqueueEventRow, error) {
 	op := errors.Op("listAllSchedulerEnqueueEvents")
-	st := fmt.Sprintf(
+	st := Statement(
 		"SELECT ndx, uuid, task_id, enqueued_at, scheduler_enqueue_event FROM "+SchedulerHistoryTable+
-			" WHERE uuid='%s' "+
+			" WHERE uuid=? "+
 			" ORDER BY ndx ",
 		entryID)
 
-	qr, err := conn.QueryOne(st)
+	qrs, err := conn.Queries(st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qr, err, st)
+		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
-	return parseSchedulerEnqueueEvents(qr)
+	return parseSchedulerEnqueueEvents(qrs[0])
 }
 
 func writeSchedulerEntries(conn *gorqlite.Connection, schedulerID string, entries []*base.SchedulerEntry, ttl time.Duration) error {
@@ -144,19 +145,19 @@ func writeSchedulerEntries(conn *gorqlite.Connection, schedulerID string, entrie
 		args = append(args, bytes)
 	}
 
-	stmts := make([]string, 0, len(args)-1)
+	stmts := make([]*gorqlite.Statement, 0, len(args)-1)
 	for i := 0; i < len(args); i++ {
-		stmts = append(stmts, fmt.Sprintf(
+		stmts = append(stmts, Statement(
 			"INSERT INTO "+SchedulersTable+"(scheduler_id, expire_at, scheduler_entry) "+
-				"VALUES ('%s', %d, '%s')",
+				"VALUES (?, ?, ?)",
 			schedulerID,
 			exp.Unix(),
 			args[i]))
 	}
 
-	wr, err := conn.Write(stmts)
+	wrs, err := conn.Writes(stmts...)
 	if err != nil {
-		return NewRqliteWsError(op, wr, err, stmts)
+		return NewRqliteWsError(op, wrs, err, stmts)
 	}
 	return nil
 }
@@ -164,22 +165,22 @@ func writeSchedulerEntries(conn *gorqlite.Connection, schedulerID string, entrie
 func clearSchedulerEntries(conn *gorqlite.Connection, schedulerID string) error {
 	var op errors.Op = "rqlite.clearSchedulerEntries"
 
-	stmt := fmt.Sprintf(
-		"DELETE FROM "+SchedulersTable+" WHERE scheduler_id='%s'",
+	stmt := Statement(
+		"DELETE FROM "+SchedulersTable+" WHERE scheduler_id=?",
 		schedulerID)
-	wr, err := conn.WriteOne(stmt)
+	wrs, err := conn.Writes(stmt)
 	if err != nil {
-		return NewRqliteWError(op, wr, err, stmt)
+		return NewRqliteWError(op, wrs[0], err, stmt)
 	}
 	return nil
 }
 
 func clearSchedulerHistory(conn *gorqlite.Connection, entryID string) error {
-	stmt := fmt.Sprintf("DELETE FROM "+SchedulerHistoryTable+" WHERE uuid='%s'",
+	stmt := Statement("DELETE FROM "+SchedulerHistoryTable+" WHERE uuid=?",
 		entryID)
-	wr, err := conn.WriteOne(stmt)
+	wrs, err := conn.Writes(stmt)
 	if err != nil {
-		return NewRqliteWError(errors.Op("rqlite.clearSchedulerHistory"), wr, err, stmt)
+		return NewRqliteWError("rqlite.clearSchedulerHistory", wrs[0], err, stmt)
 	}
 	return nil
 }
@@ -192,29 +193,29 @@ func recordSchedulerEnqueueEvent(conn *gorqlite.Connection, entryID string, even
 		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode scheduler enqueue event: %v", err))
 	}
 
-	stmts := []string{
-		fmt.Sprintf(
+	stmts := []*gorqlite.Statement{
+		Statement(
 			"INSERT INTO "+SchedulerHistoryTable+"(uuid, task_id, enqueued_at, scheduler_enqueue_event) "+
-				"VALUES('%s', '%s', %d, '%s') ",
+				"VALUES(?, ?, ?, ?) ",
 			entryID,
 			event.TaskID,
 			event.EnqueuedAt.UTC().Unix(),
 			data),
-		fmt.Sprintf(
+		Statement(
 			"DELETE FROM "+SchedulerHistoryTable+
-				" WHERE uuid='%s' "+
+				" WHERE uuid=? "+
 				" AND ndx IN "+"(SELECT ndx FROM "+SchedulerHistoryTable+
-				" WHERE uuid='%s' ORDER BY -enqueued_at "+
-				"   LIMIT (SELECT COUNT(*) FROM "+SchedulerHistoryTable+" WHERE uuid='%s') "+
-				"   OFFSET %d)",
+				" WHERE uuid=? ORDER BY -enqueued_at "+
+				"   LIMIT (SELECT COUNT(*) FROM "+SchedulerHistoryTable+" WHERE uuid=?) "+
+				"   OFFSET ?)",
 			entryID,
 			entryID,
 			entryID,
 			maxEvents),
 	}
-	wr, err := conn.Write(stmts)
+	wrs, err := conn.Writes(stmts...)
 	if err != nil {
-		return NewRqliteWsError(op, wr, err, stmts)
+		return NewRqliteWsError(op, wrs, err, stmts)
 	}
 	return nil
 }
