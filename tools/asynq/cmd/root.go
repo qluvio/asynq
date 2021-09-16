@@ -18,7 +18,6 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/rdb"
-	"github.com/hibiken/asynq/internal/rqlite"
 	"github.com/spf13/cobra"
 
 	homedir "github.com/mitchellh/go-homedir"
@@ -39,7 +38,7 @@ var (
 	clusterAddrs    string
 	tlsServerName   string
 
-	rqliteConfig rqlite.Config
+	rqliteConfig asynq.RqliteConfig
 )
 
 // rootCmd represents the base command when called without any subcommands

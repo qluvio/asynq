@@ -30,7 +30,7 @@ var (
 	useRedisCluster   bool
 	redisClusterAddrs string // comma-separated list of host:port
 
-	rqliteConfig rqlite.Config
+	rqliteConfig RqliteConfig
 
 	testLogLevel = FatalLevel
 )

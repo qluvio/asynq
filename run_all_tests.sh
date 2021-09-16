@@ -74,6 +74,10 @@ while [[ $# -gt 0 ]]; do
             run_rqlite="false"
             shift
             ;;
+        -v | --verbose)
+            debug_flags="-v"
+            shift
+            ;;
         -h | -help | --help)
             usage
             exit

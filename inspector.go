@@ -27,6 +27,19 @@ func NewInspector(r ClientConnOpt) *Inspector {
 	if err != nil {
 		panic(err)
 	}
+	return newInspector(c)
+}
+
+// NewInspectorFrom returns a new instance of Inspector built with the broker of
+// the given server.
+func NewInspectorFrom(s *Server) (*Inspector, error) {
+	if s == nil {
+		return nil, errors.E("NewInspectorFrom", errors.Internal, "server is nil")
+	}
+	return newInspector(s.broker), nil
+}
+
+func newInspector(c base.Broker) *Inspector {
 	return &Inspector{
 		rdb: c.Inspector(),
 	}

@@ -54,6 +54,9 @@ func NewClientWithBroker(broker base.Broker) *Client {
 
 // NewClient returns a new Client instance given a client connection option.
 func NewClient(r ClientConnOpt, loc ...*time.Location) *Client {
+	if r == nil {
+		panic("no client connection option provided")
+	}
 	broker, err := makeBroker(r)
 	if err != nil {
 		panic(err)
@@ -265,7 +268,7 @@ const (
 // Value zero indicates no timeout and no deadline.
 var (
 	noTimeout  time.Duration = 0
-	noDeadline time.Time     = time.Unix(0, 0)
+	noDeadline               = time.Unix(0, 0)
 )
 
 // SetDefaultOptions sets options to be used for a given task type.

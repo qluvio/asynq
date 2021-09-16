@@ -40,7 +40,7 @@ type Scheduler struct {
 	idmap map[string]cron.EntryID
 }
 
-// NewScheduler returns a new Scheduler instance given the redis connection option.
+// NewScheduler returns a new Scheduler instance given the broker connection option.
 // The parameter opts is optional, defaults will be used if opts is set to nil
 func NewScheduler(r ClientConnOpt, opts *SchedulerOpts) *Scheduler {
 	broker, err := makeBroker(r)
@@ -52,6 +52,21 @@ func NewScheduler(r ClientConnOpt, opts *SchedulerOpts) *Scheduler {
 		panic(errors.E("NewScheduler", errors.Internal, fmt.Sprintf("expecting a Scheduler, got %T", broker)))
 	}
 	return newScheduler(scheduler, opts)
+}
+
+// NewSchedulerFrom returns a new Scheduler instance that will share the broker
+// connection with the given server instance.
+// The parameter opts is optional, defaults will be used if opts is set to nil
+func NewSchedulerFrom(s *Server, opts *SchedulerOpts) (*Scheduler, error) {
+	if s == nil {
+		return nil, errors.E("NewSchedulerFrom", errors.Internal, "server is nil")
+	}
+	broker := s.broker
+	scheduler, ok := broker.(base.Scheduler)
+	if !ok {
+		return nil, errors.E("NewSchedulerFrom", errors.Internal, fmt.Sprintf("expecting a Scheduler, got %T", broker))
+	}
+	return newScheduler(scheduler, opts), nil
 }
 
 func newScheduler(scheduler base.Scheduler, opts *SchedulerOpts) *Scheduler {

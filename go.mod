@@ -3,7 +3,6 @@ module github.com/hibiken/asynq
 go 1.13
 
 require (
-	github.com/eluv-io/gorqlite v0.0.2-0.20210914145851-00294179a2c9 // indirect
 	github.com/go-redis/redis/v8 v8.11.2
 	github.com/golang/protobuf v1.4.2
 	github.com/google/go-cmp v0.5.6
