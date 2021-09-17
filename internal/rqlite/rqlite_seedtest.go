@@ -1,6 +1,7 @@
 package rqlite
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func seedDeadlines(tb testing.TB, r *RQLite, deadlines []base.Z, qname string, u
 			"UPDATE "+TasksTable+" SET deadline=? WHERE task_uuid=?",
 			deadline,
 			msg.Message.ID.String())
-		wrs, err := r.conn.Writes(st)
+		wrs, err := r.conn.WriteStmt(context.Background(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 	}
 }
@@ -99,7 +100,7 @@ func SeedActiveQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname s
 		st := Statement(
 			"UPDATE "+TasksTable+" SET state='active' WHERE task_uuid=?",
 			msg.ID.String())
-		wrs, err := r.conn.Writes(st)
+		wrs, err := r.conn.WriteStmt(context.Background(), st)
 		require.Equal(tb, int64(1), wrs[0].RowsAffected)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 	}
@@ -135,7 +136,7 @@ func SeedRetryQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 			"UPDATE "+TasksTable+" SET state='retry', retry_at=? WHERE task_uuid=?",
 			retryAt,
 			msg.Message.ID.String())
-		wrs, err := r.conn.Writes(st)
+		wrs, err := r.conn.WriteStmt(context.Background(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 	}
 }
@@ -170,7 +171,7 @@ func SeedArchivedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 			"UPDATE "+TasksTable+" SET state='archived', archived_at=? WHERE task_uuid=?",
 			deadline,
 			msg.Message.ID.String())
-		wrs, err := r.conn.Writes(st)
+		wrs, err := r.conn.WriteStmt(context.Background(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 
 		require.NoError(tb, err)
@@ -259,7 +260,7 @@ func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneA
 	}
 
 	if len(stmts) > 0 {
-		_, err = r.conn.Writes(stmts...)
+		_, err = r.conn.WriteStmt(context.Background(), stmts...)
 		require.NoError(tb, err, "error %v", err)
 	}
 }

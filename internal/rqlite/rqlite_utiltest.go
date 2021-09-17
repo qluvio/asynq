@@ -1,6 +1,7 @@
 package rqlite
 
 import (
+	"context"
 	"sort"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func getMessages(tb testing.TB, r *RQLite, queue string, state string) []*base.T
 			" AND state=?",
 		queue,
 		state)
-	qrs, err := r.conn.Queries(st)
+	qrs, err := r.conn.QueryStmt(context.Background(), st)
 	require.NoError(tb, err)
 
 	qr := qrs[0]
@@ -62,7 +63,7 @@ func GetDeadlinesEntries(tb testing.TB, r *RQLite, queue string) []base.Z {
 			" WHERE "+TasksTable+".queue_name=? "+
 			" AND state='active'",
 		queue)
-	qrs, err := r.conn.Queries(st)
+	qrs, err := r.conn.QueryStmt(context.Background(), st)
 	require.NoError(tb, err)
 
 	qr := qrs[0]
@@ -143,7 +144,7 @@ func GetUniqueKeyTTL(tb testing.TB, r *RQLite, queue string, taskType string, ta
 			" AND unique_key=?",
 		queue,
 		uniqueKey)
-	qrs, err := r.conn.Queries(st)
+	qrs, err := r.conn.QueryStmt(context.Background(), st)
 	require.NoError(tb, err)
 	qr := qrs[0]
 	rows, err := parseTaskRows(qr)

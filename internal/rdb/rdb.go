@@ -894,3 +894,87 @@ func (r *RDB) ClearSchedulerHistory(entryID string) error {
 	}
 	return nil
 }
+
+func (r *RDB) EnqueueBatch(msgs ...*base.MessageBatch) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	if len(msgs) == 1 {
+		return r.Enqueue(msgs[0].Msg)
+	}
+	allErrors := map[int]error{}
+	for i, msg := range msgs {
+		err := r.Enqueue(msg.Msg)
+		if err != nil {
+			msg.Err = err
+			allErrors[i] = err
+		}
+	}
+	if len(allErrors) > 0 {
+		return &errors.BatchError{Errors: allErrors}
+	}
+	return nil
+}
+
+func (r *RDB) EnqueueUniqueBatch(msgs ...*base.MessageBatch) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	if len(msgs) == 1 {
+		return r.EnqueueUnique(msgs[0].Msg, msgs[0].UniqueTTL)
+	}
+	allErrors := map[int]error{}
+	for i, msg := range msgs {
+		err := r.EnqueueUnique(msg.Msg, msg.UniqueTTL)
+		if err != nil {
+			msg.Err = err
+			allErrors[i] = err
+		}
+	}
+	if len(allErrors) > 0 {
+		return &errors.BatchError{Errors: allErrors}
+	}
+	return nil
+}
+
+func (r *RDB) ScheduleBatch(msgs ...*base.MessageBatch) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	if len(msgs) == 1 {
+		return r.Schedule(msgs[0].Msg, msgs[0].ProcessAt)
+	}
+	allErrors := map[int]error{}
+	for i, msg := range msgs {
+		err := r.Schedule(msg.Msg, msg.ProcessAt)
+		if err != nil {
+			msg.Err = err
+			allErrors[i] = err
+		}
+	}
+	if len(allErrors) > 0 {
+		return &errors.BatchError{Errors: allErrors}
+	}
+	return nil
+}
+
+func (r *RDB) ScheduleUniqueBatch(msgs ...*base.MessageBatch) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	if len(msgs) == 1 {
+		return r.ScheduleUnique(msgs[0].Msg, msgs[0].ProcessAt, msgs[0].UniqueTTL)
+	}
+	allErrors := map[int]error{}
+	for i, msg := range msgs {
+		err := r.ScheduleUnique(msg.Msg, msg.ProcessAt, msg.UniqueTTL)
+		if err != nil {
+			msg.Err = err
+			allErrors[i] = err
+		}
+	}
+	if len(allErrors) > 0 {
+		return &errors.BatchError{Errors: allErrors}
+	}
+	return nil
+}

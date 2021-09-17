@@ -1,6 +1,11 @@
 package rqlite
 
 import (
+	"context"
+	"strings"
+	"time"
+
+	"github.com/hibiken/asynq/internal/errors"
 	"github.com/rqlite/gorqlite"
 )
 
@@ -12,9 +17,18 @@ var AllTables = map[string]string{
 	SchedulersTable:       CreateSchedulersTable,
 	SchedulerHistoryTable: CreateSchedulerHistoryTable,
 	CancellationTable:     CreateCancellationTable,
+	VersionTable:          CreateVersionTable,
 }
 
 const (
+	Version            = "1.0.0"
+	VersionTable       = "asynq_schema_version"
+	CreateVersionTable = `CREATE TABLE ` + VersionTable + ` (
+	version text not null primary key,
+	ts integer
+)`
+	InsertVersionStmt = "INSERT INTO " + VersionTable + " (version, ts) VALUES(?, ?) "
+
 	QueuesTable       = "asynq_queues"
 	CreateQueuesTable = `CREATE TABLE ` + QueuesTable + ` (
 	queue_name text not null primary key, 
@@ -87,13 +101,37 @@ const (
 )`
 )
 
-func CreateTables(conn *gorqlite.Connection) error {
-	stmts := make([]string, 0)
-	for _, stmt := range AllTables {
-		stmts = append(stmts, stmt)
+func CreateTablesIfNotExist(conn *gorqlite.Connection) (bool, error) {
+	op := errors.Op("CreateTablesIfNotExist")
+
+	get := Statement("SELECT COUNT(*) FROM " + VersionTable)
+	qrs, err := conn.QueryStmt(context.Background(), get)
+	if err != nil && (qrs[0].Err == nil || !strings.Contains(qrs[0].Err.Error(), "no such table:")) {
+		return false, errors.E(op, errors.Internal, NewRqliteRError(op, qrs[0], err, get))
 	}
-	_, err := conn.Write(stmts)
-	return err
+	if qrs[0].NumRows() > 0 {
+		return false, nil
+	}
+	err = CreateTables(conn)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func CreateTables(conn *gorqlite.Connection) error {
+	op := errors.Op("CreateTables")
+
+	stmts := make([]*gorqlite.Statement, 0)
+	for _, stmt := range AllTables {
+		stmts = append(stmts, Statement(stmt))
+	}
+	stmts = append(stmts, Statement(InsertVersionStmt, Version, time.Now().Unix()))
+	_, err := conn.WriteStmt(context.Background(), stmts...)
+	if err != nil {
+		return errors.E(op, errors.Internal, err)
+	}
+	return nil
 }
 
 // DropTables deletes all the tables.

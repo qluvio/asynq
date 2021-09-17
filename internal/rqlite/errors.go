@@ -15,7 +15,7 @@ type StatementError struct {
 func (s StatementError) String() string {
 	ret := fmt.Sprintf("%v", s.Error)
 	if s.Statement != nil {
-		ret += fmt.Sprintf("- %v", s.Statement)
+		ret += fmt.Sprintf(" %q", s.Statement)
 	}
 	return ret
 }
@@ -33,7 +33,7 @@ func (e *RqliteError) Error() string {
 		return ret
 	}
 	if len(e.Statements) == 1 {
-		return fmt.Sprintf("%s - %s", ret, e.Statements[0])
+		return fmt.Sprintf("%s -> %s", ret, e.Statements[0])
 	}
 	for _, st := range e.Statements {
 		ret = fmt.Sprintf("%s\n  %v", ret, st)
@@ -104,12 +104,18 @@ func expectQueryResultCount(op errors.Op, expectedCount int, qrs []gorqlite.Quer
 func expectOneRowUpdated(op errors.Op, wr gorqlite.WriteResult, st interface{}) error {
 	switch wr.RowsAffected {
 	case 0:
-		return errors.E(op, errors.NotFound, fmt.Sprintf("row not found (%v)", st))
+		errStr := fmt.Sprintf("row not found (%v)", st)
+		if wr.Err != nil {
+			errStr = fmt.Sprintf("error (%v): %s", st, wr.Err.Error())
+		}
+		return errors.E(op, errors.NotFound, errStr)
 	case 1:
 	default:
-		return errors.E(op,
-			fmt.Sprintf("updated rows count does not match - expected: %d,"+
-				" actual: %d (%v)", 1, wr.RowsAffected, st))
+		errStr := fmt.Sprintf("expected one row updated but have %d (%s)", wr.RowsAffected, st)
+		if wr.Err != nil {
+			errStr = fmt.Sprintf("expected one row updated but have %d (%s) - error: %s", wr.RowsAffected, st, wr.Err.Error())
+		}
+		return errors.E(op, errStr)
 	}
 	return nil
 }

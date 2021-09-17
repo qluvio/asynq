@@ -1,6 +1,7 @@
 package rqlite
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -35,7 +36,7 @@ func listServers(conn *gorqlite.Connection, where string, whereParams ...interfa
 		st = st.Append(" WHERE "+where, whereParams...)
 	}
 
-	qrs, err := conn.Queries(st)
+	qrs, err := conn.QueryStmt(context.Background(), st)
 	if err != nil {
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
@@ -93,7 +94,7 @@ func listWorkers(conn *gorqlite.Connection, where string, whereParams ...interfa
 		st = st.Append(" WHERE "+where, whereParams...)
 	}
 
-	qrs, err := conn.Queries(st)
+	qrs, err := conn.QueryStmt(context.Background(), st)
 	if err != nil {
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
@@ -178,7 +179,7 @@ func writeServerState(conn *gorqlite.Connection, serverInfo *base.ServerInfo, wo
 			wnfo))
 	}
 
-	wrs, err := conn.Writes(stmts...)
+	wrs, err := conn.WriteStmt(context.Background(), stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}
@@ -198,7 +199,7 @@ func clearServerState(conn *gorqlite.Connection, host string, pid int, serverID 
 		"DELETE FROM "+WorkersTable+" WHERE sid=?",
 		serverID))
 
-	wrs, err := conn.Writes(stmts...)
+	wrs, err := conn.WriteStmt(context.Background(), stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}

@@ -1,6 +1,7 @@
 package rqlite
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -25,7 +26,7 @@ func ensureQueueStatement(queue string) *gorqlite.Statement {
 
 func EnsureQueue(conn *gorqlite.Connection, queue string) error {
 	st := ensureQueueStatement(queue)
-	wrs, err := conn.Writes(st)
+	wrs, err := conn.WriteStmt(context.Background(), st)
 	if err != nil {
 		return NewRqliteWError("EnsureQueue", wrs[0], err, st)
 	}
@@ -38,7 +39,7 @@ func GetQueue(conn *gorqlite.Connection, qname string) (*queueRow, error) {
 	st := Statement(
 		"SELECT queue_name,state FROM "+QueuesTable+" WHERE queue_name=?",
 		qname)
-	qrs, err := conn.Queries(st)
+	qrs, err := conn.QueryStmt(context.Background(), st)
 	if err != nil {
 		return nil, NewRqliteRError("getQueue", qrs[0], err, st)
 	}
@@ -70,7 +71,7 @@ func pauseQueue(conn *gorqlite.Connection, queue string, b bool) error {
 		val,
 		queue,
 		val)
-	wrs, err := conn.Writes(st)
+	wrs, err := conn.WriteStmt(context.Background(), st)
 	if err != nil {
 		return NewRqliteWError(op, wrs[0], err, st)
 	}
@@ -111,7 +112,7 @@ func removeQueue(conn *gorqlite.Connection, queue string, force bool) (int64, er
 			queue),
 	}
 
-	wrs, err := conn.Writes(stmts...)
+	wrs, err := conn.WriteStmt(context.Background(), stmts...)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, stmts)
 	}
@@ -142,7 +143,7 @@ func listQueues(conn *gorqlite.Connection, queue ...string) ([]*queueRow, error)
 		st = st.Append(" WHERE queue_name=? ", queue[0])
 	}
 
-	qrs, err := conn.Queries(st)
+	qrs, err := conn.QueryStmt(context.Background(), st)
 	if err != nil {
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
@@ -178,7 +179,7 @@ func currentStats(conn *gorqlite.Connection, queue string) (*base.Stats, error) 
 				" FROM "+TasksTable+
 				" WHERE queue_name=? ", queue),
 	}
-	qrs, err := conn.Queries(stmts...)
+	qrs, err := conn.QueryStmt(context.Background(), stmts...)
 	if err != nil {
 		return nil, NewRqliteRsError(op, qrs, err, stmts)
 	}
@@ -274,7 +275,7 @@ func historicalStats(conn *gorqlite.Connection, queue string, ndays int) ([]*bas
 		last = first
 	}
 
-	qrs, err := conn.Queries(stmts...)
+	qrs, err := conn.QueryStmt(context.Background(), stmts...)
 	if err != nil {
 		return nil, NewRqliteRsError(op, qrs, err, stmts)
 	}

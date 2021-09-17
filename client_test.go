@@ -14,6 +14,7 @@ import (
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/utc"
+	"github.com/stretchr/testify/require"
 )
 
 func TestClientEnqueueWithProcessAtOption(t *testing.T) {
@@ -893,6 +894,115 @@ func TestClientEnqueueUniqueWithProcessAtOption(t *testing.T) {
 		if !errors.Is(err, ErrDuplicateTask) {
 			t.Errorf("Enqueueing %+v returned an error that is not ErrDuplicateTask", tc.task)
 			continue
+		}
+	}
+}
+
+func TestClientEnqueueBatch(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	t0 := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant0@example.com"}))
+	t1 := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant1@example.com"}))
+	t2 := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant2@example.com"}))
+
+	tests := []struct {
+		desc  string
+		tasks []*Task
+		opts  []Option
+	}{
+		{
+			desc:  "Basic 3 tasks",
+			tasks: []*Task{t0, t1, t2},
+			opts: []Option{
+				Queue("purchase"),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		ctx.FlushDB()
+
+		ti, err := client.EnqueueBatch(tc.tasks, tc.opts...)
+		require.NoError(t, err, "%s; client.EnqueueBatch(task, opts...) return non-nil error", tc.desc)
+		require.NotNil(t, ti)
+		require.Equal(t, len(tc.tasks), len(ti))
+
+		for i, task := range tc.tasks {
+			taskInfo := ti[i]
+			require.NotNil(t, taskInfo)
+			require.Equal(t, TaskStatePending, taskInfo.State)
+			require.Equal(t, task.typename, taskInfo.Type)
+			require.Equal(t, task.payload, taskInfo.Payload)
+		}
+	}
+}
+
+func TestClientEnqueueBatchError(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	t0 := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant0@example.com"}))
+	t1 := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant1@example.com"}))
+	t2 := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant2@example.com"}))
+
+	tests := []struct {
+		desc       string
+		tasks      []*Task
+		opts       []Option
+		expFailure int
+	}{
+		{
+			desc:  "With duplicated task only",
+			tasks: []*Task{t1, t1},
+			opts: []Option{
+				Queue("purchase"),
+				Unique(time.Second),
+			},
+			expFailure: 1,
+		},
+		{
+			desc:  "With duplicated task in the middle",
+			tasks: []*Task{t0, t1, t1, t2},
+			opts: []Option{
+				Queue("purchase"),
+				Unique(time.Second),
+			},
+			expFailure: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		ctx.FlushDB()
+
+		ti, err := client.EnqueueBatch(tc.tasks, tc.opts...)
+		require.Error(t, err, "%s; client.EnqueueBatch(task, opts...) did not return non-nil error", tc.desc)
+		require.NotNil(t, ti)
+		require.Equal(t, len(tc.tasks), len(ti))
+
+		berr, ok := err.(BatchError)
+		require.True(t, ok, tc.desc)
+		require.NotNil(t, berr.MapErrors(), tc.desc)
+		gotFailure := berr.MapErrors()[tc.expFailure]
+		require.NotNil(t, gotFailure, tc.desc)
+		require.True(t, errors.Is(gotFailure, ErrDuplicateTask), tc.desc)
+
+		for i, task := range tc.tasks {
+			if i == tc.expFailure {
+				require.Nil(t, ti[i])
+				continue
+			}
+			taskInfo := ti[i]
+			require.NotNil(t, taskInfo)
+			require.Equal(t, TaskStatePending, taskInfo.State)
+			require.Equal(t, task.typename, taskInfo.Type)
+			require.Equal(t, task.payload, taskInfo.Payload)
 		}
 	}
 }

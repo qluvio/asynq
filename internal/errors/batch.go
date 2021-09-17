@@ -10,6 +10,10 @@ type BatchError struct {
 	Errors map[int]error // map index of failed tasks in the input to error
 }
 
+func (e *BatchError) MapErrors() map[int]error {
+	return e.Errors
+}
+
 func (e *BatchError) Error() string {
 	if len(e.Errors) == 0 {
 		return ""

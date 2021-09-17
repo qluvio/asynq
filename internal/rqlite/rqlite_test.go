@@ -39,6 +39,22 @@ func setup(tb testing.TB) *RQLite {
 	return ret
 }
 
+func TestCreateTables(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	ok, err := CreateTablesIfNotExist(r.conn)
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	err = DropTables(r.conn)
+	require.NoError(t, err)
+
+	ok, err = CreateTablesIfNotExist(r.conn)
+	require.NoError(t, err)
+	require.True(t, ok)
+}
+
 func TestBasicEnqueueDequeue(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()

@@ -5,6 +5,7 @@
 package rqlite
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -96,6 +97,11 @@ func (r *RQLite) Open() error {
 	return err
 }
 
+func (r *RQLite) context() context.Context {
+	// PENDING(GIL): for now just basic
+	return context.Background()
+}
+
 // open validates the config and opens the connection with rqlite.
 // It must be called under lock.
 func (r *RQLite) open() error {
@@ -106,7 +112,7 @@ func (r *RQLite) open() error {
 	if err != nil {
 		return err
 	}
-	conn, err := gorqlite.Open(r.config.RqliteUrl, r.httpClient)
+	conn, err := gorqlite.OpenContext(r.context(), r.config.RqliteUrl, r.httpClient)
 	if err != nil {
 		return errors.E("open", errors.Internal, err)
 	}
@@ -145,7 +151,7 @@ func (r *RQLite) Ping() error {
 	if err != nil {
 		return err
 	}
-	_, err = conn.Leader()
+	_, err = conn.Leader(r.context())
 	return err
 }
 
@@ -157,11 +163,11 @@ func (r *RQLite) Enqueue(msg *base.TaskMessage) error {
 		return err
 	}
 
-	return enqueueMessages(conn, msg)
+	return enqueueMessages(conn, &base.MessageBatch{Msg: msg})
 }
 
 // EnqueueBatch adds the given tasks to the pending list of the queue.
-func (r *RQLite) EnqueueBatch(msgs ...*base.TaskMessage) error {
+func (r *RQLite) EnqueueBatch(msgs ...*base.MessageBatch) error {
 	var op errors.Op = "rqlite.EnqueueBatch"
 	conn, err := r.client(op)
 	if err != nil {
@@ -178,7 +184,21 @@ func (r *RQLite) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration) error {
 	if err != nil {
 		return err
 	}
-	return enqueueUniqueMessages(conn, ttl, msg)
+	return enqueueUniqueMessages(conn, &base.MessageBatch{
+		Msg:       msg,
+		UniqueTTL: ttl,
+	})
+}
+
+// EnqueueUniqueBatch inserts the given tasks if the task's uniqueness lock can be acquired.
+// It returns ErrDuplicateTask if the lock cannot be acquired.
+func (r *RQLite) EnqueueUniqueBatch(msg ...*base.MessageBatch) error {
+	var op errors.Op = "rqlite.EnqueueUniqueBatch"
+	conn, err := r.client(op)
+	if err != nil {
+		return err
+	}
+	return enqueueUniqueMessages(conn, msg...)
 }
 
 // Dequeue queries given queues in order and pops a task message
@@ -245,10 +265,25 @@ func (r *RQLite) Schedule(msg *base.TaskMessage, processAt time.Time) error {
 		return err
 	}
 
-	return scheduleTask(conn, msg, processAt)
+	return scheduleTasks(conn, &base.MessageBatch{
+		Msg:       msg,
+		ProcessAt: processAt,
+	})
 }
 
-// ScheduleUnique adds the task to the backlog queue to be processed in the future if the uniqueness lock can be acquired.
+// ScheduleBatch adds the tasks to the scheduled set to be processed in the future.
+func (r *RQLite) ScheduleBatch(msg ...*base.MessageBatch) error {
+	var op errors.Op = "rqlite.ScheduleBatch"
+	conn, err := r.client(op)
+	if err != nil {
+		return err
+	}
+
+	return scheduleTasks(conn, msg...)
+}
+
+// ScheduleUnique adds the task to the backlog queue to be processed in the future
+// if the uniqueness lock can be acquired.
 // It returns ErrDuplicateTask if the lock cannot be acquired.
 func (r *RQLite) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl time.Duration) error {
 	var op errors.Op = "rqlite.ScheduleUnique"
@@ -257,7 +292,24 @@ func (r *RQLite) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl 
 		return err
 	}
 
-	return scheduleUniqueTask(conn, msg, processAt, ttl)
+	return scheduleUniqueTasks(conn, &base.MessageBatch{
+		Msg:       msg,
+		UniqueTTL: ttl,
+		ProcessAt: processAt,
+	})
+}
+
+// ScheduleUniqueBatch adds the tasks to the backlog queue to be processed in the future
+// if the uniqueness lock can be acquired.
+// It returns ErrDuplicateTask if the lock cannot be acquired.
+func (r *RQLite) ScheduleUniqueBatch(msg ...*base.MessageBatch) error {
+	var op errors.Op = "rqlite.ScheduleUniqueBatch"
+	conn, err := r.client(op)
+	if err != nil {
+		return err
+	}
+
+	return scheduleUniqueTasks(conn, msg...)
 }
 
 // Retry moves the task from active to retry queue, incrementing retry count
@@ -423,7 +475,7 @@ func (r *RQLite) CancelationPubSub() (base.PubSub, error) {
 			case <-ticker.C:
 				st := Statement("SELECT uuid FROM " + CancellationTable +
 					" WHERE ndx = (SELECT COALESCE(MAX(ndx),0) FROM " + CancellationTable + ")")
-				qrs, err := conn.Queries(st)
+				qrs, err := conn.QueryStmt(context.Background(), st)
 				if err != nil {
 					r.logger.Error(fmt.Sprintf("cancellation channel query failed: %v", err))
 					if strings.Contains(err.Error(), "gorqlite: connection is closed") {
@@ -448,7 +500,7 @@ func (r *RQLite) CancelationPubSub() (base.PubSub, error) {
 				st = Statement("DELETE FROM "+CancellationTable+
 					" WHERE uuid=?",
 					uuid)
-				wrs, err := conn.Writes(st)
+				wrs, err := conn.WriteStmt(context.Background(), st)
 				if err != nil {
 					r.logger.Error(fmt.Sprintf("cancellation channel delete failed: %v", NewRqliteWError(op, wrs[0], err, st)))
 				}
@@ -472,7 +524,7 @@ func (r *RQLite) PublishCancelation(id string) error {
 		"INSERT INTO "+CancellationTable+"(uuid, cancelled_at) VALUES(?, ?) ",
 		id,
 		utc.Now().Unix())
-	wrs, err := conn.Writes(st)
+	wrs, err := conn.WriteStmt(context.Background(), st)
 	if err != nil {
 		return NewRqliteWError(op, wrs[0], err, st)
 	}

@@ -231,6 +231,15 @@ type TaskMessage struct {
 	UniqueKey string
 }
 
+type MessageBatch struct {
+	InputIndex int
+	Msg        *TaskMessage
+	UniqueTTL  time.Duration
+	ProcessAt  time.Time
+	State      TaskState
+	Err        error
+}
+
 // EncodeMessage marshals the given task message and returns an encoded bytes.
 func EncodeMessage(msg *TaskMessage) ([]byte, error) {
 	if msg == nil {
@@ -641,25 +650,71 @@ type PubSub interface {
 //
 // See rdb.RDB as a reference implementation.
 type Broker interface {
+	// Ping checks the connection with store server.
 	Ping() error
+
+	// Enqueue adds the given task to the pending list of the queue.
 	Enqueue(msg *TaskMessage) error
+	// EnqueueUnique inserts the given task if the task's uniqueness lock can be acquired.
+	// It returns ErrDuplicateTask if the lock cannot be acquired.
 	EnqueueUnique(msg *TaskMessage, ttl time.Duration) error
+	// Dequeue queries given queues in order and pops a task message
+	// off a queue if one exists and returns the message and deadline.
+	// Dequeue skips a queue if the queue is paused.
+	// If all queues are empty, ErrNoProcessableTask error is returned.
 	Dequeue(qnames ...string) (*TaskMessage, time.Time, error)
+	// Done removes the task from active queue to mark the task as done.
+	// It removes a uniqueness lock acquired by the task, if any.
 	Done(msg *TaskMessage) error
+	// Requeue moves the task from active queue to the specified queue.
 	Requeue(msg *TaskMessage) error
+	// Schedule adds the task to the scheduled set to be processed in the future.
 	Schedule(msg *TaskMessage, processAt time.Time) error
+	// ScheduleUnique adds the task to the backlog queue to be processed in the future if the uniqueness lock can be acquired.
+	// It returns ErrDuplicateTask if the lock cannot be acquired.
 	ScheduleUnique(msg *TaskMessage, processAt time.Time, ttl time.Duration) error
+	// Retry moves the task from active to retry queue.
+	// It also annotates the message with the given error message and
+	// if isFailure is true increments the retried counter.
 	Retry(msg *TaskMessage, processAt time.Time, errMsg string, isFailure bool) error
+	// Archive sends the given task to archive, attaching the error message to the task.
+	// It also trims the archive by timestamp and set size.
 	Archive(msg *TaskMessage, errMsg string) error
+	// ForwardIfReady checks scheduled and retry sets of the given queues
+	// and move any tasks that are ready to be processed to the pending set.
 	ForwardIfReady(qnames ...string) error
+	// ListDeadlineExceeded returns a list of task messages that have exceeded the deadline from the given queues.
 	ListDeadlineExceeded(deadline time.Time, qnames ...string) ([]*TaskMessage, error)
+	// WriteServerState writes server state data to the store with expiration set to the value ttl.
 	WriteServerState(info *ServerInfo, workers []*WorkerInfo, ttl time.Duration) error
+	// ClearServerState deletes server state data from the store.
 	ClearServerState(host string, pid int, serverID string) error
+	// CancelationPubSub returns a pubsub for cancelation messages.
 	CancelationPubSub() (PubSub, error)
+	// PublishCancelation publish cancelation message to all subscribers.
+	// The message is the ID for the task to be canceled.
 	PublishCancelation(id string) error
+	// Close closes the connection with the store server.
 	Close() error
+	// ListServers returns the list of server info.
 	ListServers() ([]*ServerInfo, error)
+	// Inspector returns an Inspector instance based on this Broker or nil.
 	Inspector() Inspector
+
+	// EnqueueBatch adds the given tasks to the pending list of the queue.
+	EnqueueBatch(msgs ...*MessageBatch) error
+
+	// EnqueueUniqueBatch inserts the given tasks if the task's uniqueness lock can be acquired.
+	// It returns ErrDuplicateTask if the lock cannot be acquired.
+	EnqueueUniqueBatch(msgs ...*MessageBatch) error
+
+	// ScheduleBatch adds the tasks to the scheduled set to be processed in the future.
+	ScheduleBatch(msgs ...*MessageBatch) error
+
+	// ScheduleUniqueBatch adds the tasks to the backlog queue to be processed in the future
+	// if the uniqueness lock can be acquired.
+	// It returns ErrDuplicateTask if the lock cannot be acquired.
+	ScheduleUniqueBatch(msgs ...*MessageBatch) error
 }
 
 type Scheduler interface {

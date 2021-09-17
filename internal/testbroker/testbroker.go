@@ -209,3 +209,39 @@ func (tb *TestBroker) ListServers() ([]*base.ServerInfo, error) {
 	}
 	return tb.real.ListServers()
 }
+
+func (tb *TestBroker) EnqueueBatch(msgs ...*base.MessageBatch) error {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return errRedisDown
+	}
+	return tb.real.EnqueueBatch(msgs...)
+}
+
+func (tb *TestBroker) EnqueueUniqueBatch(msgs ...*base.MessageBatch) error {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return errRedisDown
+	}
+	return tb.real.EnqueueUniqueBatch(msgs...)
+}
+
+func (tb *TestBroker) ScheduleBatch(msgs ...*base.MessageBatch) error {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return errRedisDown
+	}
+	return tb.real.ScheduleBatch(msgs...)
+}
+
+func (tb *TestBroker) ScheduleUniqueBatch(msgs ...*base.MessageBatch) error {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return errRedisDown
+	}
+	return tb.real.ScheduleUniqueBatch(msgs...)
+}

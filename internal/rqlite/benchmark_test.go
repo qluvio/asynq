@@ -55,13 +55,15 @@ func doTestEnqueueBatch(t *testing.T, batchSize int) {
 	r := setup(t)
 	FlushDB(t, r.conn)
 
-	msgs := make([]*base.TaskMessage, 0, batchSize)
+	msgs := make([]*base.MessageBatch, 0, batchSize)
 	for i := 0; i < batchSize; i++ {
-		msgs = append(msgs, asynqtest.NewTaskMessage(fmt.Sprintf("task%d", i), nil))
+		msgs = append(msgs, &base.MessageBatch{
+			Msg: asynqtest.NewTaskMessage(fmt.Sprintf("task%d", i), nil),
+		})
 	}
 	updateIds := func() {
 		for i := 0; i < batchSize; i++ {
-			msgs[i].ID = uuid.New()
+			msgs[i].Msg.ID = uuid.New()
 		}
 	}
 

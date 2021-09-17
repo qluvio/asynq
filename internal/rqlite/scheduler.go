@@ -1,6 +1,7 @@
 package rqlite
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -26,7 +27,7 @@ func listSchedulerEntries(conn *gorqlite.Connection, where string, whereParams .
 		st = st.Append(" WHERE "+where, whereParams...)
 	}
 
-	qrs, err := conn.Queries(st)
+	qrs, err := conn.QueryStmt(context.Background(), st)
 	if err != nil {
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
@@ -106,7 +107,7 @@ func listSchedulerEnqueueEvents(conn *gorqlite.Connection, entryID string, page 
 		page.Size,
 		page.Start())
 
-	qrs, err := conn.Queries(st)
+	qrs, err := conn.QueryStmt(context.Background(), st)
 	if err != nil {
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
@@ -121,7 +122,7 @@ func listAllSchedulerEnqueueEvents(conn *gorqlite.Connection, entryID string) ([
 			" ORDER BY ndx ",
 		entryID)
 
-	qrs, err := conn.Queries(st)
+	qrs, err := conn.QueryStmt(context.Background(), st)
 	if err != nil {
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
@@ -155,7 +156,7 @@ func writeSchedulerEntries(conn *gorqlite.Connection, schedulerID string, entrie
 			args[i]))
 	}
 
-	wrs, err := conn.Writes(stmts...)
+	wrs, err := conn.WriteStmt(context.Background(), stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}
@@ -168,7 +169,7 @@ func clearSchedulerEntries(conn *gorqlite.Connection, schedulerID string) error 
 	stmt := Statement(
 		"DELETE FROM "+SchedulersTable+" WHERE scheduler_id=?",
 		schedulerID)
-	wrs, err := conn.Writes(stmt)
+	wrs, err := conn.WriteStmt(context.Background(), stmt)
 	if err != nil {
 		return NewRqliteWError(op, wrs[0], err, stmt)
 	}
@@ -178,7 +179,7 @@ func clearSchedulerEntries(conn *gorqlite.Connection, schedulerID string) error 
 func clearSchedulerHistory(conn *gorqlite.Connection, entryID string) error {
 	stmt := Statement("DELETE FROM "+SchedulerHistoryTable+" WHERE uuid=?",
 		entryID)
-	wrs, err := conn.Writes(stmt)
+	wrs, err := conn.WriteStmt(context.Background(), stmt)
 	if err != nil {
 		return NewRqliteWError("rqlite.clearSchedulerHistory", wrs[0], err, stmt)
 	}
@@ -213,7 +214,7 @@ func recordSchedulerEnqueueEvent(conn *gorqlite.Connection, entryID string, even
 			entryID,
 			maxEvents),
 	}
-	wrs, err := conn.Writes(stmts...)
+	wrs, err := conn.WriteStmt(context.Background(), stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}

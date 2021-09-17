@@ -31,6 +31,13 @@ type Client struct {
 	loc  *time.Location
 }
 
+// BatchError is the error returned when doing batch processing
+type BatchError interface {
+	error
+	// MapErrors returns a map of index of failed tasks in the input to error
+	MapErrors() map[int]error
+}
+
 // makeBroker returns a base.Broker instance given a client connection option.
 func makeBroker(r ClientConnOpt) (base.Broker, error) {
 	c := r.MakeClient()
@@ -207,7 +214,7 @@ func (d processInOption) Value() interface{} { return time.Duration(d) }
 // ErrDuplicateTask indicates that the given task could not be enqueued since it's a duplicate of another task.
 //
 // ErrDuplicateTask error only applies to tasks enqueued with a Unique option.
-var ErrDuplicateTask = errors.New("task already exists")
+var ErrDuplicateTask = errors.ErrDuplicateTask
 
 type option struct {
 	retry     int
@@ -370,4 +377,156 @@ func (c *Client) schedule(msg *base.TaskMessage, t time.Time, uniqueTTL time.Dur
 		return c.rdb.ScheduleUnique(msg, t, ttl)
 	}
 	return c.rdb.Schedule(msg, t)
+}
+
+// EnqueueBatch enqueues the given tasks to be processed asynchronously.
+//
+// EnqueueBatch returns a slice of TaskInfo and an error.
+// If all tasks are enqueued successfully the returned error is nil, otherwise returns a non-nil error.
+// If enqueuing a task raised an error, the returned error is a BatchError indicating
+// which the index of the failed tasks and the task info in the returned slice is nil.
+//
+// The argument opts specifies the behavior of task processing.
+// If there are conflicting Option values the last one overrides others.
+// By default, max retry is set to 25 and timeout is set to 30 minutes.
+//
+// If no ProcessAt or ProcessIn options are provided, the task will be pending immediately.
+func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error) {
+	for _, task := range tasks {
+		if strings.TrimSpace(task.Type()) == "" {
+			return nil, fmt.Errorf("task typename cannot be empty")
+		}
+	}
+	tasksOpts := make([]option, 0, len(tasks))
+	var err error
+	{
+		var opt option
+		c.mu.Lock()
+		for _, task := range tasks {
+			taskOpts := append([]Option{}, opts...)
+			if defaults, ok := c.opts[task.Type()]; ok {
+				taskOpts = append(defaults, taskOpts...)
+			}
+			opt, err = composeOptions(taskOpts...)
+			if err != nil {
+				break
+			}
+			tasksOpts = append(tasksOpts, opt)
+		}
+		c.mu.Unlock()
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	allBm := make([]*base.MessageBatch, 0, len(tasks))
+	enqueue := make([]*base.MessageBatch, 0, len(tasks))
+	enqueueUnique := make([]*base.MessageBatch, 0, len(tasks))
+	schedule := make([]*base.MessageBatch, 0, len(tasks))
+	scheduleUnique := make([]*base.MessageBatch, 0, len(tasks))
+	now := time.Now()
+
+	for i, task := range tasks {
+		opt := tasksOpts[i]
+
+		deadline := noDeadline
+		if !opt.deadline.IsZero() {
+			deadline = opt.deadline
+		}
+		timeout := noTimeout
+		if opt.timeout != 0 {
+			timeout = opt.timeout
+		}
+		if deadline.Equal(noDeadline) && timeout == noTimeout {
+			// If neither deadline nor timeout are set, use default timeout.
+			timeout = defaultTimeout
+		}
+		var uniqueKey string
+		if opt.uniqueTTL > 0 {
+			uniqueKey = base.UniqueKey(opt.queue, task.Type(), task.Payload())
+		}
+		msg := &base.TaskMessage{
+			ID:        uuid.New(),
+			Type:      task.Type(),
+			Payload:   task.Payload(),
+			Queue:     opt.queue,
+			Retry:     opt.retry,
+			Deadline:  deadline.Unix(),
+			Timeout:   int64(timeout.Seconds()),
+			UniqueKey: uniqueKey,
+		}
+
+		var bm *base.MessageBatch
+		if opt.processAt.Before(now) || opt.processAt.Equal(now) {
+			opt.processAt = now
+			if c.loc != nil {
+				opt.processAt = now.In(c.loc)
+			}
+			if opt.uniqueTTL > 0 {
+				bm = &base.MessageBatch{
+					InputIndex: i,
+					Msg:        msg,
+					UniqueTTL:  opt.uniqueTTL,
+					ProcessAt:  opt.processAt,
+					State:      base.TaskStatePending,
+				}
+				enqueueUnique = append(enqueueUnique, bm)
+			} else {
+				bm = &base.MessageBatch{
+					InputIndex: i,
+					Msg:        msg,
+					ProcessAt:  opt.processAt,
+					State:      base.TaskStatePending,
+				}
+				enqueue = append(enqueue, bm)
+			}
+		} else {
+			if opt.uniqueTTL > 0 {
+				bm = &base.MessageBatch{
+					InputIndex: i,
+					Msg:        msg,
+					UniqueTTL:  opt.processAt.Add(opt.uniqueTTL).Sub(now),
+					ProcessAt:  opt.processAt,
+					State:      base.TaskStateScheduled,
+				}
+				scheduleUnique = append(scheduleUnique, bm)
+			} else {
+				bm = &base.MessageBatch{
+					InputIndex: i,
+					Msg:        msg,
+					ProcessAt:  opt.processAt,
+					State:      base.TaskStateScheduled,
+				}
+				schedule = append(schedule, bm)
+			}
+		}
+		allBm = append(allBm, bm)
+	}
+
+	if len(enqueue) > 0 {
+		_ = c.rdb.EnqueueBatch(enqueue...)
+	}
+	if len(enqueueUnique) > 0 {
+		_ = c.rdb.EnqueueUniqueBatch(enqueueUnique...)
+	}
+	if len(schedule) > 0 {
+		_ = c.rdb.ScheduleBatch(schedule...)
+	}
+	if len(scheduleUnique) > 0 {
+		_ = c.rdb.ScheduleUniqueBatch(scheduleUnique...)
+	}
+
+	ret := make([]*TaskInfo, len(tasks))
+	allErrs := make(map[int]error)
+	for i, msg := range allBm {
+		if msg.Err == nil {
+			ret[i] = newTaskInfo(msg.Msg, msg.State, msg.ProcessAt)
+		} else {
+			allErrs[i] = msg.Err
+		}
+	}
+	if len(allErrs) > 0 {
+		return ret, &errors.BatchError{Errors: allErrs}
+	}
+	return ret, nil
 }
