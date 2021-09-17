@@ -48,7 +48,7 @@ func makeBroker(r ClientConnOpt) (base.Broker, error) {
 	case *rqlite.RQLite:
 		return cl, nil
 	default:
-		return nil, errors.E("makeBroker", errors.Internal, fmt.Sprintf("asynq: unsupported ClientConnOpt type %T", r))
+		return nil, errors.E(errors.Op("makeBroker"), errors.Internal, fmt.Sprintf("asynq: unsupported ClientConnOpt type %T", r))
 	}
 }
 

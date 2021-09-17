@@ -34,7 +34,7 @@ func NewInspector(r ClientConnOpt) *Inspector {
 // the given server.
 func NewInspectorFrom(s *Server) (*Inspector, error) {
 	if s == nil {
-		return nil, errors.E("NewInspectorFrom", errors.Internal, "server is nil")
+		return nil, errors.E(errors.Op("NewInspectorFrom"), errors.Internal, "server is nil")
 	}
 	return newInspector(s.broker), nil
 }

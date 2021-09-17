@@ -49,7 +49,7 @@ func NewScheduler(r ClientConnOpt, opts *SchedulerOpts) *Scheduler {
 	}
 	scheduler, ok := broker.(base.Scheduler)
 	if !ok {
-		panic(errors.E("NewScheduler", errors.Internal, fmt.Sprintf("expecting a Scheduler, got %T", broker)))
+		panic(errors.E(errors.Op("NewScheduler"), errors.Internal, fmt.Sprintf("expecting a Scheduler, got %T", broker)))
 	}
 	return newScheduler(scheduler, opts)
 }
@@ -58,13 +58,14 @@ func NewScheduler(r ClientConnOpt, opts *SchedulerOpts) *Scheduler {
 // connection with the given server instance.
 // The parameter opts is optional, defaults will be used if opts is set to nil
 func NewSchedulerFrom(s *Server, opts *SchedulerOpts) (*Scheduler, error) {
+	op := errors.Op("NewSchedulerFrom")
 	if s == nil {
-		return nil, errors.E("NewSchedulerFrom", errors.Internal, "server is nil")
+		return nil, errors.E(op, errors.Internal, "server is nil")
 	}
 	broker := s.broker
 	scheduler, ok := broker.(base.Scheduler)
 	if !ok {
-		return nil, errors.E("NewSchedulerFrom", errors.Internal, fmt.Sprintf("expecting a Scheduler, got %T", broker))
+		return nil, errors.E(op, errors.Internal, fmt.Sprintf("expecting a Scheduler, got %T", broker))
 	}
 	return newScheduler(scheduler, opts), nil
 }
