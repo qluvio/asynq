@@ -2,6 +2,7 @@ package rqlite
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -139,6 +140,19 @@ func DropTables(conn *gorqlite.Connection) error {
 	stmts := make([]string, 0)
 	for table := range AllTables {
 		stmts = append(stmts, "DROP TABLE IF EXISTS "+table)
+	}
+	_, err := conn.Write(stmts)
+	return err
+}
+
+// PurgeTables purges data from all tables, except the version table.
+func PurgeTables(conn *gorqlite.Connection) error {
+	stmts := make([]string, 0)
+	for table := range AllTables {
+		if table == VersionTable {
+			continue
+		}
+		stmts = append(stmts, fmt.Sprintf("DELETE FROM '%s' ", table))
 	}
 	_, err := conn.Write(stmts)
 	return err

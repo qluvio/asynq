@@ -45,7 +45,7 @@ func (r *RQLite) pauseQueue(queue string, b bool) error {
 
 // ListServers returns the list of server info.
 func (r *RQLite) ListServers() ([]*base.ServerInfo, error) {
-	conn, err := r.client(errors.Op("rqlite.ListServers"))
+	conn, err := r.client("rqlite.ListServers")
 	if err != nil {
 		return nil, err
 	}
@@ -396,11 +396,13 @@ func (r *RQLite) ListWorkers() ([]*base.WorkerInfo, error) {
 
 func (r *RQLite) ClusterKeySlot(qname string) (int64, error) {
 	// PENDING(GIL): TODO ?
+	_ = qname
 	return 0, nil
 }
 
 func (r *RQLite) ClusterNodes(qname string) ([]*base.ClusterNode, error) {
 	// PENDING(GIL): TODO ?
+	_ = qname
 	return []*base.ClusterNode{}, nil
 }
 
@@ -442,4 +444,16 @@ func (r *RQLite) ListSchedulerEnqueueEvents(entryID string, pgn base.Pagination)
 	}
 
 	return ret, nil
+}
+
+func (r *RQLite) Purge(dropTables bool) error {
+	var op errors.Op = "rqlite.Purge"
+	conn, err := r.client(op)
+	if err != nil {
+		return err
+	}
+	if dropTables {
+		return DropTables(conn)
+	}
+	return PurgeTables(conn)
 }

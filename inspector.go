@@ -847,3 +847,7 @@ func (i *Inspector) ListSchedulerEnqueueEvents(entryID string, opts ...ListOptio
 	}
 	return events, nil
 }
+
+func (i *Inspector) Purge(dropTables bool) error {
+	return i.rdb.Purge(dropTables)
+}

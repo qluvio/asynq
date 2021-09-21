@@ -1499,3 +1499,20 @@ func (r *RDB) ClusterNodes(qname string) ([]*base.ClusterNode, error) {
 	}
 	return nil, fmt.Errorf("nodes not found")
 }
+
+// Purge deletes all the keys of the currently selected DB.
+func (r *RDB) Purge(_ bool) error {
+	var err error
+	switch c := r.client.(type) {
+	case *redis.Client:
+		err = c.FlushDB(context.Background()).Err()
+	case *redis.ClusterClient:
+		err = c.ForEachMaster(context.Background(), func(ctx context.Context, c *redis.Client) error {
+			if err := c.FlushAll(ctx).Err(); err != nil {
+				return err
+			}
+			return nil
+		})
+	}
+	return err
+}

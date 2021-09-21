@@ -118,6 +118,10 @@ type Inspector interface {
 	ListSchedulerEntries() ([]*SchedulerEntry, error)
 	// ListSchedulerEnqueueEvents returns the list of scheduler enqueue events.
 	ListSchedulerEnqueueEvents(entryID string, pgn Pagination) ([]*SchedulerEnqueueEvent, error)
+
+	// Purge removes all data regardless of any state. Mainly useful for tests.
+	// If dropTables is true, it additionally drops tables (for brokers using SQL)
+	Purge(dropTables bool) error
 }
 
 // Pagination specifies the page size and page number
