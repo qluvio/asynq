@@ -32,8 +32,9 @@ var _ base.Inspector = (*RQLite)(nil)
 var slog log.Base
 
 type Config struct {
-	RqliteUrl        string `json:"rqlite_url"`        // Rqlite server url, e.g. http://localhost:4001.
-	ConsistencyLevel string `json:"consistency_level"` // consistency level: none | weak| strong
+	RqliteUrl        string `json:"rqlite_url"`              // Rqlite server url, e.g. http://localhost:4001.
+	ConsistencyLevel string `json:"consistency_level"`       // consistency level: none | weak| strong
+	TablesPrefix     string `json:"tables_prefix,omitempty"` // tables prefix
 }
 
 func (c *Config) InitDefaults() *Config {
@@ -58,7 +59,7 @@ type RQLite struct {
 	config     Config
 	httpClient *http.Client
 	mu         sync.Mutex
-	conn       *gorqlite.Connection
+	conn       *Connection
 	logger     log.Base
 }
 
@@ -98,8 +99,7 @@ func (r *RQLite) Open() error {
 }
 
 func (r *RQLite) context() context.Context {
-	// PENDING(GIL): for now just basic
-	return context.Background()
+	return r.conn.ctx()
 }
 
 // open validates the config and opens the connection with rqlite.
@@ -117,12 +117,12 @@ func (r *RQLite) open() error {
 	if err != nil {
 		return errors.E(op, errors.Internal, err)
 	}
-	r.conn = &conn
+	r.conn = NewConnection(&conn, r.config.TablesPrefix)
 	err = r.conn.SetConsistencyLevel(r.config.ConsistencyLevel)
 	if err != nil {
 		return errors.E(op, errors.Internal, err)
 	}
-	_, err = CreateTablesIfNotExist(r.conn)
+	_, err = r.conn.CreateTablesIfNotExist()
 	if err != nil {
 		return errors.E(op, errors.Internal, err)
 	}
@@ -130,7 +130,7 @@ func (r *RQLite) open() error {
 }
 
 // Client returns the reference to underlying rqlite client.
-func (r *RQLite) Client() (*gorqlite.Connection, error) {
+func (r *RQLite) Client() (*Connection, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -141,7 +141,7 @@ func (r *RQLite) Client() (*gorqlite.Connection, error) {
 	return r.conn, nil
 }
 
-func (r *RQLite) client(op errors.Op) (*gorqlite.Connection, error) {
+func (r *RQLite) client(op errors.Op) (*Connection, error) {
 	conn, err := r.Client()
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
@@ -171,7 +171,7 @@ func (r *RQLite) Enqueue(msg *base.TaskMessage) error {
 		return err
 	}
 
-	return enqueueMessages(conn, &base.MessageBatch{Msg: msg})
+	return conn.enqueueMessages(&base.MessageBatch{Msg: msg})
 }
 
 // EnqueueBatch adds the given tasks to the pending list of the queue.
@@ -181,7 +181,7 @@ func (r *RQLite) EnqueueBatch(msgs ...*base.MessageBatch) error {
 	if err != nil {
 		return err
 	}
-	return enqueueMessages(conn, msgs...)
+	return conn.enqueueMessages(msgs...)
 }
 
 // EnqueueUnique inserts the given task if the task's uniqueness lock can be acquired.
@@ -192,7 +192,7 @@ func (r *RQLite) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration) error {
 	if err != nil {
 		return err
 	}
-	return enqueueUniqueMessages(conn, &base.MessageBatch{
+	return conn.enqueueUniqueMessages(&base.MessageBatch{
 		Msg:       msg,
 		UniqueTTL: ttl,
 	})
@@ -206,7 +206,7 @@ func (r *RQLite) EnqueueUniqueBatch(msg ...*base.MessageBatch) error {
 	if err != nil {
 		return err
 	}
-	return enqueueUniqueMessages(conn, msg...)
+	return conn.enqueueUniqueMessages(msg...)
 }
 
 // Dequeue queries given queues in order and pops a task message
@@ -230,17 +230,14 @@ func (r *RQLite) Dequeue(qnames ...string) (msg *base.TaskMessage, deadline time
 			continue
 		}
 
-		data, err := dequeueMessage(conn, qname)
+		data, err := conn.dequeueMessage(qname)
 		if err != nil {
 			return nil, time.Time{}, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
 		}
 		if data == nil {
 			continue
 		}
-		if msg, err = decodeMessage([]byte(data.msg)); err != nil {
-			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cannot decode message: %v", err))
-		}
-		return msg, utc.Unix(data.deadline, 0).Time, nil
+		return data.msg, utc.Unix(data.deadline, 0).Time, nil
 	}
 	return nil, time.Time{}, errors.E(op, errors.NotFound, errors.ErrNoProcessableTask)
 }
@@ -253,7 +250,7 @@ func (r *RQLite) Done(msg *base.TaskMessage) error {
 	if err != nil {
 		return err
 	}
-	return setTaskDone(conn, msg)
+	return conn.setTaskDone(msg)
 }
 
 // Requeue moves the task from active to pending in the specified queue.
@@ -262,7 +259,7 @@ func (r *RQLite) Requeue(msg *base.TaskMessage) error {
 	if err != nil {
 		return err
 	}
-	return requeueTask(conn, msg)
+	return conn.requeueTask(msg)
 }
 
 // Schedule adds the task to the scheduled set to be processed in the future.
@@ -273,7 +270,7 @@ func (r *RQLite) Schedule(msg *base.TaskMessage, processAt time.Time) error {
 		return err
 	}
 
-	return scheduleTasks(conn, &base.MessageBatch{
+	return conn.scheduleTasks(&base.MessageBatch{
 		Msg:       msg,
 		ProcessAt: processAt,
 	})
@@ -287,7 +284,7 @@ func (r *RQLite) ScheduleBatch(msg ...*base.MessageBatch) error {
 		return err
 	}
 
-	return scheduleTasks(conn, msg...)
+	return conn.scheduleTasks(msg...)
 }
 
 // ScheduleUnique adds the task to the backlog queue to be processed in the future
@@ -300,7 +297,7 @@ func (r *RQLite) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl 
 		return err
 	}
 
-	return scheduleUniqueTasks(conn, &base.MessageBatch{
+	return conn.scheduleUniqueTasks(&base.MessageBatch{
 		Msg:       msg,
 		UniqueTTL: ttl,
 		ProcessAt: processAt,
@@ -317,7 +314,7 @@ func (r *RQLite) ScheduleUniqueBatch(msg ...*base.MessageBatch) error {
 		return err
 	}
 
-	return scheduleUniqueTasks(conn, msg...)
+	return conn.scheduleUniqueTasks(msg...)
 }
 
 // Retry moves the task from active to retry queue, incrementing retry count
@@ -327,7 +324,7 @@ func (r *RQLite) Retry(msg *base.TaskMessage, processAt time.Time, errMsg string
 	if err != nil {
 		return err
 	}
-	return retryTask(conn, msg, processAt, errMsg, isFailure)
+	return conn.retryTask(msg, processAt, errMsg, isFailure)
 }
 
 // Archive sends the given task to archive, attaching the error message to the task.
@@ -337,7 +334,7 @@ func (r *RQLite) Archive(msg *base.TaskMessage, errMsg string) error {
 	if err != nil {
 		return err
 	}
-	return archiveTask(conn, msg, errMsg)
+	return conn.archiveTask(msg, errMsg)
 }
 
 // ForwardIfReady checks scheduled and retry sets of the given queues
@@ -360,7 +357,7 @@ func (r *RQLite) forward(qname, src string) (int, error) {
 		return 0, err
 	}
 
-	return forwardTasks(conn, qname, src)
+	return conn.forwardTasks(qname, src)
 }
 
 // forwardAll checks for tasks in scheduled/retry state that are ready to be run,
@@ -394,7 +391,7 @@ func (r *RQLite) ListDeadlineExceeded(deadline time.Time, qnames ...string) ([]*
 	var op errors.Op = "rqlite.ListDeadlineExceeded"
 	var msgs []*base.TaskMessage
 	for _, qname := range qnames {
-		res, err := listDeadlineExceededTasks(conn, qname, deadline)
+		res, err := conn.listDeadlineExceededTasks(qname, deadline)
 		if err != nil {
 			return nil, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
 		}
@@ -412,7 +409,7 @@ func (r *RQLite) WriteServerState(serverInfo *base.ServerInfo, workers []*base.W
 	if err != nil {
 		return err
 	}
-	return writeServerState(conn, serverInfo, workers, ttl)
+	return conn.writeServerState(serverInfo, workers, ttl)
 }
 
 // ClearServerState deletes server state data from rqlite.
@@ -421,7 +418,7 @@ func (r *RQLite) ClearServerState(host string, pid int, serverID string) error {
 	if err != nil {
 		return err
 	}
-	return clearServerState(conn, host, pid, serverID)
+	return conn.clearServerState(host, pid, serverID)
 }
 
 // WriteSchedulerEntries writes scheduler entries data to rqlite with expiration set to the value ttl.
@@ -430,7 +427,7 @@ func (r *RQLite) WriteSchedulerEntries(schedulerID string, entries []*base.Sched
 	if err != nil {
 		return err
 	}
-	return writeSchedulerEntries(conn, schedulerID, entries, ttl)
+	return conn.writeSchedulerEntries(schedulerID, entries, ttl)
 }
 
 // ClearSchedulerEntries deletes scheduler entries data from rqlite.
@@ -439,7 +436,7 @@ func (r *RQLite) ClearSchedulerEntries(schedulerID string) error {
 	if err != nil {
 		return err
 	}
-	return clearSchedulerEntries(conn, schedulerID)
+	return conn.clearSchedulerEntries(schedulerID)
 }
 
 var _ base.PubSub = (*rqlitePubSub)(nil)
@@ -481,9 +478,9 @@ func (r *RQLite) CancelationPubSub() (base.PubSub, error) {
 				close(ret.ch)
 				break out
 			case <-ticker.C:
-				st := Statement("SELECT uuid FROM " + CancellationTable +
-					" WHERE ndx = (SELECT COALESCE(MAX(ndx),0) FROM " + CancellationTable + ")")
-				qrs, err := conn.QueryStmt(context.Background(), st)
+				st := Statement("SELECT uuid FROM " + conn.table(CancellationTable) +
+					" WHERE ndx = (SELECT COALESCE(MAX(ndx),0) FROM " + conn.table(CancellationTable) + ")")
+				qrs, err := conn.QueryStmt(r.context(), st)
 				if err != nil {
 					r.logger.Error(fmt.Sprintf("cancellation channel query failed: %v", err))
 					if strings.Contains(err.Error(), "gorqlite: connection is closed") {
@@ -505,10 +502,10 @@ func (r *RQLite) CancelationPubSub() (base.PubSub, error) {
 				}
 				ret.ch <- uuid
 
-				st = Statement("DELETE FROM "+CancellationTable+
+				st = Statement("DELETE FROM "+conn.table(CancellationTable)+
 					" WHERE uuid=?",
 					uuid)
-				wrs, err := conn.WriteStmt(context.Background(), st)
+				wrs, err := conn.WriteStmt(r.context(), st)
 				if err != nil {
 					r.logger.Error(fmt.Sprintf("cancellation channel delete failed: %v", NewRqliteWError(op, wrs[0], err, st)))
 				}
@@ -529,10 +526,10 @@ func (r *RQLite) PublishCancelation(id string) error {
 	}
 
 	st := Statement(
-		"INSERT INTO "+CancellationTable+"(uuid, cancelled_at) VALUES(?, ?) ",
+		"INSERT INTO "+conn.table(CancellationTable)+"(uuid, cancelled_at) VALUES(?, ?) ",
 		id,
 		utc.Now().Unix())
-	wrs, err := conn.WriteStmt(context.Background(), st)
+	wrs, err := conn.WriteStmt(r.context(), st)
 	if err != nil {
 		return NewRqliteWError(op, wrs[0], err, st)
 	}
@@ -545,7 +542,7 @@ func (r *RQLite) RecordSchedulerEnqueueEvent(entryID string, event *base.Schedul
 	if err != nil {
 		return err
 	}
-	return recordSchedulerEnqueueEvent(conn, entryID, event)
+	return conn.recordSchedulerEnqueueEvent(entryID, event)
 }
 
 // ClearSchedulerHistory deletes the enqueue event history for the given scheduler entry.
@@ -555,5 +552,5 @@ func (r *RQLite) ClearSchedulerHistory(entryID string) error {
 	if err != nil {
 		return err
 	}
-	return clearSchedulerHistory(conn, entryID)
+	return conn.clearSchedulerHistory(entryID)
 }

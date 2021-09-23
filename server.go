@@ -536,6 +536,12 @@ func (srv *Server) Shutdown() {
 //
 // Stop does not shutdown the server, make sure to call Shutdown before exit.
 func (srv *Server) Stop() {
+	switch srv.state.Get() {
+	case base.StateNew, base.StateClosed, base.StateStopped:
+		// server is not running, do nothing and return.
+		return
+	}
+
 	srv.logger.Info("Stopping processor")
 	srv.processor.stop()
 	srv.state.Set(base.StateStopped)

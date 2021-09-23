@@ -156,6 +156,8 @@ func (s TaskState) String() string {
 }
 
 type ClientConnOpt interface {
+	// Logger returns a Logger or nil
+	Logger() Logger
 	// MakeClient returns a new client instance.
 	// Return value is intentionally opaque to hide the implementation detail of client.
 	MakeClient() interface{}

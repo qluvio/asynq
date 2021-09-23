@@ -44,12 +44,12 @@ func TestErrorString(t *testing.T) {
 		{
 			desc: "With Op, Code, and string",
 			err:  E(Op("rdb.DeleteTask"), NotFound, "cannot find task with id=123"),
-			want: "NOT_FOUND: cannot find task with id=123",
+			want: "rdb.DeleteTask: NOT_FOUND: cannot find task with id=123",
 		},
 		{
 			desc: "With Op, Code and error",
 			err:  E(Op("rdb.DeleteTask"), NotFound, &TaskNotFoundError{Queue: "default", ID: "123"}),
-			want: `NOT_FOUND: cannot find task with id=123 in queue "default"`,
+			want: `rdb.DeleteTask: NOT_FOUND: cannot find task with id=123 in queue "default"`,
 		},
 	}
 

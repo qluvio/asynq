@@ -74,10 +74,16 @@ type RedisClientOpt struct {
 	// TLS Config used to connect to a server.
 	// TLS will be negotiated only if this field is set.
 	TLSConfig *tls.Config
+
+	Log Logger
 }
 
 func (opt RedisClientOpt) MakeClient() interface{} {
 	return opt.MakeRedisClient()
+}
+
+func (opt RedisClientOpt) Logger() Logger {
+	return opt.Log
 }
 
 func (opt RedisClientOpt) MakeRedisClient() interface{} {
@@ -149,10 +155,16 @@ type RedisFailoverClientOpt struct {
 	// TLS Config used to connect to a server.
 	// TLS will be negotiated only if this field is set.
 	TLSConfig *tls.Config
+
+	Log Logger
 }
 
 func (opt RedisFailoverClientOpt) MakeClient() interface{} {
 	return opt.MakeRedisClient()
+}
+
+func (opt RedisFailoverClientOpt) Logger() Logger {
+	return opt.Log
 }
 
 func (opt RedisFailoverClientOpt) MakeRedisClient() interface{} {
@@ -213,10 +225,16 @@ type RedisClusterClientOpt struct {
 	// TLS Config used to connect to a server.
 	// TLS will be negotiated only if this field is set.
 	TLSConfig *tls.Config
+
+	Log Logger
 }
 
 func (opt RedisClusterClientOpt) MakeClient() interface{} {
 	return opt.MakeRedisClient()
+}
+
+func (opt RedisClusterClientOpt) Logger() Logger {
+	return opt.Log
 }
 
 func (opt RedisClusterClientOpt) MakeRedisClient() interface{} {

@@ -1,7 +1,6 @@
 package rqlite
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -20,23 +19,23 @@ type serverRow struct {
 	server     *base.ServerInfo
 }
 
-func getServer(conn *gorqlite.Connection, info *base.ServerInfo) ([]*serverRow, error) {
-	return listServers(conn, " host=? AND pid=? AND sid=?", info.Host, info.PID, info.ServerID)
+func (conn *Connection) getServer(info *base.ServerInfo) ([]*serverRow, error) {
+	return conn.listServers(" host=? AND pid=? AND sid=?", info.Host, info.PID, info.ServerID)
 }
 
-func listAllServers(conn *gorqlite.Connection) ([]*serverRow, error) {
-	return listServers(conn, "")
+func (conn *Connection) listAllServers() ([]*serverRow, error) {
+	return conn.listServers("")
 }
 
-func listServers(conn *gorqlite.Connection, where string, whereParams ...interface{}) ([]*serverRow, error) {
+func (conn *Connection) listServers(where string, whereParams ...interface{}) ([]*serverRow, error) {
 	op := errors.Op("listServers")
 	st := Statement("SELECT sid, pid, host, expire_at, server_info" +
-		" FROM " + ServersTable + " ")
+		" FROM " + conn.table(ServersTable) + " ")
 	if len(where) > 0 {
 		st = st.Append(" WHERE "+where, whereParams...)
 	}
 
-	qrs, err := conn.QueryStmt(context.Background(), st)
+	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
@@ -77,24 +76,24 @@ type workerRow struct {
 	worker     *base.WorkerInfo
 }
 
-func listAllWorkers(conn *gorqlite.Connection) ([]*workerRow, error) {
-	return listWorkers(conn, "")
+func (conn *Connection) listAllWorkers() ([]*workerRow, error) {
+	return conn.listWorkers("")
 }
 
-func getWorkers(conn *gorqlite.Connection, sid string) ([]*workerRow, error) {
-	return listWorkers(conn, " sid=?", sid)
+func (conn *Connection) getWorkers(sid string) ([]*workerRow, error) {
+	return conn.listWorkers(" sid=?", sid)
 }
 
-func listWorkers(conn *gorqlite.Connection, where string, whereParams ...interface{}) ([]*workerRow, error) {
+func (conn *Connection) listWorkers(where string, whereParams ...interface{}) ([]*workerRow, error) {
 	op := errors.Op("getWorkers")
 
 	st := Statement("SELECT sid, task_uuid, expire_at, worker_info" +
-		" FROM " + WorkersTable + " ")
+		" FROM " + conn.table(WorkersTable) + " ")
 	if len(where) > 0 {
 		st = st.Append(" WHERE "+where, whereParams...)
 	}
 
-	qrs, err := conn.QueryStmt(context.Background(), st)
+	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
@@ -126,7 +125,7 @@ func listWorkers(conn *gorqlite.Connection, where string, whereParams ...interfa
 	return ret, nil
 }
 
-func writeServerState(conn *gorqlite.Connection, serverInfo *base.ServerInfo, workers []*base.WorkerInfo, ttl time.Duration) error {
+func (conn *Connection) writeServerState(serverInfo *base.ServerInfo, workers []*base.WorkerInfo, ttl time.Duration) error {
 	op := errors.Op("rqlite.writeServerState")
 
 	srvInfo, err := encodeServerInfo(serverInfo)
@@ -145,14 +144,14 @@ func writeServerState(conn *gorqlite.Connection, serverInfo *base.ServerInfo, wo
 
 	stmts := make([]*gorqlite.Statement, 0, len(workersMap)+2)
 	stmts = append(stmts, Statement(
-		"INSERT INTO "+ServersTable+" (sid, pid, host, server_info, expire_at) "+
+		"INSERT INTO "+conn.table(ServersTable)+" (sid, pid, host, server_info, expire_at) "+
 			" VALUES(?, ?, ?, ?, ?) "+
 			" ON CONFLICT(sid) DO UPDATE SET "+
 			"   pid=?,"+
 			"   host=?,"+
 			"   server_info=?,"+
 			"   expire_at=?"+
-			" WHERE "+ServersTable+".expire_at<=?",
+			" WHERE "+conn.table(ServersTable)+".expire_at<=?",
 		serverInfo.ServerID,
 		serverInfo.PID,
 		serverInfo.Host,
@@ -166,12 +165,12 @@ func writeServerState(conn *gorqlite.Connection, serverInfo *base.ServerInfo, wo
 
 	// remove expired entries
 	stmts = append(stmts, Statement(
-		"DELETE FROM "+WorkersTable+" WHERE sid=?"+
+		"DELETE FROM "+conn.table(WorkersTable)+" WHERE sid=?"+
 			" AND expire_at<=?",
 		serverInfo.ServerID,
 		now.Unix()))
 	for wid, wnfo := range workersMap {
-		stmts = append(stmts, Statement("INSERT INTO "+WorkersTable+" (sid,task_uuid,expire_at,worker_info) "+
+		stmts = append(stmts, Statement("INSERT INTO "+conn.table(WorkersTable)+" (sid,task_uuid,expire_at,worker_info) "+
 			" VALUES(?, ?, ?, ?)",
 			serverInfo.ServerID,
 			wid,
@@ -179,27 +178,27 @@ func writeServerState(conn *gorqlite.Connection, serverInfo *base.ServerInfo, wo
 			wnfo))
 	}
 
-	wrs, err := conn.WriteStmt(context.Background(), stmts...)
+	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}
 	return nil
 }
 
-func clearServerState(conn *gorqlite.Connection, host string, pid int, serverID string) error {
+func (conn *Connection) clearServerState(host string, pid int, serverID string) error {
 	op := errors.Op("rqlite.clearServerState")
 
 	stmts := make([]*gorqlite.Statement, 0)
 	stmts = append(stmts, Statement(
-		"DELETE FROM "+ServersTable+" WHERE sid=? AND pid=? AND host=?",
+		"DELETE FROM "+conn.table(ServersTable)+" WHERE sid=? AND pid=? AND host=?",
 		serverID,
 		pid,
 		host))
 	stmts = append(stmts, Statement(
-		"DELETE FROM "+WorkersTable+" WHERE sid=?",
+		"DELETE FROM "+conn.table(WorkersTable)+" WHERE sid=?",
 		serverID))
 
-	wrs, err := conn.WriteStmt(context.Background(), stmts...)
+	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}

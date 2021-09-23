@@ -26,7 +26,7 @@ type Error struct {
 	Err  error
 }
 
-func (e *Error) DebugString() string {
+func (e *Error) Error() string {
 	var b strings.Builder
 	if e.Op != "" {
 		b.WriteString(string(e.Op))
@@ -46,18 +46,8 @@ func (e *Error) DebugString() string {
 	return b.String()
 }
 
-func (e *Error) Error() string {
-	var b strings.Builder
-	if e.Code != Unspecified {
-		b.WriteString(e.Code.String())
-	}
-	if e.Err != nil {
-		if b.Len() > 0 {
-			b.WriteString(": ")
-		}
-		b.WriteString(e.Err.Error())
-	}
-	return b.String()
+func (e *Error) DebugString() string {
+	return e.Error()
 }
 
 func (e *Error) Unwrap() error {

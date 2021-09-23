@@ -1,7 +1,6 @@
 package rqlite
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -22,7 +21,7 @@ func SeedAllPendingQueues(tb testing.TB, r *RQLite, pending map[string][]*base.T
 
 // SeedPendingQueue initializes the specified queue with the given pending messages.
 func SeedPendingQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname string) {
-	err := EnsureQueue(r.conn, qname)
+	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 	for _, msg := range msgs {
 		require.Equal(tb, qname, msg.Queue)
@@ -38,13 +37,12 @@ func SeedAllDeadlines(tb testing.TB, r *RQLite, deadlines map[string][]base.Z, u
 }
 
 func seedDeadlines(tb testing.TB, r *RQLite, deadlines []base.Z, qname string, uniqueKeyTTL time.Duration) {
-	err := EnsureQueue(r.conn, qname)
+	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 	for _, msg := range deadlines {
 		require.Equal(tb, msg.Message.Queue, qname)
 
-		count, err := getTaskCount(
-			r.conn,
+		count, err := r.conn.getTaskCount(
 			qname,
 			"task_uuid", msg.Message.ID.String())
 		require.NoError(tb, err)
@@ -60,10 +58,10 @@ func seedDeadlines(tb testing.TB, r *RQLite, deadlines []base.Z, qname string, u
 
 		deadline := msg.Score
 		st := Statement(
-			"UPDATE "+TasksTable+" SET deadline=? WHERE task_uuid=?",
+			"UPDATE "+r.conn.table(TasksTable)+" SET deadline=? WHERE task_uuid=?",
 			deadline,
 			msg.Message.ID.String())
-		wrs, err := r.conn.WriteStmt(context.Background(), st)
+		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 	}
 }
@@ -82,7 +80,7 @@ func SeedAllActiveQueues(tb testing.TB, r *RQLite, deadlines map[string][]*base.
 
 // SeedActiveQueue initializes the specified queue with the given active messages.
 func SeedActiveQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname string, insertFirst bool) {
-	err := EnsureQueue(r.conn, qname)
+	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 	if insertFirst {
 		SeedPendingQueue(tb, r, msgs, qname)
@@ -98,9 +96,9 @@ func SeedActiveQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname s
 		//require.NoError(tb, err)
 
 		st := Statement(
-			"UPDATE "+TasksTable+" SET state='active' WHERE task_uuid=?",
+			"UPDATE "+r.conn.table(TasksTable)+" SET state='active' WHERE task_uuid=?",
 			msg.ID.String())
-		wrs, err := r.conn.WriteStmt(context.Background(), st)
+		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.Equal(tb, int64(1), wrs[0].RowsAffected)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 	}
@@ -114,7 +112,7 @@ func SeedAllRetryQueues(tb testing.TB, r *RQLite, deadlines map[string][]base.Z)
 
 // SeedRetryQueue initializes the specified queue with the given retry messages.
 func SeedRetryQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
-	err := EnsureQueue(r.conn, qname)
+	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 
 	for _, msg := range msgs {
@@ -133,10 +131,10 @@ func SeedRetryQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 
 		retryAt := msg.Score
 		st := Statement(
-			"UPDATE "+TasksTable+" SET state='retry', retry_at=? WHERE task_uuid=?",
+			"UPDATE "+r.conn.table(TasksTable)+" SET state='retry', retry_at=? WHERE task_uuid=?",
 			retryAt,
 			msg.Message.ID.String())
-		wrs, err := r.conn.WriteStmt(context.Background(), st)
+		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 	}
 }
@@ -149,7 +147,7 @@ func SeedAllArchivedQueues(tb testing.TB, r *RQLite, deadlines map[string][]base
 
 // SeedArchivedQueue initializes the specified queue with the given archived messages.
 func SeedArchivedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
-	err := EnsureQueue(r.conn, qname)
+	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 
 	for _, msg := range msgs {
@@ -168,10 +166,10 @@ func SeedArchivedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 
 		deadline := msg.Score
 		st := Statement(
-			"UPDATE "+TasksTable+" SET state='archived', archived_at=? WHERE task_uuid=?",
+			"UPDATE "+r.conn.table(TasksTable)+" SET state='archived', archived_at=? WHERE task_uuid=?",
 			deadline,
 			msg.Message.ID.String())
-		wrs, err := r.conn.WriteStmt(context.Background(), st)
+		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 
 		require.NoError(tb, err)
@@ -187,7 +185,7 @@ func SeedAllScheduledQueues(tb testing.TB, r *RQLite, deadlines map[string][]bas
 
 // SeedScheduledQueue initializes the specified queue with the given scheduled messages.
 func SeedScheduledQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
-	err := EnsureQueue(r.conn, qname)
+	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 
 	for _, msg := range msgs {
@@ -220,7 +218,7 @@ func SeedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneA
 
 // seedProcessedQueue initializes the specified queue with the number of processed messages.
 func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneAt int64, failed bool) {
-	err := EnsureQueue(r.conn, qname)
+	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 
 	stmts := make([]*gorqlite.Statement, 0, count)
@@ -232,9 +230,10 @@ func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneA
 		var st *gorqlite.Statement
 		if !failed {
 			st = Statement(
-				"INSERT INTO "+TasksTable+"(queue_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, pndx, state, done_at) "+
-					"VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, ?, ?)",
+				"INSERT INTO "+r.conn.table(TasksTable)+"(queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, pndx, state, done_at) "+
+					"VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+r.conn.table(TasksTable)+")+1, ?, ?)",
 				qname,
+				task.Type,
 				task.ID.String(),
 				task.ID.String(),
 				em,
@@ -244,9 +243,10 @@ func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneA
 				doneAt)
 		} else {
 			st = Statement(
-				"INSERT INTO "+TasksTable+"(queue_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, pndx, state, done_at, failed) "+
-					"VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+TasksTable+")+1, ?, ?, ?)",
+				"INSERT INTO "+r.conn.table(TasksTable)+"(queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, pndx, state, done_at, failed) "+
+					"VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+r.conn.table(TasksTable)+")+1, ?, ?, ?)",
 				qname,
+				task.Type,
 				task.ID.String(),
 				task.ID.String(),
 				em,
@@ -260,7 +260,7 @@ func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneA
 	}
 
 	if len(stmts) > 0 {
-		_, err = r.conn.WriteStmt(context.Background(), stmts...)
+		_, err = r.conn.WriteStmt(r.conn.ctx(), stmts...)
 		require.NoError(tb, err, "error %v", err)
 	}
 }

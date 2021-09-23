@@ -1,7 +1,6 @@
 package rqlite
 
 import (
-	"context"
 	"sort"
 	"testing"
 	"time"
@@ -35,21 +34,21 @@ func GetScheduledMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMe
 func getMessages(tb testing.TB, r *RQLite, queue string, state string) []*base.TaskMessage {
 	require.NotNil(tb, r.conn)
 	st := Statement(
-		"SELECT ndx,pndx,task_msg,task_timeout,task_deadline FROM "+TasksTable+
-			" WHERE "+TasksTable+".queue_name=? "+
+		"SELECT ndx,pndx,task_msg,task_timeout,task_deadline FROM "+r.conn.table(TasksTable)+
+			" WHERE "+r.conn.table(TasksTable)+".queue_name=? "+
 			" AND state=?",
 		queue,
 		state)
-	qrs, err := r.conn.QueryStmt(context.Background(), st)
+	qrs, err := r.conn.QueryStmt(r.conn.ctx(), st)
 	require.NoError(tb, err)
 
 	qr := qrs[0]
 	ret := make([]*base.TaskMessage, 0)
 	for qr.Next() {
 		deq := &dequeueRow{}
-		err = qr.Scan(&deq.ndx, &deq.pndx, &deq.msg, &deq.timeout, &deq.deadline)
+		err = qr.Scan(&deq.ndx, &deq.pndx, &deq.taskMsg, &deq.timeout, &deq.deadline)
 		require.NoError(tb, err)
-		msg, err := decodeMessage([]byte(deq.msg))
+		msg, err := decodeMessage([]byte(deq.taskMsg))
 		require.NoError(tb, err)
 		ret = append(ret, msg)
 	}
@@ -59,22 +58,22 @@ func getMessages(tb testing.TB, r *RQLite, queue string, state string) []*base.T
 func GetDeadlinesEntries(tb testing.TB, r *RQLite, queue string) []base.Z {
 	require.NotNil(tb, r.conn)
 	st := Statement(
-		"SELECT task_msg,deadline FROM "+TasksTable+
-			" WHERE "+TasksTable+".queue_name=? "+
+		"SELECT task_msg,deadline FROM "+r.conn.table(TasksTable)+
+			" WHERE "+r.conn.table(TasksTable)+".queue_name=? "+
 			" AND state='active'",
 		queue)
-	qrs, err := r.conn.QueryStmt(context.Background(), st)
+	qrs, err := r.conn.QueryStmt(r.conn.ctx(), st)
 	require.NoError(tb, err)
 
 	qr := qrs[0]
 	ret := make([]base.Z, 0)
 	for qr.Next() {
 		deq := &dequeueResult{}
-		err = qr.Scan(&deq.msg, &deq.deadline)
+		err = qr.Scan(&deq.taskMsg, &deq.deadline)
 		require.NoError(tb, err)
-		msg, err := decodeMessage([]byte(deq.msg))
+		deq.msg, err = decodeMessage([]byte(deq.taskMsg))
 		require.NoError(tb, err)
-		ret = append(ret, base.Z{Score: deq.deadline, Message: msg})
+		ret = append(ret, base.Z{Score: deq.deadline, Message: deq.msg})
 	}
 
 	sort.Slice(ret, func(i, j int) bool {
@@ -111,7 +110,7 @@ func scoredEntries(rows []*taskRow, getDeadline func(t *taskRow) int64) []base.Z
 
 func GetRetryEntries(tb testing.TB, r *RQLite, queue string) []base.Z {
 	require.NotNil(tb, r.conn)
-	rows, err := listTasks(r.conn, queue, retry)
+	rows, err := r.conn.listTasks(queue, retry)
 	require.NoError(tb, err)
 
 	return scoredEntries(rows, func(r *taskRow) int64 { return r.retryAt })
@@ -119,7 +118,7 @@ func GetRetryEntries(tb testing.TB, r *RQLite, queue string) []base.Z {
 
 func GetArchivedEntries(tb testing.TB, r *RQLite, queue string) []base.Z {
 	require.NotNil(tb, r.conn)
-	rows, err := listTasks(r.conn, queue, archived)
+	rows, err := r.conn.listTasks(queue, archived)
 	require.NoError(tb, err)
 
 	return scoredEntries(rows, func(r *taskRow) int64 { return r.archivedAt })
@@ -127,7 +126,7 @@ func GetArchivedEntries(tb testing.TB, r *RQLite, queue string) []base.Z {
 
 func GetScheduledEntries(tb testing.TB, r *RQLite, queue string) []base.Z {
 	require.NotNil(tb, r.conn)
-	rows, err := listTasks(r.conn, queue, scheduled)
+	rows, err := r.conn.listTasks(queue, scheduled)
 	require.NoError(tb, err)
 
 	return scoredEntries(rows, func(r *taskRow) int64 { return r.scheduledAt })
@@ -138,13 +137,13 @@ func GetUniqueKeyTTL(tb testing.TB, r *RQLite, queue string, taskType string, ta
 	uniqueKey := base.UniqueKey(queue, taskType, taskPayload)
 
 	st := Statement(
-		"SELECT ndx, queue_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at "+
-			" FROM "+TasksTable+
+		"SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at "+
+			" FROM "+r.conn.table(TasksTable)+
 			" WHERE queue_name=? "+
 			" AND unique_key=?",
 		queue,
 		uniqueKey)
-	qrs, err := r.conn.QueryStmt(context.Background(), st)
+	qrs, err := r.conn.QueryStmt(r.conn.ctx(), st)
 	require.NoError(tb, err)
 	qr := qrs[0]
 	rows, err := parseTaskRows(qr)

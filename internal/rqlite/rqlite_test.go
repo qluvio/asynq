@@ -43,14 +43,14 @@ func TestCreateTables(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	ok, err := CreateTablesIfNotExist(r.conn)
+	ok, err := r.conn.CreateTablesIfNotExist()
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	err = DropTables(r.conn)
+	err = r.conn.DropTables()
 	require.NoError(t, err)
 
-	ok, err = CreateTablesIfNotExist(r.conn)
+	ok, err = r.conn.CreateTablesIfNotExist()
 	require.NoError(t, err)
 	require.True(t, ok)
 }
@@ -116,19 +116,17 @@ func TestEnqueue(t *testing.T) {
 		require.NoError(t, err)
 
 		// Check Pending list has task ID.
-		pending, err := getPending(r.conn, tc.msg.Queue)
+		pending, err := r.conn.getPending(tc.msg.Queue)
 		require.NoError(t, err)
-		msg, err := decodeMessage([]byte(pending.msg))
-		require.NoError(t, err)
-		require.Equal(t, tc.msg.ID.String(), msg.ID.String())
+		require.Equal(t, tc.msg.ID.String(), pending.msg.ID.String())
 		// Check the value under the task key.
-		diff := cmp.Diff(tc.msg, msg)
-		require.Equal(t, "", diff, "persisted message was %v, want %v; (-want, +got)\n%s", msg, tc.msg, diff)
+		diff := cmp.Diff(tc.msg, pending.msg)
+		require.Equal(t, "", diff, "persisted message was %v, want %v; (-want, +got)\n%s", pending.msg, tc.msg, diff)
 
 		// Check queue is in the AllQueues table.
 		ok, err := r.QueueExist(tc.msg.Queue)
 		require.NoError(t, err)
-		require.True(t, ok, "%s queue not found in table %s", tc.msg.Queue, QueuesTable)
+		require.True(t, ok, "%s queue not found in table %s", tc.msg.Queue, r.conn.table(QueuesTable))
 	}
 }
 
@@ -168,19 +166,17 @@ func TestEnqueueUnique(t *testing.T) {
 		require.NoError(t, err)
 
 		// Check Pending list has task ID.
-		pending, err := getPending(r.conn, tc.msg.Queue)
+		pending, err := r.conn.getPending(tc.msg.Queue)
 		require.NoError(t, err)
-		msg, err := decodeMessage([]byte(pending.msg))
-		require.NoError(t, err)
-		require.Equal(t, tc.msg.ID.String(), msg.ID.String())
+		require.Equal(t, tc.msg.ID.String(), pending.msg.ID.String())
 		// Check the value under the task key.
-		diff := cmp.Diff(tc.msg, msg)
-		require.Equal(t, "", diff, "persisted message was %v, want %v; (-want, +got)\n%s", msg, tc.msg, diff)
+		diff := cmp.Diff(tc.msg, pending.msg)
+		require.Equal(t, "", diff, "persisted message was %v, want %v; (-want, +got)\n%s", pending.msg, tc.msg, diff)
 
 		// Check queue is in the AllQueues table.
 		ok, err := r.QueueExist(tc.msg.Queue)
 		require.NoError(t, err)
-		require.True(t, ok, "%s queue not found in table %s", tc.msg.Queue, QueuesTable)
+		require.True(t, ok, "%s queue not found in table %s", tc.msg.Queue, r.conn.table(QueuesTable))
 
 		if tc.waitBeforeSecondEnqueue {
 			time.Sleep(tc.ttl)
@@ -696,7 +692,7 @@ func TestDone(t *testing.T) {
 			}
 		}
 
-		gotProcessed, err := listTasks(r.conn, tc.target.Queue, processed)
+		gotProcessed, err := r.conn.listTasks(tc.target.Queue, processed)
 		require.NoError(t, err)
 		if len(gotProcessed) != 1 {
 			t.Errorf("%s; GET %q, want 1", tc.desc, len(gotProcessed))
@@ -891,7 +887,7 @@ func TestSchedule(t *testing.T) {
 			continue
 		}
 
-		msgs, err := listTasks(r.conn, tc.msg.Queue, scheduled)
+		msgs, err := r.conn.listTasks(tc.msg.Queue, scheduled)
 		require.NoError(t, err)
 		require.Equal(t, 1, len(msgs), "expects 1 element, got %d", len(msgs))
 		require.Equal(t, msgs[0].taskUuid, tc.msg.ID.String())
@@ -913,7 +909,7 @@ func TestSchedule(t *testing.T) {
 		}
 
 		// Check queue is in the AllQueues set.
-		queues, err := listQueues(r.conn, tc.msg.Queue)
+		queues, err := r.conn.listQueues(tc.msg.Queue)
 		require.NoError(t, err)
 		require.Equal(t, 1, len(queues))
 	}
@@ -951,7 +947,7 @@ func TestScheduleUnique(t *testing.T) {
 		}
 
 		// Check Scheduled zset has task ID.
-		msgs, err := listTasks(r.conn, tc.msg.Queue, scheduled)
+		msgs, err := r.conn.listTasks(tc.msg.Queue, scheduled)
 		require.NoError(t, err)
 		require.Equal(t, 1, len(msgs), "expects 1 element, got %d", len(msgs))
 		require.Equal(t, msgs[0].taskUuid, tc.msg.ID.String())
@@ -978,7 +974,7 @@ func TestScheduleUnique(t *testing.T) {
 		}
 
 		// Check queue is in the AllQueues set.
-		queues, err := listQueues(r.conn, tc.msg.Queue)
+		queues, err := r.conn.listQueues(tc.msg.Queue)
 		require.NoError(t, err)
 		require.Equal(t, 1, len(queues))
 
@@ -1667,7 +1663,7 @@ func TestWriteServerState(t *testing.T) {
 	}
 
 	// Check ServerInfo was written correctly.
-	srvs, err := getServer(r.conn, &info)
+	srvs, err := r.conn.getServer(&info)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(srvs))
 	assertServer(t, &info, srvs[0], ttl)
@@ -1729,13 +1725,13 @@ func TestWriteServerStateWithWorkers(t *testing.T) {
 	}
 
 	// Check ServerInfo was written correctly.
-	srvs, err := getServer(r.conn, &serverInfo)
+	srvs, err := r.conn.getServer(&serverInfo)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(srvs))
 	assertServer(t, &serverInfo, srvs[0], ttl)
 
 	// Check WorkersInfo was written correctly.
-	workerRows, err := getWorkers(r.conn, serverInfo.ServerID)
+	workerRows, err := r.conn.getWorkers(serverInfo.ServerID)
 	require.NoError(t, err)
 	require.Equal(t, 2, len(workerRows))
 
@@ -1829,35 +1825,35 @@ func TestClearServerState(t *testing.T) {
 	if err := r.WriteServerState(&serverInfo1, workers1, ttl); err != nil {
 		t.Fatalf("could not write server state: %v", err)
 	}
-	srvs1, err := getServer(r.conn, &serverInfo1)
+	srvs1, err := r.conn.getServer(&serverInfo1)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(srvs1))
 
-	workerRows1, err := getWorkers(r.conn, serverInfo1.ServerID)
+	workerRows1, err := r.conn.getWorkers(serverInfo1.ServerID)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(workerRows1))
 
 	if err := r.WriteServerState(&serverInfo2, workers2, ttl); err != nil {
 		t.Fatalf("could not write server state: %v", err)
 	}
-	srvs2, err := getServer(r.conn, &serverInfo1)
+	srvs2, err := r.conn.getServer(&serverInfo1)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(srvs2))
 
-	workerRows2, err := getWorkers(r.conn, serverInfo2.ServerID)
+	workerRows2, err := r.conn.getWorkers(serverInfo2.ServerID)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(workerRows2))
 
 	err = r.ClearServerState(host, pid, serverID)
 	require.NoError(t, err, "(*RQLite).ClearServerState failed")
 
-	srvs, err := listAllServers(r.conn)
+	srvs, err := r.conn.listAllServers()
 	require.NoError(t, err)
 	require.Equal(t, 1, len(srvs))
 	require.Equal(t, otherServerID, srvs[0].sid)
 	require.Equal(t, otherPID, srvs[0].pid)
 
-	workerRows, err := listAllWorkers(r.conn)
+	workerRows, err := r.conn.listAllWorkers()
 	require.NoError(t, err)
 	require.Equal(t, 1, len(workerRows))
 	require.Equal(t, workers2[0].ID, workerRows[0].taskUuid)

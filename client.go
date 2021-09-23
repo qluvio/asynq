@@ -14,8 +14,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/hibiken/asynq/internal/log"
 	"github.com/hibiken/asynq/internal/rdb"
 	"github.com/hibiken/asynq/internal/rqlite"
+	"go.uber.org/multierr"
 )
 
 // A Client is responsible for scheduling tasks.
@@ -25,10 +27,11 @@ import (
 //
 // Clients are safe for concurrent use by multiple goroutines.
 type Client struct {
-	mu   sync.Mutex
-	opts map[string][]Option
-	rdb  base.Broker
-	loc  *time.Location
+	logger *log.Logger
+	mu     sync.Mutex
+	opts   map[string][]Option
+	rdb    base.Broker
+	loc    *time.Location
 }
 
 // BatchError is the error returned when doing batch processing
@@ -73,9 +76,10 @@ func NewClient(r ClientConnOpt, loc ...*time.Location) *Client {
 		l = loc[0]
 	}
 	return &Client{
-		opts: make(map[string][]Option),
-		rdb:  broker,
-		loc:  l,
+		logger: log.NewLogger(r.Logger()),
+		opts:   make(map[string][]Option),
+		rdb:    broker,
+		loc:    l,
 	}
 }
 
@@ -342,6 +346,7 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 		Timeout:   int64(timeout.Seconds()),
 		UniqueKey: uniqueKey,
 	}
+
 	now := time.Now()
 	var state base.TaskState
 	if opt.processAt.Before(now) || opt.processAt.Equal(now) {
@@ -355,10 +360,12 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 		err = c.schedule(msg, opt.processAt, opt.uniqueTTL)
 		state = base.TaskStateScheduled
 	}
+
 	switch {
 	case errors.Is(err, errors.ErrDuplicateTask):
 		return nil, fmt.Errorf("%w", ErrDuplicateTask)
 	case err != nil:
+		c.logger.Debug("enqueue", err, "state", state, "type", msg.Type, "id", msg.ID)
 		return nil, err
 	}
 	return newTaskInfo(msg, state, opt.processAt), nil
@@ -504,16 +511,19 @@ func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error
 	}
 
 	if len(enqueue) > 0 {
-		_ = c.rdb.EnqueueBatch(enqueue...)
+		err = c.rdb.EnqueueBatch(enqueue...)
 	}
 	if len(enqueueUnique) > 0 {
-		_ = c.rdb.EnqueueUniqueBatch(enqueueUnique...)
+		ex := c.rdb.EnqueueUniqueBatch(enqueueUnique...)
+		err = multierr.Append(err, ex)
 	}
 	if len(schedule) > 0 {
-		_ = c.rdb.ScheduleBatch(schedule...)
+		ex := c.rdb.ScheduleBatch(schedule...)
+		err = multierr.Append(err, ex)
 	}
 	if len(scheduleUnique) > 0 {
-		_ = c.rdb.ScheduleUniqueBatch(scheduleUnique...)
+		ex := c.rdb.ScheduleUniqueBatch(scheduleUnique...)
+		err = multierr.Append(err, ex)
 	}
 
 	ret := make([]*TaskInfo, len(tasks))
@@ -524,6 +534,14 @@ func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error
 		} else {
 			allErrs[i] = msg.Err
 		}
+	}
+	if err != nil {
+		c.logger.Debug("enqueueBatch", "error", err,
+			"enqueuing tasks_count", len(enqueue),
+			"enqueuing unique tasks_count", len(enqueueUnique),
+			"scheduling tasks_count", len(schedule),
+			"scheduling unique tasks_count", len(scheduleUnique),
+			"inner errors", allErrs)
 	}
 	if len(allErrs) > 0 {
 		return ret, &errors.BatchError{Errors: allErrs}

@@ -13,7 +13,7 @@ func (r *RQLite) getQueue(qname string) (*queueRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	return GetQueue(conn, qname)
+	return conn.GetQueue(qname)
 }
 
 func (r *RQLite) QueueExist(qname string) (bool, error) {
@@ -40,7 +40,7 @@ func (r *RQLite) pauseQueue(queue string, b bool) error {
 		return err
 	}
 
-	return pauseQueue(conn, queue, b)
+	return conn.pauseQueue(queue, b)
 }
 
 // ListServers returns the list of server info.
@@ -49,7 +49,7 @@ func (r *RQLite) ListServers() ([]*base.ServerInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := listAllServers(conn)
+	rows, err := conn.listAllServers()
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +65,7 @@ func (r *RQLite) AllQueues() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	queues, err := listQueues(conn)
+	queues, err := conn.listQueues()
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +82,7 @@ func (r *RQLite) RemoveQueue(qname string, force bool) error {
 	if err != nil {
 		return err
 	}
-	n, err := removeQueue(conn, qname, force)
+	n, err := conn.removeQueue(qname, force)
 	switch n {
 	case 0:
 		return errors.E(op, errors.NotFound, &errors.QueueNotFoundError{Queue: qname})
@@ -105,7 +105,7 @@ func (r *RQLite) CurrentStats(qname string) (*base.Stats, error) {
 	if err != nil {
 		return nil, err
 	}
-	ret, err := currentStats(conn, qname)
+	ret, err := conn.currentStats(qname)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,7 @@ func (r *RQLite) HistoricalStats(qname string, n int) ([]*base.DailyStats, error
 	}
 	conn, _ := r.Client()
 
-	return historicalStats(conn, qname, n)
+	return conn.historicalStats(qname, n)
 }
 
 func (r *RQLite) GetTaskInfo(qname string, taskid uuid.UUID) (*base.TaskInfo, error) {
@@ -150,7 +150,7 @@ func (r *RQLite) GetTaskInfo(qname string, taskid uuid.UUID) (*base.TaskInfo, er
 	}
 	conn, _ := r.Client()
 
-	return getTaskInfo(conn, qname, taskid)
+	return conn.getTaskInfo(qname, taskid)
 }
 
 func (r *RQLite) listMessages(qname string, state string, pgn base.Pagination) ([]*base.TaskMessage, error) {
@@ -160,7 +160,7 @@ func (r *RQLite) listMessages(qname string, state string, pgn base.Pagination) (
 		return nil, err
 	}
 	conn, _ := r.Client()
-	tasks, err := listTasksPaged(conn, qname, state, &pgn, "")
+	tasks, err := conn.listTasksPaged(qname, state, &pgn, "")
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}
@@ -188,7 +188,7 @@ func (r *RQLite) listEntries(qname string, state string, pgn base.Pagination, or
 		return nil, err
 	}
 	conn, _ := r.Client()
-	tasks, err := listTasksPaged(conn, qname, state, &pgn, orderBy)
+	tasks, err := conn.listTasksPaged(qname, state, &pgn, orderBy)
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}
@@ -228,7 +228,7 @@ func (r *RQLite) deleteTasks(qname, state string) (int64, error) {
 		return 0, err
 	}
 	conn, _ := r.Client()
-	count, err := deleteTasks(conn, qname, state)
+	count, err := conn.deleteTasks(qname, state)
 	if err != nil {
 		return 0, errors.E(op, errors.Unknown, err)
 	}
@@ -255,7 +255,7 @@ func (r *RQLite) DeleteTask(qname string, taskid uuid.UUID) error {
 		return err
 	}
 	conn, _ := r.Client()
-	count, err := deleteTask(conn, qname, taskid.String())
+	count, err := conn.deleteTask(qname, taskid.String())
 	if err != nil {
 		return errors.E(op, errors.Unknown, err)
 	}
@@ -280,7 +280,7 @@ func (r *RQLite) runAllTasks(qname string, state string) (int64, error) {
 		return 0, err
 	}
 	conn, _ := r.client(op)
-	count, err := setPending(conn, qname, state)
+	count, err := conn.setPending(qname, state)
 	if err != nil {
 		return 0, errors.E(op, errors.Unknown, err)
 	}
@@ -306,7 +306,7 @@ func (r *RQLite) RunTask(qname string, taskid uuid.UUID) error {
 	}
 	conn, _ := r.Client()
 
-	count, err := setTaskPending(conn, qname, taskid.String())
+	count, err := conn.setTaskPending(qname, taskid.String())
 	if err != nil {
 		return errors.E(op, errors.Unknown, err)
 	}
@@ -333,7 +333,7 @@ func (r *RQLite) archiveAllTasks(qname string, state string) (int64, error) {
 	}
 	conn, _ := r.Client()
 
-	count, err := setArchived(conn, qname, state)
+	count, err := conn.setArchived(qname, state)
 	if err != nil {
 		return 0, errors.E(op, errors.Unknown, err)
 	}
@@ -359,7 +359,7 @@ func (r *RQLite) ArchiveTask(qname string, taskid uuid.UUID) error {
 	}
 	conn, _ := r.Client()
 
-	count, err := setTaskArchived(conn, qname, taskid.String())
+	count, err := conn.setTaskArchived(qname, taskid.String())
 	if err != nil {
 		return errors.E(op, errors.Unknown, err)
 	}
@@ -383,7 +383,7 @@ func (r *RQLite) ListWorkers() ([]*base.WorkerInfo, error) {
 		return nil, err
 	}
 
-	rows, err := listAllWorkers(conn)
+	rows, err := conn.listAllWorkers()
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +412,7 @@ func (r *RQLite) ListSchedulerEntries() ([]*base.SchedulerEntry, error) {
 		return nil, err
 	}
 
-	rows, err := listSchedulerEntries(conn, "")
+	rows, err := conn.listSchedulerEntries("")
 	if err != nil {
 		return nil, err
 	}
@@ -430,7 +430,7 @@ func (r *RQLite) ListSchedulerEnqueueEvents(entryID string, pgn base.Pagination)
 		return nil, err
 	}
 
-	rows, err := listSchedulerEnqueueEvents(conn, entryID, pgn)
+	rows, err := conn.listSchedulerEnqueueEvents(entryID, pgn)
 	if err != nil {
 		return nil, err
 	}
@@ -453,7 +453,7 @@ func (r *RQLite) Purge(dropTables bool) error {
 		return err
 	}
 	if dropTables {
-		return DropTables(conn)
+		return conn.DropTables()
 	}
-	return PurgeTables(conn)
+	return conn.PurgeTables()
 }

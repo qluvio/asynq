@@ -34,3 +34,13 @@ func (e *BatchError) Error() string {
 	}
 	return sb.String()
 }
+
+func (e *BatchError) Unwrap() error {
+	if e == nil || len(e.Errors) == 0 {
+		return nil
+	}
+	for _, ex := range e.Errors {
+		return ex
+	}
+	return nil
+}

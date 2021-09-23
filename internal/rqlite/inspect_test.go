@@ -33,7 +33,7 @@ func TestAllQueues(t *testing.T) {
 		FlushDB(t, r.conn)
 
 		for _, qname := range tc.queues {
-			err := EnsureQueue(r.conn, qname)
+			err := r.conn.EnsureQueue(qname)
 			if err != nil {
 				t.Fatalf("could not initialize all queue set: %v", err)
 			}
@@ -188,7 +188,7 @@ func TestCurrentStats(t *testing.T) {
 	for _, tc := range tests {
 		FlushDB(t, r.conn)
 		for _, qname := range tc.paused {
-			err := EnsureQueue(r.conn, qname)
+			err := r.conn.EnsureQueue(qname)
 			require.NoError(t, err)
 			if err := r.Pause(qname); err != nil {
 				t.Fatal(err)
@@ -3177,7 +3177,7 @@ func TestDeleteTaskWithUniqueLock(t *testing.T) {
 			}
 		}
 
-		count, err := getTaskCount(r.conn, tc.qname, "unique_key", tc.id.String())
+		count, err := r.conn.getTaskCount(tc.qname, "unique_key", tc.id.String())
 		require.NoError(t, err)
 		require.Equal(t, int64(0), count)
 	}
@@ -3413,7 +3413,7 @@ func TestDeleteAllArchivedTasksWithUniqueKey(t *testing.T) {
 		}
 
 		for _, uniqueKey := range tc.uniqueKeys {
-			count, err := getTaskCount(r.conn, tc.qname, "unique_key", uniqueKey)
+			count, err := r.conn.getTaskCount(tc.qname, "unique_key", uniqueKey)
 			require.NoError(t, err)
 			require.Equal(t, int64(0), count, "Uniqueness lock %q still exists", uniqueKey)
 		}
@@ -3718,11 +3718,11 @@ func TestRemoveQueue(t *testing.T) {
 				tc.qname, tc.force, err)
 			continue
 		}
-		qs, err := listQueues(r.conn, tc.qname)
+		qs, err := r.conn.listQueues(tc.qname)
 		require.NoError(t, err)
 		require.Equal(t, 0, len(qs), "queues %q still exist", tc.qname)
 
-		count, err := getTaskCount(r.conn, tc.qname, "", "")
+		count, err := r.conn.getTaskCount(tc.qname, "", "")
 		require.NoError(t, err)
 		require.Equal(t, int64(0), count, "some task in queue %q still exists", tc.qname)
 	}
@@ -4144,7 +4144,7 @@ func TestRecordSchedulerEnqueueEventTrimsDataSet(t *testing.T) {
 	}
 
 	// Make sure the set is full.
-	evs, err := listAllSchedulerEnqueueEvents(r.conn, entryID)
+	evs, err := r.conn.listAllSchedulerEnqueueEvents(entryID)
 	require.NoError(t, err)
 	require.Equal(t, maxEvents, len(evs), "unexpected number of events; got %d, want %d", len(evs), maxEvents)
 
@@ -4156,7 +4156,7 @@ func TestRecordSchedulerEnqueueEventTrimsDataSet(t *testing.T) {
 	if err := r.RecordSchedulerEnqueueEvent(entryID, &event); err != nil {
 		t.Fatalf("RecordSchedulerEnqueueEvent failed: %v", err)
 	}
-	evs, err = listAllSchedulerEnqueueEvents(r.conn, entryID)
+	evs, err = r.conn.listAllSchedulerEnqueueEvents(entryID)
 	require.NoError(t, err)
 	require.Equal(t, maxEvents, len(evs), "unexpected number of events; got %d, want %d", len(evs), maxEvents)
 
@@ -4185,7 +4185,7 @@ func TestPause(t *testing.T) {
 
 	for _, tc := range tests {
 		FlushDB(t, r.conn)
-		err := EnsureQueue(r.conn, tc.qname)
+		err := r.conn.EnsureQueue(tc.qname)
 		require.NoError(t, err)
 
 		err = r.Pause(tc.qname)
@@ -4193,7 +4193,7 @@ func TestPause(t *testing.T) {
 			t.Errorf("Pause(%q) returned error: %v", tc.qname, err)
 		}
 
-		qs, err := listQueues(r.conn, tc.qname)
+		qs, err := r.conn.listQueues(tc.qname)
 		require.NoError(t, err)
 		require.True(t, len(qs) == 1)
 		require.Equal(t, paused, qs[0].state)
@@ -4216,7 +4216,7 @@ func TestPauseError(t *testing.T) {
 		FlushDB(t, r.conn)
 
 		for _, qname := range tc.paused {
-			err := EnsureQueue(r.conn, qname)
+			err := r.conn.EnsureQueue(qname)
 			require.NoError(t, err)
 
 			if err := r.Pause(qname); err != nil {
@@ -4246,7 +4246,7 @@ func TestUnpause(t *testing.T) {
 		FlushDB(t, r.conn)
 
 		for _, qname := range tc.paused {
-			err := EnsureQueue(r.conn, qname)
+			err := r.conn.EnsureQueue(qname)
 			require.NoError(t, err)
 
 			if err := r.Pause(qname); err != nil {
@@ -4259,7 +4259,7 @@ func TestUnpause(t *testing.T) {
 			t.Errorf("Unpause(%q) returned error: %v", tc.qname, err)
 		}
 
-		qs, err := listQueues(r.conn, tc.qname)
+		qs, err := r.conn.listQueues(tc.qname)
 		require.NoError(t, err)
 		require.True(t, len(qs) == 1)
 		require.Equal(t, active, qs[0].state)
@@ -4282,7 +4282,7 @@ func TestUnpauseError(t *testing.T) {
 		FlushDB(t, r.conn)
 
 		for _, qname := range tc.paused {
-			err := EnsureQueue(r.conn, qname)
+			err := r.conn.EnsureQueue(qname)
 			require.NoError(t, err)
 
 			if err := r.Pause(qname); err != nil {

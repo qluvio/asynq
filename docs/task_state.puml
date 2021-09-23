@@ -39,17 +39,17 @@ state active {
   state timedOut <<active>>
   state cancelled <<active>>
 
-  failed --> retry_or_kill
-  timedOut --> retry_or_kill
-  cancelled --> retry_or_kill
+  failed --> retry_or_archive
+  timedOut --> retry_or_archive
+  cancelled --> retry_or_archive
 
-  state retry_or_kill <<active>>
-  note right of retry_or_kill
+  state retry_or_archive <<active>>
+  note right of retry_or_archive
     also executed by recoverer
     which polls deadlines exceeded
   end note
-  retry_or_kill --> archived
-  retry_or_kill --> retry
+  retry_or_archive --> archived
+  retry_or_archive --> retry
 }
 note top of active
   processor

@@ -10,6 +10,7 @@ import (
 type RqliteConfig struct {
 	RqliteUrl        string `json:"rqlite_url"`                  // Rqlite server url, e.g. http://localhost:4001.
 	ConsistencyLevel string `json:"consistency_level,omitempty"` // consistency level: none | weak| strong
+	TablesPrefix     string `json:"tables_prefix,omitempty"`     // tables prefix
 }
 
 func (c RqliteConfig) InitDefaults() {
@@ -24,15 +25,20 @@ func (c RqliteConfig) make() rqlite.Config {
 	if len(c.ConsistencyLevel) > 0 {
 		ret.ConsistencyLevel = c.ConsistencyLevel
 	}
+	ret.TablesPrefix = c.TablesPrefix
 	return *ret
 }
 
 type RqliteConnOpt struct {
 	Config     RqliteConfig
 	HttpClient *http.Client
-	Logger     log.Base
+	Log        log.Base
 }
 
 func (o RqliteConnOpt) MakeClient() interface{} {
-	return rqlite.NewRQLite(o.Config.make(), o.HttpClient, o.Logger)
+	return rqlite.NewRQLite(o.Config.make(), o.HttpClient, o.Log)
+}
+
+func (o RqliteConnOpt) Logger() Logger {
+	return o.Log
 }

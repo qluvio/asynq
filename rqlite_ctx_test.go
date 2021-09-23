@@ -67,7 +67,7 @@ func (c *rqliteTestContext) GetUniqueKeyTTL(qname string, taskType string, taskP
 func (c *rqliteTestContext) InitQueue(qname string) {
 	r, err := c.r.Client()
 	require.NoError(c.tb, err)
-	err = rqlite.EnsureQueue(r, qname)
+	err = r.EnsureQueue(qname)
 	require.NoError(c.tb, err)
 }
 

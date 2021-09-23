@@ -2855,6 +2855,7 @@ func TestInspectorArchiveTaskArchivesScheduledTask(t *testing.T) {
 func TestInspectorArchiveTaskArchivesRetryTask(t *testing.T) {
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
+
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "custom")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")

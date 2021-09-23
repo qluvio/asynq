@@ -1,7 +1,6 @@
 package rqlite
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -18,16 +17,16 @@ type schedulerRow struct {
 	entry          *base.SchedulerEntry
 }
 
-func listSchedulerEntries(conn *gorqlite.Connection, where string, whereParams ...interface{}) ([]*schedulerRow, error) {
+func (conn *Connection) listSchedulerEntries(where string, whereParams ...interface{}) ([]*schedulerRow, error) {
 	op := errors.Op("listSchedulerEntries")
 
 	st := Statement("SELECT scheduler_id, expire_at, scheduler_entry" +
-		" FROM " + SchedulersTable + " ")
+		" FROM " + conn.table(SchedulersTable) + " ")
 	if len(where) > 0 {
 		st = st.Append(" WHERE "+where, whereParams...)
 	}
 
-	qrs, err := conn.QueryStmt(context.Background(), st)
+	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
@@ -96,40 +95,40 @@ func parseSchedulerEnqueueEvents(qr gorqlite.QueryResult) ([]*schedulerEnqueueEv
 	return ret, nil
 }
 
-func listSchedulerEnqueueEvents(conn *gorqlite.Connection, entryID string, page base.Pagination) ([]*schedulerEnqueueEventRow, error) {
+func (conn *Connection) listSchedulerEnqueueEvents(entryID string, page base.Pagination) ([]*schedulerEnqueueEventRow, error) {
 	op := errors.Op("listSchedulerEnqueueEvents")
 	// most recent events first
 	st := Statement(
-		"SELECT ndx, uuid, task_id, enqueued_at, scheduler_enqueue_event FROM "+SchedulerHistoryTable+
+		"SELECT ndx, uuid, task_id, enqueued_at, scheduler_enqueue_event FROM "+conn.table(SchedulerHistoryTable)+
 			" WHERE uuid=? "+
 			" ORDER BY -enqueued_at LIMIT ? OFFSET ?",
 		entryID,
 		page.Size,
 		page.Start())
 
-	qrs, err := conn.QueryStmt(context.Background(), st)
+	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
 	return parseSchedulerEnqueueEvents(qrs[0])
 }
 
-func listAllSchedulerEnqueueEvents(conn *gorqlite.Connection, entryID string) ([]*schedulerEnqueueEventRow, error) {
+func (conn *Connection) listAllSchedulerEnqueueEvents(entryID string) ([]*schedulerEnqueueEventRow, error) {
 	op := errors.Op("listAllSchedulerEnqueueEvents")
 	st := Statement(
-		"SELECT ndx, uuid, task_id, enqueued_at, scheduler_enqueue_event FROM "+SchedulerHistoryTable+
+		"SELECT ndx, uuid, task_id, enqueued_at, scheduler_enqueue_event FROM "+conn.table(SchedulerHistoryTable)+
 			" WHERE uuid=? "+
 			" ORDER BY ndx ",
 		entryID)
 
-	qrs, err := conn.QueryStmt(context.Background(), st)
+	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
 	return parseSchedulerEnqueueEvents(qrs[0])
 }
 
-func writeSchedulerEntries(conn *gorqlite.Connection, schedulerID string, entries []*base.SchedulerEntry, ttl time.Duration) error {
+func (conn *Connection) writeSchedulerEntries(schedulerID string, entries []*base.SchedulerEntry, ttl time.Duration) error {
 	op := errors.Op("rqlite.writeSchedulerEntries")
 	if len(entries) == 0 {
 		return nil
@@ -149,44 +148,44 @@ func writeSchedulerEntries(conn *gorqlite.Connection, schedulerID string, entrie
 	stmts := make([]*gorqlite.Statement, 0, len(args)-1)
 	for i := 0; i < len(args); i++ {
 		stmts = append(stmts, Statement(
-			"INSERT INTO "+SchedulersTable+"(scheduler_id, expire_at, scheduler_entry) "+
+			"INSERT INTO "+conn.table(SchedulersTable)+"(scheduler_id, expire_at, scheduler_entry) "+
 				"VALUES (?, ?, ?)",
 			schedulerID,
 			exp.Unix(),
 			args[i]))
 	}
 
-	wrs, err := conn.WriteStmt(context.Background(), stmts...)
+	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}
 	return nil
 }
 
-func clearSchedulerEntries(conn *gorqlite.Connection, schedulerID string) error {
+func (conn *Connection) clearSchedulerEntries(schedulerID string) error {
 	var op errors.Op = "rqlite.clearSchedulerEntries"
 
 	stmt := Statement(
-		"DELETE FROM "+SchedulersTable+" WHERE scheduler_id=?",
+		"DELETE FROM "+conn.table(SchedulersTable)+" WHERE scheduler_id=?",
 		schedulerID)
-	wrs, err := conn.WriteStmt(context.Background(), stmt)
+	wrs, err := conn.WriteStmt(conn.ctx(), stmt)
 	if err != nil {
 		return NewRqliteWError(op, wrs[0], err, stmt)
 	}
 	return nil
 }
 
-func clearSchedulerHistory(conn *gorqlite.Connection, entryID string) error {
-	stmt := Statement("DELETE FROM "+SchedulerHistoryTable+" WHERE uuid=?",
+func (conn *Connection) clearSchedulerHistory(entryID string) error {
+	stmt := Statement("DELETE FROM "+conn.table(SchedulerHistoryTable)+" WHERE uuid=?",
 		entryID)
-	wrs, err := conn.WriteStmt(context.Background(), stmt)
+	wrs, err := conn.WriteStmt(conn.ctx(), stmt)
 	if err != nil {
 		return NewRqliteWError("rqlite.clearSchedulerHistory", wrs[0], err, stmt)
 	}
 	return nil
 }
 
-func recordSchedulerEnqueueEvent(conn *gorqlite.Connection, entryID string, event *base.SchedulerEnqueueEvent) error {
+func (conn *Connection) recordSchedulerEnqueueEvent(entryID string, event *base.SchedulerEnqueueEvent) error {
 	op := errors.Op("rqlite.recordSchedulerEnqueueEvent")
 
 	data, err := encodeSchedulerEnqueueEvent(event)
@@ -196,25 +195,25 @@ func recordSchedulerEnqueueEvent(conn *gorqlite.Connection, entryID string, even
 
 	stmts := []*gorqlite.Statement{
 		Statement(
-			"INSERT INTO "+SchedulerHistoryTable+"(uuid, task_id, enqueued_at, scheduler_enqueue_event) "+
+			"INSERT INTO "+conn.table(SchedulerHistoryTable)+"(uuid, task_id, enqueued_at, scheduler_enqueue_event) "+
 				"VALUES(?, ?, ?, ?) ",
 			entryID,
 			event.TaskID,
 			event.EnqueuedAt.UTC().Unix(),
 			data),
 		Statement(
-			"DELETE FROM "+SchedulerHistoryTable+
+			"DELETE FROM "+conn.table(SchedulerHistoryTable)+
 				" WHERE uuid=? "+
-				" AND ndx IN "+"(SELECT ndx FROM "+SchedulerHistoryTable+
+				" AND ndx IN "+"(SELECT ndx FROM "+conn.table(SchedulerHistoryTable)+
 				" WHERE uuid=? ORDER BY -enqueued_at "+
-				"   LIMIT (SELECT COUNT(*) FROM "+SchedulerHistoryTable+" WHERE uuid=?) "+
+				"   LIMIT (SELECT COUNT(*) FROM "+conn.table(SchedulerHistoryTable)+" WHERE uuid=?) "+
 				"   OFFSET ?)",
 			entryID,
 			entryID,
 			entryID,
 			maxEvents),
 	}
-	wrs, err := conn.WriteStmt(context.Background(), stmts...)
+	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}

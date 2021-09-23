@@ -143,6 +143,9 @@ func (l Level) String() string {
 
 // canLogAt reports whether logger can log at level v.
 func (l *Logger) canLogAt(v Level) bool {
+	if l == nil {
+		return false
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return v >= l.level

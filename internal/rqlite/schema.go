@@ -1,8 +1,8 @@
 package rqlite
 
 import (
-	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,29 +11,30 @@ import (
 )
 
 var AllTables = map[string]string{
-	QueuesTable:           CreateQueuesTable,
-	TasksTable:            CreateTasksTable,
-	ServersTable:          CreateServersTable,
-	WorkersTable:          CreateWorkersTable,
-	SchedulersTable:       CreateSchedulersTable,
-	SchedulerHistoryTable: CreateSchedulerHistoryTable,
-	CancellationTable:     CreateCancellationTable,
-	VersionTable:          CreateVersionTable,
+	QueuesTable:           CreateQueuesTableFmt,
+	TasksTable:            CreateTasksTableFmt,
+	ServersTable:          CreateServersTableFmt,
+	WorkersTable:          CreateWorkersTableFmt,
+	SchedulersTable:       CreateSchedulersTableFmt,
+	SchedulerHistoryTable: CreateSchedulerHistoryTableFmt,
+	CancellationTable:     CreateCancellationTableFmt,
+	VersionTable:          CreateVersionTableFmt,
 }
 
 const (
-	Version            = "1.0.0"
-	VersionTable       = "asynq_schema_version"
-	CreateVersionTable = `CREATE TABLE ` + VersionTable + ` (
+	Version               = "1.0.0"
+	VersionTable          = "asynq_schema_version"
+	CreateVersionTableFmt = `CREATE TABLE IF NOT EXISTS %s (
 	version text not null primary key,
 	ts integer
 )`
-	InsertVersionStmt = "INSERT INTO " + VersionTable + " (version, ts) VALUES(?, ?) "
+	InsertVersionStmtFmt = "INSERT INTO %s (version, ts) VALUES(?, ?) " +
+		" ON CONFLICT(version) DO NOTHING;"
 
-	QueuesTable       = "asynq_queues"
-	CreateQueuesTable = `CREATE TABLE ` + QueuesTable + ` (
+	QueuesTable          = "asynq_queues"
+	CreateQueuesTableFmt = `CREATE TABLE IF NOT EXISTS %s (
 	queue_name text not null primary key, 
-	state      text not null
+	state      text not null	
 )`
 	active    = "active"
 	paused    = "paused"
@@ -43,10 +44,11 @@ const (
 	archived  = "archived"
 	processed = "processed"
 
-	TasksTable       = "asynq_tasks"
-	CreateTasksTable = `CREATE TABLE ` + TasksTable + ` (
+	TasksTable          = "asynq_tasks"
+	CreateTasksTableFmt = `CREATE TABLE IF NOT EXISTS %s (
 	ndx                    integer not null primary key,
 	queue_name             text not null,
+	type_name              text not null,
 	task_uuid              text not null unique,
 	unique_key             text not null unique, 
 	unique_key_deadline    integer,
@@ -64,8 +66,8 @@ const (
 	cleanup_at             integer
 )`
 
-	ServersTable       = "asynq_servers"
-	CreateServersTable = `CREATE TABLE ` + ServersTable + ` (
+	ServersTable          = "asynq_servers"
+	CreateServersTableFmt = `CREATE TABLE IF NOT EXISTS %s (
 	sid         text not null unique,
 	pid         integer not null,
 	host        text not null,
@@ -73,89 +75,123 @@ const (
 	server_info text not null
 )`
 
-	WorkersTable       = "asynq_workers"
-	CreateWorkersTable = `CREATE TABLE ` + WorkersTable + ` (
+	WorkersTable          = "asynq_workers"
+	CreateWorkersTableFmt = `CREATE TABLE IF NOT EXISTS %s (
 	sid         text not null,
 	task_uuid   text not null,
 	expire_at   integer,
 	worker_info text not null
 )`
-	SchedulersTable       = "asynq_schedulers"
-	CreateSchedulersTable = `CREATE TABLE ` + SchedulersTable + ` (
+	SchedulersTable          = "asynq_schedulers"
+	CreateSchedulersTableFmt = `CREATE TABLE IF NOT EXISTS %s (
 	scheduler_id    text not null,
 	expire_at       integer,
 	scheduler_entry text not null
 )`
-	SchedulerHistoryTable       = "asynq_scheduler_history"
-	CreateSchedulerHistoryTable = `CREATE TABLE ` + SchedulerHistoryTable + ` (
+	SchedulerHistoryTable          = "asynq_scheduler_history"
+	CreateSchedulerHistoryTableFmt = `CREATE TABLE IF NOT EXISTS %s (
 	ndx                     integer not null primary key,
 	uuid                    text not null,
 	task_id                 text not null,
 	enqueued_at             integer,
 	scheduler_enqueue_event text not null
 )`
-	CancellationTable       = "asynq_cancel"
-	CreateCancellationTable = `CREATE TABLE ` + CancellationTable + ` (
+	CancellationTable          = "asynq_cancel"
+	CreateCancellationTableFmt = `CREATE TABLE IF NOT EXISTS %s (
 	ndx                     integer not null primary key,
 	uuid                    text not null,
 	cancelled_at            integer
 )`
 )
 
-func CreateTablesIfNotExist(conn *gorqlite.Connection) (bool, error) {
+func (conn *Connection) buildTables() {
+	tables := make(map[string]string)
+	tableNames := make(map[string]string)
+	for table, ctorFmt := range AllTables {
+		t := conn.TablesPrefix + table
+		tables[t] = fmt.Sprintf(ctorFmt, t)
+		tableNames[table] = t
+	}
+	conn.tables = tables
+	conn.tableNames = tableNames
+}
+
+func (conn *Connection) AllTables() map[string]string {
+	return conn.tables
+}
+
+func (conn *Connection) table(name string) string {
+	return conn.tableNames[name]
+}
+
+// CreateTablesIfNotExist returns true if tables were created, false if they were not.
+func (conn *Connection) CreateTablesIfNotExist() (bool, error) {
 	op := errors.Op("CreateTablesIfNotExist")
 
-	get := Statement("SELECT COUNT(*) FROM " + VersionTable)
-	qrs, err := conn.QueryStmt(context.Background(), get)
+	get := Statement("SELECT COUNT(*) FROM " + conn.table(VersionTable))
+	qrs, err := conn.QueryStmt(conn.ctx(), get)
 	if err != nil && (qrs[0].Err == nil || !strings.Contains(qrs[0].Err.Error(), "no such table:")) {
 		return false, errors.E(op, errors.Internal, NewRqliteRError(op, qrs[0], err, get))
 	}
 	if qrs[0].NumRows() > 0 {
 		return false, nil
 	}
-	err = CreateTables(conn)
+	err = conn.CreateTables()
 	if err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func CreateTables(conn *gorqlite.Connection) error {
-	op := errors.Op("CreateTables")
-
+func (conn *Connection) CreateTables() error {
 	stmts := make([]*gorqlite.Statement, 0)
-	for _, stmt := range AllTables {
+	tables := make([]string, 0)
+	for _, stmt := range conn.AllTables() {
+		tables = append(tables, stmt)
+	}
+	sort.Strings(tables)
+	for _, stmt := range tables {
 		stmts = append(stmts, Statement(stmt))
 	}
-	stmts = append(stmts, Statement(InsertVersionStmt, Version, time.Now().Unix()))
-	_, err := conn.WriteStmt(context.Background(), stmts...)
+
+	verStmt := fmt.Sprintf(InsertVersionStmtFmt, conn.table(VersionTable))
+	stmts = append(stmts, Statement(verStmt, Version, time.Now().Unix()))
+	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
 	if err != nil {
-		return errors.E(op, errors.Internal, err)
+		return NewRqliteWsError("CreateTables", wrs, err, stmts)
 	}
+
 	return nil
 }
 
 // DropTables deletes all the tables.
-func DropTables(conn *gorqlite.Connection) error {
-	stmts := make([]string, 0)
-	for table := range AllTables {
-		stmts = append(stmts, "DROP TABLE IF EXISTS "+table)
+func (conn *Connection) DropTables() error {
+	stmts := make([]*gorqlite.Statement, 0)
+	for table := range conn.AllTables() {
+		stmts = append(stmts, Statement("DROP TABLE IF EXISTS "+table))
 	}
-	_, err := conn.Write(stmts)
-	return err
+	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
+	if err != nil {
+		return NewRqliteWsError("PurgeTables", wrs, err, stmts)
+	}
+	return nil
 }
 
 // PurgeTables purges data from all tables, except the version table.
-func PurgeTables(conn *gorqlite.Connection) error {
-	stmts := make([]string, 0)
-	for table := range AllTables {
-		if table == VersionTable {
+func (conn *Connection) PurgeTables() error {
+	stmts := make([]*gorqlite.Statement, 0)
+	verTable := conn.table(VersionTable)
+	for table := range conn.AllTables() {
+		if table == verTable {
 			continue
 		}
-		stmts = append(stmts, fmt.Sprintf("DELETE FROM '%s' ", table))
+		stmts = append(stmts, Statement(fmt.Sprintf("DELETE FROM '%s' ", table)))
 	}
-	_, err := conn.Write(stmts)
-	return err
+	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
+	if err != nil {
+		return NewRqliteWsError("PurgeTables", wrs, err, stmts)
+	}
+	return nil
 }
 
 func Statement(sql string, params ...interface{}) *gorqlite.Statement {
