@@ -38,7 +38,7 @@ var (
 var testLogger *log.Logger
 
 func init() {
-	flag.StringVar(&brokerType, "broker_type", "rqlite", "broker type to use in testing: redis|rqlite")
+	flag.StringVar(&brokerType, "broker_type", "redis", "broker type to use in testing: redis|rqlite")
 
 	flag.StringVar(&redisAddr, "redis_addr", "localhost:6379", "redis address to use in testing")
 	flag.IntVar(&redisDB, "redis_db", 14, "redis db number to use in testing")

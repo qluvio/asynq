@@ -25,7 +25,7 @@ func TestForwarder(t *testing.T) {
 	s := newForwarder(forwarderParams{
 		logger:   testLogger,
 		broker:   client.rdb,
-		queues:   []string{"default", "critical"},
+		queues:   (&QueuesConfig{Queues: map[string]int{"default": 1, "critical": 1}}).configure(),
 		interval: pollInterval,
 	})
 	t1 := h.NewTaskMessageWithQueue("gen_thumbnail", nil, "default")

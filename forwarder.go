@@ -22,7 +22,7 @@ type forwarder struct {
 	done chan struct{}
 
 	// list of queue names to check and enqueue.
-	queues []string
+	queues Queues
 
 	// poll interval on average
 	avgInterval time.Duration
@@ -31,7 +31,7 @@ type forwarder struct {
 type forwarderParams struct {
 	logger   *log.Logger
 	broker   base.Broker
-	queues   []string
+	queues   Queues
 	interval time.Duration
 }
 
@@ -69,7 +69,7 @@ func (f *forwarder) start(wg *sync.WaitGroup) {
 }
 
 func (f *forwarder) exec() {
-	if err := f.broker.ForwardIfReady(f.queues...); err != nil {
+	if err := f.broker.ForwardIfReady(f.queues.Names()...); err != nil {
 		f.logger.Errorf("Could not enqueue scheduled tasks: %v", err)
 	}
 }

@@ -75,63 +75,64 @@ func TestProcessorSuccessWithSingleQueue(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		ctx.FlushDB()                                           // clean up db before each test case.
-		ctx.SeedPendingQueue(tc.pending, base.DefaultQueueName) // initialize default queue.
+	for i, tc := range tests {
+		t.Run(fmt.Sprintf("test-%d", i), func(t *testing.T) {
+			ctx.FlushDB()                                           // clean up db before each test case.
+			ctx.SeedPendingQueue(tc.pending, base.DefaultQueueName) // initialize default queue.
 
-		// instantiate a new processor
-		var mu sync.Mutex
-		var processed []*Task
-		handler := func(ctx context.Context, task *Task) error {
-			mu.Lock()
-			defer mu.Unlock()
-			processed = append(processed, task)
-			return nil
-		}
-		starting := make(chan *workerInfo)
-		finished := make(chan *base.TaskMessage)
-		syncCh := make(chan *syncRequest)
-		done := make(chan struct{})
-		defer func() { close(done) }()
-		go fakeHeartbeater(starting, finished, done)
-		go fakeSyncer(syncCh, done)
-		p := newProcessor(processorParams{
-			logger:          testLogger,
-			broker:          client.rdb,
-			retryDelayFunc:  DefaultRetryDelayFunc,
-			isFailureFunc:   defaultIsFailureFunc,
-			syncCh:          syncCh,
-			cancelations:    base.NewCancelations(),
-			concurrency:     10,
-			queues:          defaultQueueConfig,
-			strictPriority:  false,
-			errHandler:      nil,
-			shutdownTimeout: defaultShutdownTimeout,
-			starting:        starting,
-			finished:        finished,
-		})
-		p.handler = HandlerFunc(handler)
-
-		p.start(&sync.WaitGroup{})
-		for _, msg := range tc.incoming {
-			err := client.rdb.Enqueue(msg)
-			if err != nil {
-				p.shutdown()
-				t.Fatal(err)
+			// instantiate a new processor
+			var mu sync.Mutex
+			var processed []*Task
+			handler := func(ctx context.Context, task *Task) error {
+				mu.Lock()
+				defer mu.Unlock()
+				processed = append(processed, task)
+				return nil
 			}
-		}
-		time.Sleep(2 * time.Second) // wait for two second to allow all pending tasks to be processed.
-		active := ctx.GetActiveMessages(base.DefaultQueueName)
-		if len(active) != 0 {
-			t.Errorf("%q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), len(active))
-		}
-		p.shutdown()
+			starting := make(chan *workerInfo)
+			finished := make(chan *base.TaskMessage)
+			syncCh := make(chan *syncRequest)
+			done := make(chan struct{})
+			defer func() { close(done) }()
+			go fakeHeartbeater(starting, finished, done)
+			go fakeSyncer(syncCh, done)
+			p := newProcessor(processorParams{
+				logger:          testLogger,
+				broker:          client.rdb,
+				retryDelayFunc:  DefaultRetryDelayFunc,
+				isFailureFunc:   defaultIsFailureFunc,
+				syncCh:          syncCh,
+				cancelations:    base.NewCancelations(),
+				concurrency:     10,
+				queues:          defaultQueuesConfig,
+				errHandler:      nil,
+				shutdownTimeout: defaultShutdownTimeout,
+				starting:        starting,
+				finished:        finished,
+			})
+			p.handler = HandlerFunc(handler)
 
-		mu.Lock()
-		if diff := cmp.Diff(tc.wantProcessed, processed, sortTaskOpt, cmp.AllowUnexported(Task{})); diff != "" {
-			t.Errorf("mismatch found in processed tasks; (-want, +got)\n%s", diff)
-		}
-		mu.Unlock()
+			p.start(&sync.WaitGroup{})
+			for _, msg := range tc.incoming {
+				err := client.rdb.Enqueue(msg)
+				if err != nil {
+					p.shutdown()
+					t.Fatal(err)
+				}
+			}
+			time.Sleep(2 * time.Second) // wait for two second to allow all pending tasks to be processed.
+			active := ctx.GetActiveMessages(base.DefaultQueueName)
+			if len(active) != 0 {
+				t.Errorf("%q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), len(active))
+			}
+			p.shutdown()
+
+			mu.Lock()
+			if diff := cmp.Diff(tc.wantProcessed, processed, sortTaskOpt, cmp.AllowUnexported(Task{})); diff != "" {
+				t.Errorf("mismatch found in processed tasks; (-want, +got)\n%s", diff)
+			}
+			mu.Unlock()
+		})
 	}
 }
 
@@ -169,65 +170,69 @@ func TestProcessorSuccessWithMultipleQueues(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		// Set up test case.
-		ctx.FlushDB()
-		ctx.SeedAllPendingQueues(tc.pending)
+	for i, tc := range tests {
+		t.Run(fmt.Sprintf("test-%d", i), func(t *testing.T) {
+			// Set up test case.
+			ctx.FlushDB()
+			ctx.SeedAllPendingQueues(tc.pending)
 
-		// Instantiate a new processor.
-		var mu sync.Mutex
-		var processed []*Task
-		handler := func(ctx context.Context, task *Task) error {
-			mu.Lock()
-			defer mu.Unlock()
-			processed = append(processed, task)
-			return nil
-		}
-		starting := make(chan *workerInfo)
-		finished := make(chan *base.TaskMessage)
-		syncCh := make(chan *syncRequest)
-		done := make(chan struct{})
-		defer func() { close(done) }()
-		go fakeHeartbeater(starting, finished, done)
-		go fakeSyncer(syncCh, done)
-		p := newProcessor(processorParams{
-			logger:         testLogger,
-			broker:         client.rdb,
-			retryDelayFunc: DefaultRetryDelayFunc,
-			isFailureFunc:  defaultIsFailureFunc,
-			syncCh:         syncCh,
-			cancelations:   base.NewCancelations(),
-			concurrency:    10,
-			queues: map[string]int{
-				"default": 2,
-				"high":    3,
-				"low":     1,
-			},
-			strictPriority:  false,
-			errHandler:      nil,
-			shutdownTimeout: defaultShutdownTimeout,
-			starting:        starting,
-			finished:        finished,
-		})
-		p.handler = HandlerFunc(handler)
-
-		p.start(&sync.WaitGroup{})
-		// Wait for two second to allow all pending tasks to be processed.
-		time.Sleep(2 * time.Second)
-		// Make sure no messages are stuck in active list.
-		for _, qname := range tc.queues {
-			active := ctx.GetActiveMessages(qname)
-			if len(active) != 0 {
-				t.Errorf("%q has %d tasks, want 0", base.ActiveKey(qname), len(active))
+			// Instantiate a new processor.
+			var mu sync.Mutex
+			var processed []*Task
+			handler := func(ctx context.Context, task *Task) error {
+				mu.Lock()
+				defer mu.Unlock()
+				processed = append(processed, task)
+				return nil
 			}
-		}
-		p.shutdown()
+			starting := make(chan *workerInfo)
+			finished := make(chan *base.TaskMessage)
+			syncCh := make(chan *syncRequest)
+			done := make(chan struct{})
+			defer func() { close(done) }()
+			go fakeHeartbeater(starting, finished, done)
+			go fakeSyncer(syncCh, done)
+			p := newProcessor(processorParams{
+				logger:         testLogger,
+				broker:         client.rdb,
+				retryDelayFunc: DefaultRetryDelayFunc,
+				isFailureFunc:  defaultIsFailureFunc,
+				syncCh:         syncCh,
+				cancelations:   base.NewCancelations(),
+				concurrency:    10,
+				queues: (&QueuesConfig{
+					Priority: Lenient,
+					Queues: map[string]int{
+						"default": 2,
+						"high":    3,
+						"low":     1,
+					},
+				}).configure(),
+				errHandler:      nil,
+				shutdownTimeout: defaultShutdownTimeout,
+				starting:        starting,
+				finished:        finished,
+			})
+			p.handler = HandlerFunc(handler)
 
-		mu.Lock()
-		if diff := cmp.Diff(tc.wantProcessed, processed, sortTaskOpt, cmp.AllowUnexported(Task{})); diff != "" {
-			t.Errorf("mismatch found in processed tasks; (-want, +got)\n%s", diff)
-		}
-		mu.Unlock()
+			p.start(&sync.WaitGroup{})
+			// Wait for two second to allow all pending tasks to be processed.
+			time.Sleep(2 * time.Second)
+			// Make sure no messages are stuck in active list.
+			for _, qname := range tc.queues {
+				active := ctx.GetActiveMessages(qname)
+				if len(active) != 0 {
+					t.Errorf("%q has %d tasks, want 0", base.ActiveKey(qname), len(active))
+				}
+			}
+			p.shutdown()
+
+			mu.Lock()
+			if diff := cmp.Diff(tc.wantProcessed, processed, sortTaskOpt, cmp.AllowUnexported(Task{})); diff != "" {
+				t.Errorf("mismatch found in processed tasks; (-want, +got)\n%s", diff)
+			}
+			mu.Unlock()
+		})
 	}
 }
 
@@ -252,64 +257,65 @@ func TestProcessTasksWithLargeNumberInPayload(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		ctx.FlushDB()                                           // clean up db before each test case.
-		ctx.SeedPendingQueue(tc.pending, base.DefaultQueueName) // initialize default queue.
+	for i, tc := range tests {
+		t.Run(fmt.Sprintf("test-%d", i), func(t *testing.T) {
+			ctx.FlushDB()                                           // clean up db before each test case.
+			ctx.SeedPendingQueue(tc.pending, base.DefaultQueueName) // initialize default queue.
 
-		var mu sync.Mutex
-		var processed []*Task
-		handler := func(ctx context.Context, task *Task) error {
+			var mu sync.Mutex
+			var processed []*Task
+			handler := func(ctx context.Context, task *Task) error {
+				mu.Lock()
+				defer mu.Unlock()
+				var payload map[string]int
+				if err := json.Unmarshal(task.Payload(), &payload); err != nil {
+					t.Errorf("coult not decode payload: %v", err)
+				}
+				if data, ok := payload["data"]; ok {
+					t.Logf("data == %d", data)
+				} else {
+					t.Errorf("could not get data from payload")
+				}
+				processed = append(processed, task)
+				return nil
+			}
+			starting := make(chan *workerInfo)
+			finished := make(chan *base.TaskMessage)
+			syncCh := make(chan *syncRequest)
+			done := make(chan struct{})
+			defer func() { close(done) }()
+			go fakeHeartbeater(starting, finished, done)
+			go fakeSyncer(syncCh, done)
+			p := newProcessor(processorParams{
+				logger:          testLogger,
+				broker:          client.rdb,
+				retryDelayFunc:  DefaultRetryDelayFunc,
+				isFailureFunc:   defaultIsFailureFunc,
+				syncCh:          syncCh,
+				cancelations:    base.NewCancelations(),
+				concurrency:     10,
+				queues:          defaultQueuesConfig,
+				errHandler:      nil,
+				shutdownTimeout: defaultShutdownTimeout,
+				starting:        starting,
+				finished:        finished,
+			})
+			p.handler = HandlerFunc(handler)
+
+			p.start(&sync.WaitGroup{})
+			time.Sleep(2 * time.Second) // wait for two second to allow all pending tasks to be processed.
+			active := ctx.GetActiveMessages(base.DefaultQueueName)
+			if len(active) != 0 {
+				t.Errorf("%q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), len(active))
+			}
+			p.shutdown()
+
 			mu.Lock()
-			defer mu.Unlock()
-			var payload map[string]int
-			if err := json.Unmarshal(task.Payload(), &payload); err != nil {
-				t.Errorf("coult not decode payload: %v", err)
+			if diff := cmp.Diff(tc.wantProcessed, processed, sortTaskOpt, cmp.AllowUnexported(Task{})); diff != "" {
+				t.Errorf("mismatch found in processed tasks; (-want, +got)\n%s", diff)
 			}
-			if data, ok := payload["data"]; ok {
-				t.Logf("data == %d", data)
-			} else {
-				t.Errorf("could not get data from payload")
-			}
-			processed = append(processed, task)
-			return nil
-		}
-		starting := make(chan *workerInfo)
-		finished := make(chan *base.TaskMessage)
-		syncCh := make(chan *syncRequest)
-		done := make(chan struct{})
-		defer func() { close(done) }()
-		go fakeHeartbeater(starting, finished, done)
-		go fakeSyncer(syncCh, done)
-		p := newProcessor(processorParams{
-			logger:          testLogger,
-			broker:          client.rdb,
-			retryDelayFunc:  DefaultRetryDelayFunc,
-			isFailureFunc:   defaultIsFailureFunc,
-			syncCh:          syncCh,
-			cancelations:    base.NewCancelations(),
-			concurrency:     10,
-			queues:          defaultQueueConfig,
-			strictPriority:  false,
-			errHandler:      nil,
-			shutdownTimeout: defaultShutdownTimeout,
-			starting:        starting,
-			finished:        finished,
+			mu.Unlock()
 		})
-		p.handler = HandlerFunc(handler)
-
-		p.start(&sync.WaitGroup{})
-		time.Sleep(2 * time.Second) // wait for two second to allow all pending tasks to be processed.
-		active := ctx.GetActiveMessages(base.DefaultQueueName)
-		if len(active) != 0 {
-			t.Errorf("%q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), len(active))
-		}
-		p.shutdown()
-
-		mu.Lock()
-		if diff := cmp.Diff(tc.wantProcessed, processed, sortTaskOpt, cmp.AllowUnexported(Task{})); diff != "" {
-			t.Errorf("mismatch found in processed tasks; (-want, +got)\n%s", diff)
-		}
-		mu.Unlock()
 	}
 }
 
@@ -381,85 +387,86 @@ func TestProcessorRetry(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		ctx.FlushDB()                                           // clean up db before each test case.
-		ctx.SeedPendingQueue(tc.pending, base.DefaultQueueName) // initialize default queue.
+	for i, tc := range tests {
+		t.Run(fmt.Sprintf("test-%d", i), func(t *testing.T) {
+			ctx.FlushDB()                                           // clean up db before each test case.
+			ctx.SeedPendingQueue(tc.pending, base.DefaultQueueName) // initialize default queue.
 
-		// instantiate a new processor
-		delayFunc := func(n int, e error, t *Task) time.Duration {
-			return tc.delay
-		}
-		var (
-			mu sync.Mutex // guards n
-			n  int        // number of times error handler is called
-		)
-		errHandler := func(ctx context.Context, t *Task, err error) {
-			mu.Lock()
-			defer mu.Unlock()
-			n++
-		}
-		starting := make(chan *workerInfo)
-		finished := make(chan *base.TaskMessage)
-		done := make(chan struct{})
-		defer func() { close(done) }()
-		go fakeHeartbeater(starting, finished, done)
-		p := newProcessor(processorParams{
-			logger:          testLogger,
-			broker:          client.rdb,
-			retryDelayFunc:  delayFunc,
-			isFailureFunc:   defaultIsFailureFunc,
-			syncCh:          nil,
-			cancelations:    base.NewCancelations(),
-			concurrency:     10,
-			queues:          defaultQueueConfig,
-			strictPriority:  false,
-			errHandler:      ErrorHandlerFunc(errHandler),
-			shutdownTimeout: defaultShutdownTimeout,
-			starting:        starting,
-			finished:        finished,
+			// instantiate a new processor
+			delayFunc := func(n int, e error, t *Task) time.Duration {
+				return tc.delay
+			}
+			var (
+				mu sync.Mutex // guards n
+				n  int        // number of times error handler is called
+			)
+			errHandler := func(ctx context.Context, t *Task, err error) {
+				mu.Lock()
+				defer mu.Unlock()
+				n++
+			}
+			starting := make(chan *workerInfo)
+			finished := make(chan *base.TaskMessage)
+			done := make(chan struct{})
+			defer func() { close(done) }()
+			go fakeHeartbeater(starting, finished, done)
+			p := newProcessor(processorParams{
+				logger:          testLogger,
+				broker:          client.rdb,
+				retryDelayFunc:  delayFunc,
+				isFailureFunc:   defaultIsFailureFunc,
+				syncCh:          nil,
+				cancelations:    base.NewCancelations(),
+				concurrency:     10,
+				queues:          defaultQueuesConfig,
+				errHandler:      ErrorHandlerFunc(errHandler),
+				shutdownTimeout: defaultShutdownTimeout,
+				starting:        starting,
+				finished:        finished,
+			})
+			p.handler = tc.handler
+
+			p.start(&sync.WaitGroup{})
+			runTime := time.Now() // time when processor is running
+			time.Sleep(tc.wait)   // FIXME: This makes test flaky.
+			p.shutdown()
+
+			cmpOpt := h.EquateInt64Approx(int64(tc.wait.Seconds())) // allow up to a wait-second difference in zset score
+			gotRetry := ctx.GetRetryEntries(base.DefaultQueueName)
+			var wantRetry []base.Z // Note: construct wantRetry here since `LastFailedAt` and ZSCORE is relative to each test run.
+			for _, msg := range tc.wantRetry {
+				wantRetry = append(wantRetry,
+					base.Z{
+						Message: h.TaskMessageAfterRetry(*msg, tc.wantErrMsg, runTime),
+						Score:   runTime.Add(tc.delay).Unix(),
+					})
+			}
+			if diff := cmp.Diff(wantRetry, gotRetry, h.SortZSetEntryOpt, cmpOpt); diff != "" {
+				t.Errorf("%s: mismatch found in %q after running processor; (-want, +got)\n%s", tc.desc, base.RetryKey(base.DefaultQueueName), diff)
+			}
+
+			gotArchived := ctx.GetArchivedEntries(base.DefaultQueueName)
+			var wantArchived []base.Z // Note: construct wantArchived here since `LastFailedAt` and ZSCORE is relative to each test run.
+			for _, msg := range tc.wantArchived {
+				wantArchived = append(wantArchived,
+					base.Z{
+						Message: h.TaskMessageWithError(*msg, tc.wantErrMsg, runTime),
+						Score:   runTime.Unix(),
+					})
+			}
+			if diff := cmp.Diff(wantArchived, gotArchived, h.SortZSetEntryOpt, cmpOpt); diff != "" {
+				t.Errorf("%s: mismatch found in %q after running processor; (-want, +got)\n%s", tc.desc, base.ArchivedKey(base.DefaultQueueName), diff)
+			}
+
+			active := ctx.GetActiveMessages(base.DefaultQueueName)
+			if len(active) != 0 {
+				t.Errorf("%s: %q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), tc.desc, len(active))
+			}
+
+			if n != tc.wantErrCount {
+				t.Errorf("error handler was called %d times, want %d", n, tc.wantErrCount)
+			}
 		})
-		p.handler = tc.handler
-
-		p.start(&sync.WaitGroup{})
-		runTime := time.Now() // time when processor is running
-		time.Sleep(tc.wait)   // FIXME: This makes test flaky.
-		p.shutdown()
-
-		cmpOpt := h.EquateInt64Approx(int64(tc.wait.Seconds())) // allow up to a wait-second difference in zset score
-		gotRetry := ctx.GetRetryEntries(base.DefaultQueueName)
-		var wantRetry []base.Z // Note: construct wantRetry here since `LastFailedAt` and ZSCORE is relative to each test run.
-		for _, msg := range tc.wantRetry {
-			wantRetry = append(wantRetry,
-				base.Z{
-					Message: h.TaskMessageAfterRetry(*msg, tc.wantErrMsg, runTime),
-					Score:   runTime.Add(tc.delay).Unix(),
-				})
-		}
-		if diff := cmp.Diff(wantRetry, gotRetry, h.SortZSetEntryOpt, cmpOpt); diff != "" {
-			t.Errorf("%s: mismatch found in %q after running processor; (-want, +got)\n%s", tc.desc, base.RetryKey(base.DefaultQueueName), diff)
-		}
-
-		gotArchived := ctx.GetArchivedEntries(base.DefaultQueueName)
-		var wantArchived []base.Z // Note: construct wantArchived here since `LastFailedAt` and ZSCORE is relative to each test run.
-		for _, msg := range tc.wantArchived {
-			wantArchived = append(wantArchived,
-				base.Z{
-					Message: h.TaskMessageWithError(*msg, tc.wantErrMsg, runTime),
-					Score:   runTime.Unix(),
-				})
-		}
-		if diff := cmp.Diff(wantArchived, gotArchived, h.SortZSetEntryOpt, cmpOpt); diff != "" {
-			t.Errorf("%s: mismatch found in %q after running processor; (-want, +got)\n%s", tc.desc, base.ArchivedKey(base.DefaultQueueName), diff)
-		}
-
-		active := ctx.GetActiveMessages(base.DefaultQueueName)
-		if len(active) != 0 {
-			t.Errorf("%s: %q has %d tasks, want 0", base.ActiveKey(base.DefaultQueueName), tc.desc, len(active))
-		}
-
-		if n != tc.wantErrCount {
-			t.Errorf("error handler was called %d times, want %d", n, tc.wantErrCount)
-		}
 	}
 }
 
@@ -471,51 +478,56 @@ func TestProcessorQueues(t *testing.T) {
 	})
 
 	tests := []struct {
-		queueCfg map[string]int
+		queueCfg *QueuesConfig
 		want     []string
 	}{
 		{
-			queueCfg: map[string]int{
-				"high":    6,
-				"default": 3,
-				"low":     1,
+			queueCfg: &QueuesConfig{
+				Queues: map[string]int{
+					"high":    6,
+					"default": 3,
+					"low":     1,
+				},
 			},
 			want: []string{"high", "default", "low"},
 		},
 		{
-			queueCfg: map[string]int{
-				"default": 1,
+			queueCfg: &QueuesConfig{
+				Queues: map[string]int{
+					"default": 1,
+				},
 			},
 			want: []string{"default"},
 		},
 	}
 
-	for _, tc := range tests {
-		starting := make(chan *workerInfo)
-		finished := make(chan *base.TaskMessage)
-		done := make(chan struct{})
-		defer func() { close(done) }()
-		go fakeHeartbeater(starting, finished, done)
-		p := newProcessor(processorParams{
-			logger:          testLogger,
-			broker:          nil,
-			retryDelayFunc:  DefaultRetryDelayFunc,
-			isFailureFunc:   defaultIsFailureFunc,
-			syncCh:          nil,
-			cancelations:    base.NewCancelations(),
-			concurrency:     10,
-			queues:          tc.queueCfg,
-			strictPriority:  false,
-			errHandler:      nil,
-			shutdownTimeout: defaultShutdownTimeout,
-			starting:        starting,
-			finished:        finished,
+	for i, tc := range tests {
+		t.Run(fmt.Sprintf("test-%d", i), func(t *testing.T) {
+			starting := make(chan *workerInfo)
+			finished := make(chan *base.TaskMessage)
+			done := make(chan struct{})
+			defer func() { close(done) }()
+			go fakeHeartbeater(starting, finished, done)
+			p := newProcessor(processorParams{
+				logger:          testLogger,
+				broker:          nil,
+				retryDelayFunc:  DefaultRetryDelayFunc,
+				isFailureFunc:   defaultIsFailureFunc,
+				syncCh:          nil,
+				cancelations:    base.NewCancelations(),
+				concurrency:     10,
+				queues:          tc.queueCfg.configure(),
+				errHandler:      nil,
+				shutdownTimeout: defaultShutdownTimeout,
+				starting:        starting,
+				finished:        finished,
+			})
+			got := p.queues.Names()
+			if diff := cmp.Diff(tc.want, got, sortOpt); diff != "" {
+				t.Errorf("with queue config: %v\n(*processor).queues() = %v, want %v\n(-want,+got):\n%s",
+					tc.queueCfg, got, tc.want, diff)
+			}
 		})
-		got := p.queues()
-		if diff := cmp.Diff(tc.want, got, sortOpt); diff != "" {
-			t.Errorf("with queue config: %v\n(*processor).queues() = %v, want %v\n(-want,+got):\n%s",
-				tc.queueCfg, got, tc.want, diff)
-		}
 	}
 }
 
@@ -561,65 +573,68 @@ func TestProcessorWithStrictPriority(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		ctx.FlushDB() // clean up db before each test case.
-		for qname, msgs := range tc.pending {
-			ctx.SeedPendingQueue(msgs, qname)
-		}
-
-		// instantiate a new processor
-		var mu sync.Mutex
-		var processed []*Task
-		handler := func(ctx context.Context, task *Task) error {
-			mu.Lock()
-			defer mu.Unlock()
-			processed = append(processed, task)
-			return nil
-		}
-		queueCfg := map[string]int{
-			base.DefaultQueueName: 2,
-			"critical":            3,
-			"low":                 1,
-		}
-		starting := make(chan *workerInfo)
-		finished := make(chan *base.TaskMessage)
-		syncCh := make(chan *syncRequest)
-		done := make(chan struct{})
-		defer func() { close(done) }()
-		go fakeHeartbeater(starting, finished, done)
-		go fakeSyncer(syncCh, done)
-		p := newProcessor(processorParams{
-			logger:          testLogger,
-			broker:          client.rdb,
-			retryDelayFunc:  DefaultRetryDelayFunc,
-			isFailureFunc:   defaultIsFailureFunc,
-			syncCh:          syncCh,
-			cancelations:    base.NewCancelations(),
-			concurrency:     1, // Set concurrency to 1 to make sure tasks are processed one at a time.
-			queues:          queueCfg,
-			strictPriority:  true,
-			errHandler:      nil,
-			shutdownTimeout: defaultShutdownTimeout,
-			starting:        starting,
-			finished:        finished,
-		})
-		p.handler = HandlerFunc(handler)
-
-		p.start(&sync.WaitGroup{})
-		time.Sleep(tc.wait)
-		// Make sure no tasks are stuck in active list.
-		for _, qname := range tc.queues {
-			active := ctx.GetActiveMessages(qname)
-			if len(active) != 0 {
-				t.Errorf("%q has %d tasks, want 0", base.ActiveKey(qname), len(active))
+	for i, tc := range tests {
+		t.Run(fmt.Sprintf("test-%d", i), func(t *testing.T) {
+			ctx.FlushDB() // clean up db before each test case.
+			for qname, msgs := range tc.pending {
+				ctx.SeedPendingQueue(msgs, qname)
 			}
-		}
-		p.shutdown()
 
-		if diff := cmp.Diff(tc.wantProcessed, processed, sortTaskOpt, cmp.AllowUnexported(Task{})); diff != "" {
-			t.Errorf("mismatch found in processed tasks; (-want, +got)\n%s", diff)
-		}
+			// instantiate a new processor
+			var mu sync.Mutex
+			var processed []*Task
+			handler := func(ctx context.Context, task *Task) error {
+				mu.Lock()
+				defer mu.Unlock()
+				processed = append(processed, task)
+				return nil
+			}
+			queueCfg := &QueuesConfig{
+				Priority: Strict,
+				Queues: map[string]int{
+					base.DefaultQueueName: 2,
+					"critical":            3,
+					"low":                 1,
+				},
+			}
+			starting := make(chan *workerInfo)
+			finished := make(chan *base.TaskMessage)
+			syncCh := make(chan *syncRequest)
+			done := make(chan struct{})
+			defer func() { close(done) }()
+			go fakeHeartbeater(starting, finished, done)
+			go fakeSyncer(syncCh, done)
+			p := newProcessor(processorParams{
+				logger:          testLogger,
+				broker:          client.rdb,
+				retryDelayFunc:  DefaultRetryDelayFunc,
+				isFailureFunc:   defaultIsFailureFunc,
+				syncCh:          syncCh,
+				cancelations:    base.NewCancelations(),
+				concurrency:     1, // Set concurrency to 1 to make sure tasks are processed one at a time.
+				queues:          queueCfg.configure(),
+				errHandler:      nil,
+				shutdownTimeout: defaultShutdownTimeout,
+				starting:        starting,
+				finished:        finished,
+			})
+			p.handler = HandlerFunc(handler)
 
+			p.start(&sync.WaitGroup{})
+			time.Sleep(tc.wait)
+			// Make sure no tasks are stuck in active list.
+			for _, qname := range tc.queues {
+				active := ctx.GetActiveMessages(qname)
+				if len(active) != 0 {
+					t.Errorf("%q has %d tasks, want 0", base.ActiveKey(qname), len(active))
+				}
+			}
+			p.shutdown()
+
+			if diff := cmp.Diff(tc.wantProcessed, processed, sortTaskOpt, cmp.AllowUnexported(Task{})); diff != "" {
+				t.Errorf("mismatch found in processed tasks; (-want, +got)\n%s", diff)
+			}
+		})
 	}
 }
 
@@ -659,7 +674,7 @@ func TestProcessorPerform(t *testing.T) {
 	// perform method.
 	p := newProcessor(processorParams{
 		logger: testLogger,
-		queues: defaultQueueConfig,
+		queues: defaultQueuesConfig,
 	})
 
 	for _, tc := range tests {

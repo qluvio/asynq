@@ -7,10 +7,8 @@ package asynq
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"runtime"
 	"runtime/debug"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -27,10 +25,7 @@ type processor struct {
 
 	handler Handler
 
-	queueConfig map[string]int
-
-	// orderedQueues is set only in strict-priority mode.
-	orderedQueues []string
+	queues Queues
 
 	retryDelayFunc RetryDelayFunc
 	isFailureFunc  func(error) bool
@@ -75,8 +70,7 @@ type processorParams struct {
 	syncCh          chan<- *syncRequest
 	cancelations    *base.Cancelations
 	concurrency     int
-	queues          map[string]int
-	strictPriority  bool
+	queues          Queues
 	errHandler      ErrorHandler
 	shutdownTimeout time.Duration
 	starting        chan<- *workerInfo
@@ -85,16 +79,11 @@ type processorParams struct {
 
 // newProcessor constructs a new processor.
 func newProcessor(params processorParams) *processor {
-	queues := normalizeQueues(params.queues)
-	orderedQueues := []string(nil)
-	if params.strictPriority {
-		orderedQueues = sortByPriority(queues)
-	}
+
 	return &processor{
 		logger:          params.logger,
 		broker:          params.broker,
-		queueConfig:     queues,
-		orderedQueues:   orderedQueues,
+		queues:          params.queues,
 		retryDelayFunc:  params.retryDelayFunc,
 		isFailureFunc:   params.isFailureFunc,
 		syncRequestCh:   params.syncCh,
@@ -162,7 +151,7 @@ func (p *processor) exec() {
 	case <-p.quit:
 		return
 	case p.sema <- struct{}{}: // acquire token
-		qnames := p.queues()
+		qnames := p.queues.Names()
 		msg, deadline, err := p.broker.Dequeue(qnames...)
 		switch {
 		case errors.Is(err, errors.ErrNoProcessableTask):
@@ -323,33 +312,6 @@ func (p *processor) archive(ctx context.Context, msg *base.TaskMessage, e error)
 	}
 }
 
-// queues returns a list of queues to query.
-// Order of the queue names is based on the priority of each queue.
-// Queue names is sorted by their priority level if strict-priority is true.
-// If strict-priority is false, then the order of queue names are roughly based on
-// the priority level but randomized in order to avoid starving low priority queues.
-func (p *processor) queues() []string {
-	// skip the overhead of generating a list of queue names
-	// if we are processing one queue.
-	if len(p.queueConfig) == 1 {
-		for qname := range p.queueConfig {
-			return []string{qname}
-		}
-	}
-	if p.orderedQueues != nil {
-		return p.orderedQueues
-	}
-	var names []string
-	for qname, priority := range p.queueConfig {
-		for i := 0; i < priority; i++ {
-			names = append(names, qname)
-		}
-	}
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	r.Shuffle(len(names), func(i, j int) { names[i], names[j] = names[j], names[i] })
-	return uniq(names, len(p.queueConfig))
-}
-
 // perform calls the handler with the given task.
 // If the call returns without panic, it simply returns the value,
 // otherwise, it recovers from panic and returns an error.
@@ -373,78 +335,4 @@ func (p *processor) perform(ctx context.Context, task *Task) (err error) {
 		}
 	}()
 	return p.handler.ProcessTask(ctx, task)
-}
-
-// uniq dedupes elements and returns a slice of unique names of length l.
-// Order of the output slice is based on the input list.
-func uniq(names []string, l int) []string {
-	var res []string
-	seen := make(map[string]struct{})
-	for _, s := range names {
-		if _, ok := seen[s]; !ok {
-			seen[s] = struct{}{}
-			res = append(res, s)
-		}
-		if len(res) == l {
-			break
-		}
-	}
-	return res
-}
-
-// sortByPriority returns a list of queue names sorted by
-// their priority level in descending order.
-func sortByPriority(qcfg map[string]int) []string {
-	var queues []*queue
-	for qname, n := range qcfg {
-		queues = append(queues, &queue{qname, n})
-	}
-	sort.Sort(sort.Reverse(byPriority(queues)))
-	var res []string
-	for _, q := range queues {
-		res = append(res, q.name)
-	}
-	return res
-}
-
-type queue struct {
-	name     string
-	priority int
-}
-
-type byPriority []*queue
-
-func (x byPriority) Len() int           { return len(x) }
-func (x byPriority) Less(i, j int) bool { return x[i].priority < x[j].priority }
-func (x byPriority) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
-
-// normalizeQueues divides priority numbers by their greatest common divisor.
-func normalizeQueues(queues map[string]int) map[string]int {
-	var xs []int
-	for _, x := range queues {
-		xs = append(xs, x)
-	}
-	d := gcd(xs...)
-	res := make(map[string]int)
-	for q, x := range queues {
-		res[q] = x / d
-	}
-	return res
-}
-
-func gcd(xs ...int) int {
-	fn := func(x, y int) int {
-		for y > 0 {
-			x, y = y, x%y
-		}
-		return x
-	}
-	res := xs[0]
-	for i := 0; i < len(xs); i++ {
-		res = fn(xs[i], res)
-		if res == 1 {
-			return 1
-		}
-	}
-	return res
 }

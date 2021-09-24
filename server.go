@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq/internal/base"
+	aserrors "github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
 )
 
@@ -70,34 +71,9 @@ type Config struct {
 	// By default, if the given error is non-nil the function returns true.
 	IsFailure func(error) bool
 
-	// List of queues to process with given priority value. Keys are the names of the
-	// queues and values are associated priority value.
-	//
-	// If set to nil or not specified, the server will process only the "default" queue.
-	//
-	// Priority is treated as follows to avoid starving low priority queues.
-	//
-	// Example:
-	//
-	//     Queues: map[string]int{
-	//         "critical": 6,
-	//         "default":  3,
-	//         "low":      1,
-	//     }
-	//
-	// With the above config and given that all queues are not empty, the tasks
-	// in "critical", "default", "low" should be processed 60%, 30%, 10% of
-	// the time respectively.
-	//
-	// If a queue has a zero or negative priority value, the queue will be ignored.
-	Queues map[string]int
-
-	// StrictPriority indicates whether the queue priority should be treated strictly.
-	//
-	// If set to true, tasks in the queue with the highest priority is processed first.
-	// The tasks in lower priority queues are processed only when those queues with
-	// higher priorities are empty.
-	StrictPriority bool
+	// Queues is the list of queues to process with given priority value
+	// If nil the server will process only the "default" queue
+	Queues Queues
 
 	// ErrorHandler handles errors returned by the task handler.
 	//
@@ -278,10 +254,6 @@ func DefaultRetryDelayFunc(n int, e error, t *Task) time.Duration {
 
 func defaultIsFailureFunc(err error) bool { return err != nil }
 
-var defaultQueueConfig = map[string]int{
-	base.DefaultQueueName: 1,
-}
-
 const (
 	defaultShutdownTimeout = 8 * time.Second
 
@@ -310,22 +282,14 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	if isFailureFunc == nil {
 		isFailureFunc = defaultIsFailureFunc
 	}
-	queues := make(map[string]int)
-	for qname, p := range cfg.Queues {
-		if err := base.ValidateQueueName(qname); err != nil {
-			continue // ignore invalid queue names
-		}
-		if p > 0 {
-			queues[qname] = p
-		}
+	if cfg.Queues == nil {
+		cfg.Queues = &QueuesConfig{}
 	}
-	if len(queues) == 0 {
-		queues = defaultQueueConfig
+	err := cfg.Queues.Configure()
+	if err != nil {
+		panic(aserrors.E(aserrors.Op("newServer"), aserrors.Internal, err))
 	}
-	var qnames []string
-	for q := range queues {
-		qnames = append(qnames, q)
-	}
+
 	shutdownTimeout := cfg.ShutdownTimeout
 	if shutdownTimeout == 0 {
 		shutdownTimeout = defaultShutdownTimeout
@@ -353,20 +317,19 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		interval:   5 * time.Second,
 	})
 	heartbeater := newHeartbeater(heartbeaterParams{
-		logger:         logger,
-		broker:         broker,
-		interval:       5 * time.Second,
-		concurrency:    n,
-		queues:         queues,
-		strictPriority: cfg.StrictPriority,
-		state:          state,
-		starting:       starting,
-		finished:       finished,
+		logger:      logger,
+		broker:      broker,
+		interval:    5 * time.Second,
+		concurrency: n,
+		queues:      cfg.Queues,
+		state:       state,
+		starting:    starting,
+		finished:    finished,
 	})
 	forwarder := newForwarder(forwarderParams{
 		logger:   logger,
 		broker:   broker,
-		queues:   qnames,
+		queues:   cfg.Queues,
 		interval: 5 * time.Second,
 	})
 	subscriber := newSubscriber(subscriberParams{
@@ -382,8 +345,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		syncCh:          syncCh,
 		cancelations:    cancels,
 		concurrency:     n,
-		queues:          queues,
-		strictPriority:  cfg.StrictPriority,
+		queues:          cfg.Queues,
 		errHandler:      cfg.ErrorHandler,
 		shutdownTimeout: shutdownTimeout,
 		starting:        starting,
@@ -394,7 +356,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		broker:         broker,
 		retryDelayFunc: delayFunc,
 		isFailureFunc:  isFailureFunc,
-		queues:         qnames,
+		queues:         cfg.Queues,
 		interval:       1 * time.Minute,
 	})
 	healthchecker := newHealthChecker(healthcheckerParams{
@@ -479,7 +441,7 @@ func (srv *Server) Start(handler Handler) error {
 	case base.StateActive:
 		return fmt.Errorf("asynq: the server is already running")
 	case base.StateStopped:
-		return fmt.Errorf("asynq: the server is in the stopped state. Waiting for shutdown.")
+		return fmt.Errorf("asynq: the server is in the stopped state. Waiting for shutdown")
 	case base.StateClosed:
 		return ErrServerClosed
 	}

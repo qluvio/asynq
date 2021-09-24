@@ -27,10 +27,16 @@ func TestHeartbeater(t *testing.T) {
 		interval    time.Duration
 		host        string
 		pid         int
-		queues      map[string]int
+		queues      Queues
 		concurrency int
 	}{
-		{2 * time.Second, "localhost", 45678, map[string]int{"default": 1}, 10},
+		{
+			interval:    2 * time.Second,
+			host:        "localhost",
+			pid:         45678,
+			queues:      (&QueuesConfig{Queues: map[string]int{"default": 1}}).configure(),
+			concurrency: 10,
+		},
 	}
 
 	timeCmpOpt := cmpopts.EquateApproxTime(10 * time.Millisecond)
@@ -41,15 +47,14 @@ func TestHeartbeater(t *testing.T) {
 
 		state := base.NewServerState()
 		hb := newHeartbeater(heartbeaterParams{
-			logger:         testLogger,
-			broker:         client.rdb,
-			interval:       tc.interval,
-			concurrency:    tc.concurrency,
-			queues:         tc.queues,
-			strictPriority: false,
-			state:          state,
-			starting:       make(chan *workerInfo),
-			finished:       make(chan *base.TaskMessage),
+			logger:      testLogger,
+			broker:      client.rdb,
+			interval:    tc.interval,
+			concurrency: tc.concurrency,
+			queues:      tc.queues,
+			state:       state,
+			starting:    make(chan *workerInfo),
+			finished:    make(chan *base.TaskMessage),
 		})
 
 		// Change host and pid fields for testing purpose.
@@ -63,7 +68,7 @@ func TestHeartbeater(t *testing.T) {
 		want := &base.ServerInfo{
 			Host:        tc.host,
 			PID:         tc.pid,
-			Queues:      tc.queues,
+			Queues:      tc.queues.Priorities(),
 			Concurrency: tc.concurrency,
 			Started:     time.Now(),
 			Status:      "active",
@@ -139,15 +144,14 @@ func TestHeartbeaterWithRedisDown(t *testing.T) {
 	state := base.NewServerState()
 	state.Set(base.StateActive)
 	hb := newHeartbeater(heartbeaterParams{
-		logger:         testLogger,
-		broker:         testBroker,
-		interval:       time.Second,
-		concurrency:    10,
-		queues:         map[string]int{"default": 1},
-		strictPriority: false,
-		state:          state,
-		starting:       make(chan *workerInfo),
-		finished:       make(chan *base.TaskMessage),
+		logger:      testLogger,
+		broker:      testBroker,
+		interval:    time.Second,
+		concurrency: 10,
+		queues:      (&QueuesConfig{Queues: map[string]int{"default": 1}}).configure(),
+		state:       state,
+		starting:    make(chan *workerInfo),
+		finished:    make(chan *base.TaskMessage),
 	})
 
 	testBroker.Sleep()
