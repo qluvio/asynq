@@ -232,12 +232,13 @@ type TaskMessage struct {
 }
 
 type MessageBatch struct {
-	InputIndex int
-	Msg        *TaskMessage
-	UniqueTTL  time.Duration
-	ProcessAt  time.Time
-	State      TaskState
-	Err        error
+	InputIndex  int
+	Msg         *TaskMessage
+	UniqueTTL   time.Duration
+	ForceUnique bool
+	ProcessAt   time.Time
+	State       TaskState
+	Err         error
 }
 
 // EncodeMessage marshals the given task message and returns an encoded bytes.
@@ -657,7 +658,7 @@ type Broker interface {
 	Enqueue(msg *TaskMessage) error
 	// EnqueueUnique inserts the given task if the task's uniqueness lock can be acquired.
 	// It returns ErrDuplicateTask if the lock cannot be acquired.
-	EnqueueUnique(msg *TaskMessage, ttl time.Duration) error
+	EnqueueUnique(msg *TaskMessage, ttl time.Duration, forceUnique ...bool) error
 	// Dequeue queries given queues in order and pops a task message
 	// off a queue if one exists and returns the message and deadline.
 	// Dequeue skips a queue if the queue is paused.
@@ -672,7 +673,7 @@ type Broker interface {
 	Schedule(msg *TaskMessage, processAt time.Time) error
 	// ScheduleUnique adds the task to the backlog queue to be processed in the future if the uniqueness lock can be acquired.
 	// It returns ErrDuplicateTask if the lock cannot be acquired.
-	ScheduleUnique(msg *TaskMessage, processAt time.Time, ttl time.Duration) error
+	ScheduleUnique(msg *TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error
 	// Retry moves the task from active to retry queue.
 	// It also annotates the message with the given error message and
 	// if isFailure is true increments the retried counter.

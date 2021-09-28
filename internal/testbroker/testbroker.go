@@ -57,13 +57,13 @@ func (tb *TestBroker) Enqueue(msg *base.TaskMessage) error {
 	return tb.real.Enqueue(msg)
 }
 
-func (tb *TestBroker) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration) error {
+func (tb *TestBroker) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration, forceUnique ...bool) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.EnqueueUnique(msg, ttl)
+	return tb.real.EnqueueUnique(msg, ttl, forceUnique...)
 }
 
 func (tb *TestBroker) Dequeue(qnames ...string) (*base.TaskMessage, time.Time, error) {
@@ -102,13 +102,13 @@ func (tb *TestBroker) Schedule(msg *base.TaskMessage, processAt time.Time) error
 	return tb.real.Schedule(msg, processAt)
 }
 
-func (tb *TestBroker) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl time.Duration) error {
+func (tb *TestBroker) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.ScheduleUnique(msg, processAt, ttl)
+	return tb.real.ScheduleUnique(msg, processAt, ttl, forceUnique...)
 }
 
 func (tb *TestBroker) Retry(msg *base.TaskMessage, processAt time.Time, errMsg string, isFailure bool) error {

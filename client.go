@@ -93,6 +93,7 @@ const (
 	UniqueOpt
 	ProcessAtOpt
 	ProcessInOpt
+	ForceUniqueOpt
 )
 
 // Option specifies the task processing behavior.
@@ -109,13 +110,14 @@ type Option interface {
 
 // Internal option representations.
 type (
-	retryOption     int
-	queueOption     string
-	timeoutOption   time.Duration
-	deadlineOption  time.Time
-	uniqueOption    time.Duration
-	processAtOption time.Time
-	processInOption time.Duration
+	retryOption       int
+	queueOption       string
+	timeoutOption     time.Duration
+	deadlineOption    time.Time
+	uniqueOption      time.Duration
+	processAtOption   time.Time
+	processInOption   time.Duration
+	forceUniqueOption bool
 )
 
 // MaxRetry returns an option to specify the max number of times
@@ -191,6 +193,16 @@ func (ttl uniqueOption) String() string     { return fmt.Sprintf("Unique(%v)", t
 func (ttl uniqueOption) Type() OptionType   { return UniqueOpt }
 func (ttl uniqueOption) Value() interface{} { return time.Duration(ttl) }
 
+// ForceUnique returns an option to force uniqueness of a task previously enqueued
+// with Unique option.
+func ForceUnique(b bool) Option {
+	return forceUniqueOption(b)
+}
+
+func (b forceUniqueOption) String() string     { return fmt.Sprintf("ForceUnique(%v)", bool(b)) }
+func (b forceUniqueOption) Type() OptionType   { return ForceUniqueOpt }
+func (b forceUniqueOption) Value() interface{} { return bool(b) }
+
 // ProcessAt returns an option to specify when to process the given task.
 //
 // If there's a conflicting ProcessIn option, the last option passed to Enqueue overrides the others.
@@ -221,12 +233,13 @@ func (d processInOption) Value() interface{} { return time.Duration(d) }
 var ErrDuplicateTask = errors.ErrDuplicateTask
 
 type option struct {
-	retry     int
-	queue     string
-	timeout   time.Duration
-	deadline  time.Time
-	uniqueTTL time.Duration
-	processAt time.Time
+	retry       int
+	queue       string
+	timeout     time.Duration
+	deadline    time.Time
+	uniqueTTL   time.Duration
+	processAt   time.Time
+	forceUnique bool
 }
 
 // composeOptions merges user provided options into the default options
@@ -261,6 +274,8 @@ func composeOptions(opts ...Option) (option, error) {
 			res.processAt = time.Time(opt)
 		case processInOption:
 			res.processAt = time.Now().Add(time.Duration(opt))
+		case forceUniqueOption:
+			res.forceUnique = bool(opt)
 		default:
 			// ignore unexpected option
 		}
@@ -354,10 +369,10 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 		if c.loc != nil {
 			opt.processAt = now.In(c.loc)
 		}
-		err = c.enqueue(msg, opt.uniqueTTL)
+		err = c.enqueue(msg, opt.uniqueTTL, opt.forceUnique)
 		state = base.TaskStatePending
 	} else {
-		err = c.schedule(msg, opt.processAt, opt.uniqueTTL)
+		err = c.schedule(msg, opt.processAt, opt.uniqueTTL, opt.forceUnique)
 		state = base.TaskStateScheduled
 	}
 
@@ -371,17 +386,17 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 	return newTaskInfo(msg, state, opt.processAt), nil
 }
 
-func (c *Client) enqueue(msg *base.TaskMessage, uniqueTTL time.Duration) error {
+func (c *Client) enqueue(msg *base.TaskMessage, uniqueTTL time.Duration, forceUnique bool) error {
 	if uniqueTTL > 0 {
-		return c.rdb.EnqueueUnique(msg, uniqueTTL)
+		return c.rdb.EnqueueUnique(msg, uniqueTTL, forceUnique)
 	}
 	return c.rdb.Enqueue(msg)
 }
 
-func (c *Client) schedule(msg *base.TaskMessage, t time.Time, uniqueTTL time.Duration) error {
+func (c *Client) schedule(msg *base.TaskMessage, t time.Time, uniqueTTL time.Duration, forceUnique bool) error {
 	if uniqueTTL > 0 {
 		ttl := t.Add(uniqueTTL).Sub(time.Now())
-		return c.rdb.ScheduleUnique(msg, t, ttl)
+		return c.rdb.ScheduleUnique(msg, t, ttl, forceUnique)
 	}
 	return c.rdb.Schedule(msg, t)
 }
@@ -471,11 +486,12 @@ func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error
 			}
 			if opt.uniqueTTL > 0 {
 				bm = &base.MessageBatch{
-					InputIndex: i,
-					Msg:        msg,
-					UniqueTTL:  opt.uniqueTTL,
-					ProcessAt:  opt.processAt,
-					State:      base.TaskStatePending,
+					InputIndex:  i,
+					Msg:         msg,
+					UniqueTTL:   opt.uniqueTTL,
+					ForceUnique: opt.forceUnique,
+					ProcessAt:   opt.processAt,
+					State:       base.TaskStatePending,
 				}
 				enqueueUnique = append(enqueueUnique, bm)
 			} else {
@@ -490,11 +506,12 @@ func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error
 		} else {
 			if opt.uniqueTTL > 0 {
 				bm = &base.MessageBatch{
-					InputIndex: i,
-					Msg:        msg,
-					UniqueTTL:  opt.processAt.Add(opt.uniqueTTL).Sub(now),
-					ProcessAt:  opt.processAt,
-					State:      base.TaskStateScheduled,
+					InputIndex:  i,
+					Msg:         msg,
+					UniqueTTL:   opt.processAt.Add(opt.uniqueTTL).Sub(now),
+					ForceUnique: opt.forceUnique,
+					ProcessAt:   opt.processAt,
+					State:       base.TaskStateScheduled,
 				}
 				scheduleUnique = append(scheduleUnique, bm)
 			} else {

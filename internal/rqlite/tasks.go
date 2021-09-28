@@ -438,6 +438,10 @@ func (conn *Connection) enqueueUniqueMessages(msgs ...*base.MessageBatch) error 
 		}
 		uniqueKeyExpireAt := now.Add(bmsg.UniqueTTL).Unix()
 		msgNdx = append(msgNdx, len(stmts))
+		uniqueKeyExpLimit := now.Unix()
+		if bmsg.ForceUnique {
+			uniqueKeyExpLimit = math.MaxInt64
+		}
 
 		// if the unique_key_deadline is expired we ignore the constraint
 		// https://www.sqlite.org/lang_UPSERT.html
@@ -465,7 +469,7 @@ func (conn *Connection) enqueueUniqueMessages(msgs ...*base.MessageBatch) error 
 			msg.Deadline,
 			uniqueKeyExpireAt,
 			pending,
-			now.Unix()))
+			uniqueKeyExpLimit))
 	}
 
 	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
@@ -580,7 +584,7 @@ func (conn *Connection) setTaskDone(msg *base.TaskMessage) error {
 		st = Statement(
 			"UPDATE "+conn.table(TasksTable)+" SET state='processed', deadline=0, unique_key_deadline=0, "+
 				"done_at=?, cleanup_at=?, unique_key=? "+
-				"WHERE task_uuid=?",
+				"WHERE task_uuid=? AND state='active'",
 			now.Unix(),
 			expireAt.Unix(),
 			msg.ID.String(),
@@ -588,7 +592,8 @@ func (conn *Connection) setTaskDone(msg *base.TaskMessage) error {
 
 	} else {
 		st = Statement(
-			"UPDATE "+conn.table(TasksTable)+" SET state='processed', deadline=0, done_at=?, cleanup_at=? WHERE task_uuid=?",
+			"UPDATE "+conn.table(TasksTable)+" SET state='processed', deadline=0, done_at=?, cleanup_at=? "+
+				"WHERE task_uuid=? AND state='active'",
 			now.Unix(),
 			expireAt.Unix(),
 			msg.ID.String())
@@ -598,7 +603,11 @@ func (conn *Connection) setTaskDone(msg *base.TaskMessage) error {
 	if err != nil {
 		return NewRqliteWError(op, wrs[0], err, st)
 	}
-	err = expectOneRowUpdated(op, wrs[0], st)
+	// with uniqueKey the unique lock may have been forced to put the task
+	// again in state 'pending' - see enqueueUniqueMessages
+	if len(msg.UniqueKey) == 0 {
+		err = expectOneRowUpdated(op, wrs[0], st)
+	}
 	if err != nil {
 		return err
 	}
@@ -619,7 +628,12 @@ func (conn *Connection) requeueTask(msg *base.TaskMessage) error {
 	if err != nil {
 		return NewRqliteWError(op, wrs[0], err, st)
 	}
-	err = expectOneRowUpdated(op, wrs[0], st)
+
+	// with uniqueKey the unique lock may have been forced to put the task
+	// again in state 'pending' - see enqueueUniqueMessages
+	if len(msg.UniqueKey) == 0 {
+		err = expectOneRowUpdated(op, wrs[0], st)
+	}
 	if err != nil {
 		return err
 	}
@@ -721,6 +735,10 @@ func (conn *Connection) scheduleUniqueTasks(msgs ...*base.MessageBatch) error {
 			return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode task message: %v", err))
 		}
 		msgNdx = append(msgNdx, len(stmts))
+		uniqueKeyExpLimit := now.Unix()
+		if bmsg.ForceUnique {
+			uniqueKeyExpLimit = math.MaxInt64
+		}
 
 		stmts = append(stmts, Statement(
 			"INSERT INTO "+conn.table(TasksTable)+" (queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, unique_key_deadline, scheduled_at, pndx, state)"+
@@ -748,7 +766,7 @@ func (conn *Connection) scheduleUniqueTasks(msgs ...*base.MessageBatch) error {
 			now.Add(bmsg.UniqueTTL).Unix(),
 			bmsg.ProcessAt.UTC().Unix(),
 			scheduled,
-			now.Unix()))
+			uniqueKeyExpLimit))
 	}
 
 	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
@@ -814,7 +832,11 @@ func (conn *Connection) retryTask(msg *base.TaskMessage, processAt time.Time, er
 		return NewRqliteWError(op, wrs[0], err, st)
 	}
 
-	err = expectOneRowUpdated(op, wrs[0], st)
+	// with uniqueKey the unique lock may have been forced to put the task
+	// again in state 'pending' - see enqueueUniqueMessages
+	if len(msg.UniqueKey) == 0 {
+		err = expectOneRowUpdated(op, wrs[0], st)
+	}
 	if err != nil {
 		return err
 	}
@@ -857,7 +879,12 @@ func (conn *Connection) archiveTask(msg *base.TaskMessage, errMsg string) error 
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, stmts)
 	}
-	err = expectOneRowUpdated(op, wrs[1], stmts[1])
+
+	// with uniqueKey the unique lock may have been forced to put the task
+	// again in state 'pending' - see enqueueUniqueMessages
+	if len(msg.UniqueKey) == 0 {
+		err = expectOneRowUpdated(op, wrs[1], stmts[1])
+	}
 	if err != nil {
 		return err
 	}

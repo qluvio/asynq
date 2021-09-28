@@ -186,15 +186,20 @@ func (r *RQLite) EnqueueBatch(msgs ...*base.MessageBatch) error {
 
 // EnqueueUnique inserts the given task if the task's uniqueness lock can be acquired.
 // It returns ErrDuplicateTask if the lock cannot be acquired.
-func (r *RQLite) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration) error {
+func (r *RQLite) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration, forceUnique ...bool) error {
 	var op errors.Op = "rqlite.EnqueueUnique"
 	conn, err := r.client(op)
 	if err != nil {
 		return err
 	}
+	funique := false
+	if len(forceUnique) > 0 {
+		funique = forceUnique[0]
+	}
 	return conn.enqueueUniqueMessages(&base.MessageBatch{
-		Msg:       msg,
-		UniqueTTL: ttl,
+		Msg:         msg,
+		UniqueTTL:   ttl,
+		ForceUnique: funique,
 	})
 }
 
@@ -290,17 +295,23 @@ func (r *RQLite) ScheduleBatch(msg ...*base.MessageBatch) error {
 // ScheduleUnique adds the task to the backlog queue to be processed in the future
 // if the uniqueness lock can be acquired.
 // It returns ErrDuplicateTask if the lock cannot be acquired.
-func (r *RQLite) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl time.Duration) error {
+func (r *RQLite) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error {
 	var op errors.Op = "rqlite.ScheduleUnique"
 	conn, err := r.client(op)
 	if err != nil {
 		return err
 	}
 
+	funique := false
+	if len(forceUnique) > 0 {
+		funique = forceUnique[0]
+	}
+
 	return conn.scheduleUniqueTasks(&base.MessageBatch{
-		Msg:       msg,
-		UniqueTTL: ttl,
-		ProcessAt: processAt,
+		Msg:         msg,
+		UniqueTTL:   ttl,
+		ProcessAt:   processAt,
+		ForceUnique: funique,
 	})
 }
 

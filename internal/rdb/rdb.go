@@ -134,9 +134,24 @@ redis.call("LPUSH", KEYS[3], ARGV[1])
 return 1
 `)
 
+var enqueueUniqueForceCmd = redis.NewScript(`
+local ok = redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[2])
+if not ok then
+  return 0
+end
+redis.call("HSET", KEYS[2],
+           "msg", ARGV[3],
+           "state", "pending",
+           "timeout", ARGV[4],
+           "deadline", ARGV[5],
+           "unique_key", KEYS[1])
+redis.call("LPUSH", KEYS[3], ARGV[1])
+return 1
+`)
+
 // EnqueueUnique inserts the given task if the task's uniqueness lock can be acquired.
 // It returns ErrDuplicateTask if the lock cannot be acquired.
-func (r *RDB) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration) error {
+func (r *RDB) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration, forceUnique ...bool) error {
 	var op errors.Op = "rdb.EnqueueUnique"
 	encoded, err := base.EncodeMessage(msg)
 	if err != nil {
@@ -144,6 +159,10 @@ func (r *RDB) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration) error {
 	}
 	if err := r.client.SAdd(context.Background(), base.AllQueues, msg.Queue).Err(); err != nil {
 		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "sadd", Err: err})
+	}
+	funique := false
+	if len(forceUnique) > 0 {
+		funique = forceUnique[0]
 	}
 	keys := []string{
 		msg.UniqueKey,
@@ -157,7 +176,12 @@ func (r *RDB) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration) error {
 		msg.Timeout,
 		msg.Deadline,
 	}
-	res, err := enqueueUniqueCmd.Run(context.Background(), r.client, keys, argv...).Result()
+	var res interface{}
+	if funique {
+		res, err = enqueueUniqueForceCmd.Run(context.Background(), r.client, keys, argv...).Result()
+	} else {
+		res, err = enqueueUniqueCmd.Run(context.Background(), r.client, keys, argv...).Result()
+	}
 	if err != nil {
 		return errors.E(op, errors.Unknown, fmt.Sprintf("redis eval error: %v", err))
 	}
@@ -428,9 +452,24 @@ redis.call("ZADD", KEYS[3], ARGV[3], ARGV[1])
 return 1
 `)
 
+var scheduleUniqueForceCmd = redis.NewScript(`
+local ok = redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[2])
+if not ok then
+  return 0
+end
+redis.call("HSET", KEYS[2],
+           "msg", ARGV[4],
+           "state", "scheduled",
+           "timeout", ARGV[5],
+           "deadline", ARGV[6],
+           "unique_key", KEYS[1])
+redis.call("ZADD", KEYS[3], ARGV[3], ARGV[1])
+return 1
+`)
+
 // ScheduleUnique adds the task to the backlog queue to be processed in the future if the uniqueness lock can be acquired.
 // It returns ErrDuplicateTask if the lock cannot be acquired.
-func (r *RDB) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl time.Duration) error {
+func (r *RDB) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error {
 	var op errors.Op = "rdb.ScheduleUnique"
 	encoded, err := base.EncodeMessage(msg)
 	if err != nil {
@@ -452,7 +491,16 @@ func (r *RDB) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl tim
 		msg.Timeout,
 		msg.Deadline,
 	}
-	res, err := scheduleUniqueCmd.Run(context.Background(), r.client, keys, argv...).Result()
+	funique := false
+	if len(forceUnique) > 0 {
+		funique = forceUnique[0]
+	}
+	var res interface{}
+	if funique {
+		res, err = scheduleUniqueForceCmd.Run(context.Background(), r.client, keys, argv...).Result()
+	} else {
+		res, err = scheduleUniqueCmd.Run(context.Background(), r.client, keys, argv...).Result()
+	}
 	if err != nil {
 		return errors.E(op, errors.Unknown, fmt.Sprintf("redis eval error: %v", err))
 	}
@@ -921,11 +969,11 @@ func (r *RDB) EnqueueUniqueBatch(msgs ...*base.MessageBatch) error {
 		return nil
 	}
 	if len(msgs) == 1 {
-		return r.EnqueueUnique(msgs[0].Msg, msgs[0].UniqueTTL)
+		return r.EnqueueUnique(msgs[0].Msg, msgs[0].UniqueTTL, msgs[0].ForceUnique)
 	}
 	allErrors := map[int]error{}
 	for i, msg := range msgs {
-		err := r.EnqueueUnique(msg.Msg, msg.UniqueTTL)
+		err := r.EnqueueUnique(msg.Msg, msg.UniqueTTL, msg.ForceUnique)
 		if err != nil {
 			msg.Err = err
 			allErrors[i] = err
@@ -963,11 +1011,11 @@ func (r *RDB) ScheduleUniqueBatch(msgs ...*base.MessageBatch) error {
 		return nil
 	}
 	if len(msgs) == 1 {
-		return r.ScheduleUnique(msgs[0].Msg, msgs[0].ProcessAt, msgs[0].UniqueTTL)
+		return r.ScheduleUnique(msgs[0].Msg, msgs[0].ProcessAt, msgs[0].UniqueTTL, msgs[0].ForceUnique)
 	}
 	allErrors := map[int]error{}
 	for i, msg := range msgs {
-		err := r.ScheduleUnique(msg.Msg, msg.ProcessAt, msg.UniqueTTL)
+		err := r.ScheduleUnique(msg.Msg, msg.ProcessAt, msg.UniqueTTL, msg.ForceUnique)
 		if err != nil {
 			msg.Err = err
 			allErrors[i] = err
