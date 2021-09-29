@@ -20,8 +20,9 @@ import (
 )
 
 type processor struct {
-	logger *log.Logger
-	broker base.Broker
+	logger   *log.Logger
+	serverID string
+	broker   base.Broker
 
 	handler Handler
 
@@ -64,6 +65,7 @@ type processor struct {
 
 type processorParams struct {
 	logger          *log.Logger
+	serverID        string
 	broker          base.Broker
 	retryDelayFunc  RetryDelayFunc
 	isFailureFunc   func(error) bool
@@ -82,6 +84,7 @@ func newProcessor(params processorParams) *processor {
 
 	return &processor{
 		logger:          params.logger,
+		serverID:        params.serverID,
 		broker:          params.broker,
 		queues:          params.queues,
 		retryDelayFunc:  params.retryDelayFunc,
@@ -152,7 +155,7 @@ func (p *processor) exec() {
 		return
 	case p.sema <- struct{}{}: // acquire token
 		qnames := p.queues.Names()
-		msg, deadline, err := p.broker.Dequeue(qnames...)
+		msg, deadline, err := p.broker.Dequeue(p.serverID, qnames...)
 		switch {
 		case errors.Is(err, errors.ErrNoProcessableTask):
 			p.logger.Debug("All queues are empty")
@@ -171,7 +174,7 @@ func (p *processor) exec() {
 			return
 		}
 
-		p.starting <- &workerInfo{msg, time.Now(), deadline}
+		p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
 		go func() {
 			defer func() {
 				p.finished <- msg
@@ -203,7 +206,7 @@ func (p *processor) exec() {
 			case <-p.abort:
 				// time is up, push the message back to queue and quit this worker goroutine.
 				p.logger.Warnf("Quitting worker. task id=%s", msg.ID)
-				p.requeue(msg)
+				p.requeueAborting(msg)
 				return
 			case <-ctx.Done():
 				p.retryOrArchive(ctx, msg, ctx.Err())
@@ -217,14 +220,43 @@ func (p *processor) exec() {
 					p.retryOrArchive(ctx, msg, resErr)
 					return
 				}
-				p.markAsDone(ctx, msg)
+				if !msg.Recurrent {
+					p.markAsDone(ctx, msg)
+				} else {
+					p.requeue(ctx, msg)
+				}
 			}
 		}()
 	}
 }
 
-func (p *processor) requeue(msg *base.TaskMessage) {
-	err := p.broker.Requeue(msg)
+func (p *processor) requeue(ctx context.Context, msg *base.TaskMessage) {
+
+	err := p.broker.Requeue(p.serverID, msg, false)
+	if err == nil {
+		p.logger.Infof("Pushed recurrent task id=%s back to queue", msg.ID)
+		return
+	}
+
+	p.logger.Errorf("Could not push recurrent task id=%s back to queue: %v", msg.ID, err)
+	errMsg := fmt.Sprintf("Could not push recurrent task id=%s type=%q from %q err: %+v", msg.ID, msg.Type, base.ActiveKey(msg.Queue), err)
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		panic("asynq: internal error: missing deadline in context")
+	}
+	p.logger.Warnf("%s; Will retry syncing", errMsg)
+	p.syncRequestCh <- &syncRequest{
+		fn: func() error {
+			return p.broker.Requeue(p.serverID, msg, false)
+		},
+		errMsg:   errMsg,
+		deadline: deadline,
+	}
+
+}
+
+func (p *processor) requeueAborting(msg *base.TaskMessage) {
+	err := p.broker.Requeue(p.serverID, msg, true)
 	if err != nil {
 		p.logger.Errorf("Could not push task id=%s back to queue: %v", msg.ID, err)
 	} else {
@@ -233,7 +265,7 @@ func (p *processor) requeue(msg *base.TaskMessage) {
 }
 
 func (p *processor) markAsDone(ctx context.Context, msg *base.TaskMessage) {
-	err := p.broker.Done(msg)
+	err := p.broker.Done(p.serverID, msg)
 	if err != nil {
 		errMsg := fmt.Sprintf("Could not remove task id=%s type=%q from %q err: %+v", msg.ID, msg.Type, base.ActiveKey(msg.Queue), err)
 		deadline, ok := ctx.Deadline()
@@ -243,7 +275,7 @@ func (p *processor) markAsDone(ctx context.Context, msg *base.TaskMessage) {
 		p.logger.Warnf("%s; Will retry syncing", errMsg)
 		p.syncRequestCh <- &syncRequest{
 			fn: func() error {
-				return p.broker.Done(msg)
+				return p.broker.Done(p.serverID, msg)
 			},
 			errMsg:   errMsg,
 			deadline: deadline,

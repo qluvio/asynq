@@ -331,7 +331,7 @@ func TestDequeue(t *testing.T) {
 		h.FlushDB(t, r.client) // clean up db before each test case
 		h.SeedAllPendingQueues(t, r.client, tc.pending)
 
-		gotMsg, gotDeadline, err := r.Dequeue(tc.args...)
+		gotMsg, gotDeadline, err := r.Dequeue("", tc.args...)
 		if err != nil {
 			t.Errorf("(*RDB).Dequeue(%v) returned error %v", tc.args, err)
 			continue
@@ -426,7 +426,7 @@ func TestDequeueError(t *testing.T) {
 		h.FlushDB(t, r.client) // clean up db before each test case
 		h.SeedAllPendingQueues(t, r.client, tc.pending)
 
-		gotMsg, gotDeadline, gotErr := r.Dequeue(tc.args...)
+		gotMsg, gotDeadline, gotErr := r.Dequeue("", tc.args...)
 		if !errors.Is(gotErr, tc.wantErr) {
 			t.Errorf("(*RDB).Dequeue(%v) returned error %v; want %v",
 				tc.args, gotErr, tc.wantErr)
@@ -553,7 +553,7 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 		}
 		h.SeedAllPendingQueues(t, r.client, tc.pending)
 
-		got, _, err := r.Dequeue(tc.args...)
+		got, _, err := r.Dequeue("", tc.args...)
 		if !cmp.Equal(got, tc.wantMsg) || !errors.Is(err, tc.wantErr) {
 			t.Errorf("Dequeue(%v) = %v, %v; want %v, %v",
 				tc.args, got, err, tc.wantMsg, tc.wantErr)
@@ -690,7 +690,7 @@ func TestDone(t *testing.T) {
 			}
 		}
 
-		err := r.Done(tc.target)
+		err := r.Done("", tc.target)
 		if err != nil {
 			t.Errorf("%s; (*RDB).Done(task) = %v, want nil", tc.desc, err)
 			continue
@@ -850,7 +850,7 @@ func TestRequeue(t *testing.T) {
 		h.SeedAllActiveQueues(t, r.client, tc.active)
 		h.SeedAllDeadlines(t, r.client, tc.deadlines)
 
-		err := r.Requeue(tc.target)
+		err := r.Requeue("", tc.target, true)
 		if err != nil {
 			t.Errorf("(*RDB).Requeue(task) = %v, want nil", err)
 			continue

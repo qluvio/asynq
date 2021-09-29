@@ -229,6 +229,20 @@ type TaskMessage struct {
 	//
 	// Empty string indicates that no uniqueness lock was used.
 	UniqueKey string
+
+	// TTL of the unique key in seconds
+	UniqueKeyTTL int64
+
+	// Recurrent indicates a recurrent task when true
+	Recurrent bool
+
+	// Delay in seconds to re-process a recurrent task after execution.
+	ReprocessAfter int64
+
+	// ServerAffinity is used with a recurrent task to specify a timeout after
+	// which the task can be handled by a server other than the one that handled
+	// it the first time.
+	ServerAffinity int64
 }
 
 type MessageBatch struct {
@@ -246,18 +260,26 @@ func EncodeMessage(msg *TaskMessage) ([]byte, error) {
 	if msg == nil {
 		return nil, fmt.Errorf("cannot encode nil message")
 	}
+	recurrent := int64(0)
+	if msg.Recurrent {
+		recurrent = 1
+	}
 	return proto.Marshal(&pb.TaskMessage{
-		Type:         msg.Type,
-		Payload:      msg.Payload,
-		Id:           msg.ID.String(),
-		Queue:        msg.Queue,
-		Retry:        int32(msg.Retry),
-		Retried:      int32(msg.Retried),
-		ErrorMsg:     msg.ErrorMsg,
-		LastFailedAt: msg.LastFailedAt,
-		Timeout:      msg.Timeout,
-		Deadline:     msg.Deadline,
-		UniqueKey:    msg.UniqueKey,
+		Type:             msg.Type,
+		Payload:          msg.Payload,
+		Id:               msg.ID.String(),
+		Queue:            msg.Queue,
+		Retry:            int32(msg.Retry),
+		Retried:          int32(msg.Retried),
+		ErrorMsg:         msg.ErrorMsg,
+		LastFailedAt:     msg.LastFailedAt,
+		Timeout:          msg.Timeout,
+		Deadline:         msg.Deadline,
+		UniqueKey:        msg.UniqueKey,
+		UniqueKeyTimeout: msg.UniqueKeyTTL,
+		Recurrent:        recurrent,
+		ReprocessAfter:   msg.ReprocessAfter,
+		ServerAffinity:   msg.ServerAffinity,
 	})
 }
 
@@ -268,17 +290,21 @@ func DecodeMessage(data []byte) (*TaskMessage, error) {
 		return nil, err
 	}
 	return &TaskMessage{
-		Type:         pbmsg.GetType(),
-		Payload:      pbmsg.GetPayload(),
-		ID:           uuid.MustParse(pbmsg.GetId()),
-		Queue:        pbmsg.GetQueue(),
-		Retry:        int(pbmsg.GetRetry()),
-		Retried:      int(pbmsg.GetRetried()),
-		ErrorMsg:     pbmsg.GetErrorMsg(),
-		LastFailedAt: pbmsg.GetLastFailedAt(),
-		Timeout:      pbmsg.GetTimeout(),
-		Deadline:     pbmsg.GetDeadline(),
-		UniqueKey:    pbmsg.GetUniqueKey(),
+		Type:           pbmsg.GetType(),
+		Payload:        pbmsg.GetPayload(),
+		ID:             uuid.MustParse(pbmsg.GetId()),
+		Queue:          pbmsg.GetQueue(),
+		Retry:          int(pbmsg.GetRetry()),
+		Retried:        int(pbmsg.GetRetried()),
+		ErrorMsg:       pbmsg.GetErrorMsg(),
+		LastFailedAt:   pbmsg.GetLastFailedAt(),
+		Timeout:        pbmsg.GetTimeout(),
+		Deadline:       pbmsg.GetDeadline(),
+		UniqueKey:      pbmsg.GetUniqueKey(),
+		UniqueKeyTTL:   pbmsg.GetUniqueKeyTimeout(),
+		Recurrent:      pbmsg.GetRecurrent() > 0,
+		ReprocessAfter: pbmsg.GetReprocessAfter(),
+		ServerAffinity: pbmsg.GetServerAffinity(),
 	}, nil
 }
 
@@ -663,12 +689,18 @@ type Broker interface {
 	// off a queue if one exists and returns the message and deadline.
 	// Dequeue skips a queue if the queue is paused.
 	// If all queues are empty, ErrNoProcessableTask error is returned.
-	Dequeue(qnames ...string) (*TaskMessage, time.Time, error)
+	// - qnames are the queues to process
+	// - serverID is used the ID of the processor/server processing Dequeue and
+	//   is used to select tasks with server affinity.
+	Dequeue(serverID string, qnames ...string) (*TaskMessage, time.Time, error)
 	// Done removes the task from active queue to mark the task as done.
 	// It removes a uniqueness lock acquired by the task, if any.
-	Done(msg *TaskMessage) error
+	// ServerID is the ID of the server that processed the task (used for server affinity)
+	Done(serverID string, msg *TaskMessage) error
 	// Requeue moves the task from active queue to the specified queue.
-	Requeue(msg *TaskMessage) error
+	// ServerID is the ID of the server that processed the task (used for server affinity)
+	// aborted is true when re-queuing occurs because the server stops and false for recurrent tasks
+	Requeue(serverID string, msg *TaskMessage, aborted bool) error
 	// Schedule adds the task to the scheduled set to be processed in the future.
 	Schedule(msg *TaskMessage, processAt time.Time) error
 	// ScheduleUnique adds the task to the backlog queue to be processed in the future if the uniqueness lock can be acquired.

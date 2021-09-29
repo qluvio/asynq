@@ -66,31 +66,31 @@ func (tb *TestBroker) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration, fo
 	return tb.real.EnqueueUnique(msg, ttl, forceUnique...)
 }
 
-func (tb *TestBroker) Dequeue(qnames ...string) (*base.TaskMessage, time.Time, error) {
+func (tb *TestBroker) Dequeue(serverID string, qnames ...string) (*base.TaskMessage, time.Time, error) {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return nil, time.Time{}, errRedisDown
 	}
-	return tb.real.Dequeue(qnames...)
+	return tb.real.Dequeue(serverID, qnames...)
 }
 
-func (tb *TestBroker) Done(msg *base.TaskMessage) error {
+func (tb *TestBroker) Done(serverID string, msg *base.TaskMessage) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.Done(msg)
+	return tb.real.Done(serverID, msg)
 }
 
-func (tb *TestBroker) Requeue(msg *base.TaskMessage) error {
+func (tb *TestBroker) Requeue(serverID string, msg *base.TaskMessage, aborted bool) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.Requeue(msg)
+	return tb.real.Requeue(serverID, msg, true)
 }
 
 func (tb *TestBroker) Schedule(msg *base.TaskMessage, processAt time.Time) error {

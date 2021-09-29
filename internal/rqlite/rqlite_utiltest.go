@@ -137,7 +137,7 @@ func GetUniqueKeyTTL(tb testing.TB, r *RQLite, queue string, taskType string, ta
 	uniqueKey := base.UniqueKey(queue, taskType, taskPayload)
 
 	st := Statement(
-		"SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at "+
+		"SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, sid, affinity_timeout, recurrent "+
 			" FROM "+r.conn.table(TasksTable)+
 			" WHERE queue_name=? "+
 			" AND unique_key=?",

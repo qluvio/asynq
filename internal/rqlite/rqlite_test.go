@@ -68,7 +68,7 @@ func TestBasicEnqueueDequeue(t *testing.T) {
 	}
 
 	for _, q := range []string{"csv", "low", base.DefaultQueueName} {
-		msg, deadline, err := r.Dequeue(q)
+		msg, deadline, err := r.Dequeue("", q)
 		require.NoError(t, err)
 		require.NotNil(t, msg)
 		require.NotZero(t, deadline)
@@ -88,7 +88,7 @@ func TestBasicEnqueueDequeue(t *testing.T) {
 	}
 
 	for _, q := range []string{"csv", "low", base.DefaultQueueName} {
-		_, _, err := r.Dequeue(q)
+		_, _, err := r.Dequeue("", q)
 		require.Error(t, err)
 		require.True(t, errors.Is(err, errors.ErrNoProcessableTask))
 	}
@@ -116,7 +116,7 @@ func TestEnqueue(t *testing.T) {
 		require.NoError(t, err)
 
 		// Check Pending list has task ID.
-		pending, err := r.conn.getPending(tc.msg.Queue)
+		pending, err := r.conn.getPending("", tc.msg.Queue)
 		require.NoError(t, err)
 		require.Equal(t, tc.msg.ID.String(), pending.msg.ID.String())
 		// Check the value under the task key.
@@ -166,7 +166,7 @@ func TestEnqueueUnique(t *testing.T) {
 		require.NoError(t, err)
 
 		// Check Pending list has task ID.
-		pending, err := r.conn.getPending(tc.msg.Queue)
+		pending, err := r.conn.getPending("", tc.msg.Queue)
 		require.NoError(t, err)
 		require.Equal(t, tc.msg.ID.String(), pending.msg.ID.String())
 		// Check the value under the task key.
@@ -191,6 +191,175 @@ func TestEnqueueUnique(t *testing.T) {
 			// the unique_key constraint is ignored when the unique_key_deadline is expired
 			require.NoError(t, err)
 		}
+	}
+}
+
+func TestEnqueueWithServerAffinity(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
+	m1 := base.TaskMessage{
+		ID:             uuid.New(),
+		Type:           "email",
+		Payload:        h.JSON(map[string]interface{}{"user_id": json.Number("123")}),
+		Queue:          base.DefaultQueueName,
+		UniqueKey:      base.UniqueKey(base.DefaultQueueName, "email", h.JSON(map[string]interface{}{"user_id": 123})),
+		Recurrent:      true,
+		Timeout:        1,
+		ServerAffinity: 1,
+	}
+	m2 := base.TaskMessage{
+		ID:             uuid.New(),
+		Type:           "email",
+		Payload:        h.JSON(map[string]interface{}{"user_id": json.Number("456")}),
+		Queue:          base.DefaultQueueName,
+		UniqueKey:      base.UniqueKey(base.DefaultQueueName, "email", h.JSON(map[string]interface{}{"user_id": 456})),
+		Recurrent:      true,
+		Timeout:        1,
+		ServerAffinity: 1,
+	}
+	serverID := "inod11"
+	ttl := time.Minute // uniqueness ttl
+	tests := []struct {
+		msg *base.TaskMessage
+	}{
+		{msg: &m1},
+		{msg: &m2},
+	}
+
+	for _, tc := range tests {
+		//fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
+		FlushDB(t, r.conn)
+
+		// initial dequeue
+		err := r.EnqueueUnique(tc.msg, ttl)
+		require.NoError(t, err)
+		_, _, err = r.Dequeue("", tc.msg.Queue)
+		require.NoError(t, err)
+
+		// re-queuing with no server id: can be dequeued
+		err = r.Requeue("", tc.msg, false)
+		require.NoError(t, err)
+		_, _, err = r.Dequeue("", tc.msg.Queue)
+		require.NoError(t, err)
+
+		err = r.Requeue("", tc.msg, false)
+		require.NoError(t, err)
+		_, _, err = r.Dequeue("bla", tc.msg.Queue)
+		require.NoError(t, err)
+
+		// re-queueing with a server id: can be dequeued only by this server
+		err = r.Requeue(serverID, tc.msg, false)
+		require.NoError(t, err)
+		// not available for other servers
+		_, _, err = r.Dequeue("", tc.msg.Queue)
+		require.Error(t, err)
+		require.True(t, errors.Is(err, errors.ErrNoProcessableTask), err)
+		_, _, err = r.Dequeue("inod222", tc.msg.Queue)
+		require.Error(t, err)
+		require.True(t, errors.Is(err, errors.ErrNoProcessableTask), err)
+
+		m, _, err := r.Dequeue(serverID, tc.msg.Queue)
+		require.NoError(t, err)
+		require.Equal(t, tc.msg, m)
+
+		// still cannot enqueue
+		err = r.EnqueueUnique(tc.msg, ttl)
+		require.Error(t, err)
+		require.True(t, errors.Is(err, errors.ErrDuplicateTask))
+
+		err = r.Requeue(serverID, tc.msg, false)
+		require.NoError(t, err)
+
+		// after the server affinity elapsed, another server can dequeue it
+		now = now.Add(time.Second * time.Duration(tc.msg.ServerAffinity))
+		utc.MockNow(now)
+		m, _, err = r.Dequeue("", tc.msg.Queue)
+		require.NoError(t, err)
+		require.Equal(t, tc.msg, m)
+
+		// still cannot enqueue
+		err = r.EnqueueUnique(tc.msg, ttl)
+		require.Error(t, err)
+		require.True(t, errors.Is(err, errors.ErrDuplicateTask))
+		now = now.Add(ttl)
+		utc.MockNow(now)
+		err = r.EnqueueUnique(tc.msg, ttl)
+		require.NoError(t, err)
+
+	}
+}
+
+func TestRequeueScheduled(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
+	m1 := base.TaskMessage{
+		ID:             uuid.New(),
+		Type:           "email",
+		Payload:        h.JSON(map[string]interface{}{"user_id": json.Number("123")}),
+		Queue:          base.DefaultQueueName,
+		UniqueKey:      base.UniqueKey(base.DefaultQueueName, "email", h.JSON(map[string]interface{}{"user_id": 123})),
+		Recurrent:      true,
+		ReprocessAfter: 3,
+		Timeout:        1,
+		ServerAffinity: 1,
+	}
+	m2 := base.TaskMessage{
+		ID:             uuid.New(),
+		Type:           "email",
+		Payload:        h.JSON(map[string]interface{}{"user_id": json.Number("123")}),
+		Queue:          base.DefaultQueueName,
+		Recurrent:      true,
+		ReprocessAfter: 3,
+		Timeout:        1,
+		ServerAffinity: 1,
+	}
+	serverID := "inod11"
+	ttl := time.Minute // uniqueness ttl
+	tests := []struct {
+		msg      *base.TaskMessage
+		serverID string
+	}{
+		{msg: &m1, serverID: serverID},
+		{msg: &m1, serverID: ""},
+		{msg: &m2, serverID: serverID},
+		{msg: &m2, serverID: ""},
+	}
+
+	for _, tc := range tests {
+		//fmt.Println("TestRequeueScheduled - test", i, "now", now.Unix())
+		FlushDB(t, r.conn)
+
+		// initial enqueue/dequeue
+		var err error
+		if len(tc.msg.UniqueKey) > 0 {
+			err = r.EnqueueUnique(tc.msg, ttl)
+		} else {
+			err = r.Enqueue(tc.msg)
+		}
+		require.NoError(t, err)
+		_, _, err = r.Dequeue("", tc.msg.Queue)
+		require.NoError(t, err)
+
+		// re-queue
+		err = r.Requeue(tc.serverID, tc.msg, false)
+		require.NoError(t, err)
+
+		task, err := r.conn.getTask(tc.msg.Queue, tc.msg.ID.String())
+		require.NoError(t, err)
+
+		require.Equal(t, scheduled, task.state)
+		require.Equal(t,
+			now.Add(time.Second*time.Duration(tc.msg.ReprocessAfter)).Unix(),
+			task.scheduledAt)
+		require.Equal(t, tc.serverID, task.sid)
 	}
 }
 
@@ -314,7 +483,7 @@ func TestDequeue(t *testing.T) {
 		FlushDB(t, r.conn)
 		SeedAllPendingQueues(t, r, tc.pending)
 
-		gotMsg, gotDeadline, err := r.Dequeue(tc.args...)
+		gotMsg, gotDeadline, err := r.Dequeue("", tc.args...)
 		require.NoError(t, err, "(*RQLite.Dequeue(%v) returned error %v", tc.args, err)
 
 		if !cmp.Equal(gotMsg, tc.wantMsg) {
@@ -409,7 +578,7 @@ func TestDequeueError(t *testing.T) {
 		FlushDB(t, r.conn)
 		SeedAllPendingQueues(t, r, tc.pending)
 
-		gotMsg, gotDeadline, gotErr := r.Dequeue(tc.args...)
+		gotMsg, gotDeadline, gotErr := r.Dequeue("", tc.args...)
 		if !errors.Is(gotErr, tc.wantErr) {
 			t.Errorf("(*RQLite).Dequeue(%v) returned error %v; want %v",
 				tc.args, gotErr, tc.wantErr)
@@ -541,7 +710,7 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 			}
 		}
 
-		got, _, err := r.Dequeue(tc.args...)
+		got, _, err := r.Dequeue("", tc.args...)
 		if !cmp.Equal(got, tc.wantMsg) || !errors.Is(err, tc.wantErr) {
 			t.Errorf("Dequeue(%v) = %v, %v; want %v, %v",
 				tc.args, got, err, tc.wantMsg, tc.wantErr)
@@ -671,7 +840,7 @@ func TestDone(t *testing.T) {
 		SeedAllDeadlines(t, r, tc.deadlines, time.Minute)
 		SeedAllActiveQueues(t, r, tc.active)
 
-		err := r.Done(tc.target)
+		err := r.Done("", tc.target)
 		if err != nil {
 			t.Errorf("%s; (*RQLite).Done(task) = %v, want nil", tc.desc, err)
 			continue
@@ -838,7 +1007,7 @@ func TestRequeue(t *testing.T) {
 		SeedAllDeadlines(t, r, tc.deadlines, 0)
 		SeedAllActiveQueues(t, r, tc.active)
 
-		err := r.Requeue(tc.target)
+		err := r.Requeue("", tc.target, true)
 		if err != nil {
 			t.Errorf("(*RQLite).Requeue(task) = %v, want nil", err)
 			continue

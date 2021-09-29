@@ -63,7 +63,10 @@ const (
 	done_at                integer,
 	failed                 boolean,
 	archived_at            integer,
-	cleanup_at             integer
+	cleanup_at             integer,
+	sid                    text,
+	affinity_timeout       integer,
+	recurrent              boolean
 )`
 
 	ServersTable          = "asynq_servers"
@@ -195,5 +198,9 @@ func (conn *Connection) PurgeTables() error {
 }
 
 func Statement(sql string, params ...interface{}) *gorqlite.Statement {
-	return gorqlite.NewStatement(sql, params...)
+	ret := gorqlite.NewStatement(sql, params...)
+	//if len(ret.Warning) > 0 {
+	//	panic(ret.Warning)
+	//}
+	return ret
 }

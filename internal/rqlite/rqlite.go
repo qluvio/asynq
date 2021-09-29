@@ -218,7 +218,7 @@ func (r *RQLite) EnqueueUniqueBatch(msg ...*base.MessageBatch) error {
 // off a queue if one exists and returns the message and deadline.
 // Dequeue skips a queue if the queue is paused.
 // If all queues are empty, ErrNoProcessableTask error is returned.
-func (r *RQLite) Dequeue(qnames ...string) (msg *base.TaskMessage, deadline time.Time, err error) {
+func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessage, deadline time.Time, err error) {
 	var op errors.Op = "rqlite.Dequeue"
 	conn, err := r.client(op)
 	if err != nil {
@@ -235,7 +235,7 @@ func (r *RQLite) Dequeue(qnames ...string) (msg *base.TaskMessage, deadline time
 			continue
 		}
 
-		data, err := conn.dequeueMessage(qname)
+		data, err := conn.dequeueMessage(serverID, qname)
 		if err != nil {
 			return nil, time.Time{}, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
 		}
@@ -250,21 +250,21 @@ func (r *RQLite) Dequeue(qnames ...string) (msg *base.TaskMessage, deadline time
 // Done removes the task from active queue to mark the task as done and set its
 // state to 'processed'.
 // It removes a uniqueness lock acquired by the task, if any.
-func (r *RQLite) Done(msg *base.TaskMessage) error {
+func (r *RQLite) Done(serverID string, msg *base.TaskMessage) error {
 	conn, err := r.client("rqlite.Done")
 	if err != nil {
 		return err
 	}
-	return conn.setTaskDone(msg)
+	return conn.setTaskDone(serverID, msg)
 }
 
 // Requeue moves the task from active to pending in the specified queue.
-func (r *RQLite) Requeue(msg *base.TaskMessage) error {
+func (r *RQLite) Requeue(serverID string, msg *base.TaskMessage, aborted bool) error {
 	conn, err := r.client("rqlite.Requeue")
 	if err != nil {
 		return err
 	}
-	return conn.requeueTask(msg)
+	return conn.requeueTask(serverID, msg, aborted)
 }
 
 // Schedule adds the task to the scheduled set to be processed in the future.

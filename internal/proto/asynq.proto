@@ -51,6 +51,19 @@ message TaskMessage {
 	// Empty string indicates that no uniqueness lock was used.
   string unique_key = 10;
 
+  // Recurrent indicates a recurring task
+  int64 recurrent = 12;
+
+  // Delay in seconds to re-process a recurrent task after execution.
+  int64 reprocess_after = 13;
+
+  // ServerAffinity is used with recurrent task to specify a timeout after
+  // which the task can be handled by a server other than the one that handled
+  // it the first time.
+  int64 server_affinity = 14;
+
+  // TTL of the unique key in seconds
+  int64 unique_key_timeout = 15;
 };
 
 // ServerInfo holds information about a running server.

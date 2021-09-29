@@ -49,6 +49,7 @@ type heartbeater struct {
 
 type heartbeaterParams struct {
 	logger      *log.Logger
+	serverID    string
 	broker      base.Broker
 	interval    time.Duration
 	concurrency int
@@ -63,6 +64,9 @@ func newHeartbeater(params heartbeaterParams) *heartbeater {
 	if err != nil {
 		host = "unknown-host"
 	}
+	if len(params.serverID) == 0 {
+		params.serverID = uuid.New().String()
+	}
 
 	return &heartbeater{
 		logger:   params.logger,
@@ -72,7 +76,7 @@ func newHeartbeater(params heartbeaterParams) *heartbeater {
 
 		host:        host,
 		pid:         os.Getpid(),
-		serverID:    uuid.New().String(),
+		serverID:    params.serverID,
 		concurrency: params.concurrency,
 		queues:      params.queues,
 

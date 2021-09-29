@@ -132,7 +132,7 @@ func BenchmarkDequeueMultipleQueues(b *testing.B) {
 		}
 		b.StartTimer()
 
-		if _, _, err := r.Dequeue(qnames...); err != nil {
+		if _, _, err := r.Dequeue("", qnames...); err != nil {
 			b.Fatalf("Dequeue failed: %v", err)
 		}
 	}
@@ -158,7 +158,7 @@ func BenchmarkDone(b *testing.B) {
 		asynqtest.SeedDeadlines(b, r.client, zs, base.DefaultQueueName)
 		b.StartTimer()
 
-		if err := r.Done(msgs[0]); err != nil {
+		if err := r.Done("", msgs[0]); err != nil {
 			b.Fatalf("Done failed: %v", err)
 		}
 	}
@@ -236,7 +236,7 @@ func BenchmarkRequeue(b *testing.B) {
 		asynqtest.SeedDeadlines(b, r.client, zs, base.DefaultQueueName)
 		b.StartTimer()
 
-		if err := r.Requeue(msgs[0]); err != nil {
+		if err := r.Requeue("", msgs[0], true); err != nil {
 			b.Fatalf("Requeue failed: %v", err)
 		}
 	}

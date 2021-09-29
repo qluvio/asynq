@@ -99,16 +99,19 @@ func expectQueryResultCount(op errors.Op, expectedCount int, qrs []gorqlite.Quer
 	return nil
 }
 
-// expectOneRowUpdated returns an error if the write-result indicates zero or
-// more than one row was updated
-func expectOneRowUpdated(op errors.Op, wr gorqlite.WriteResult, st interface{}) error {
+// expectOneRowUpdated returns an error if the write-result indicates that more
+// than one row was updated. If strict is true it also returns an error if no
+// row were updated.
+func expectOneRowUpdated(op errors.Op, wr gorqlite.WriteResult, st interface{}, strict bool) error {
 	switch wr.RowsAffected {
 	case 0:
-		errStr := fmt.Sprintf("row not found (%v)", st)
-		if wr.Err != nil {
-			errStr = fmt.Sprintf("error (%v): %s", st, wr.Err.Error())
+		if strict {
+			errStr := fmt.Sprintf("row not found (%v)", st)
+			if wr.Err != nil {
+				errStr = fmt.Sprintf("error (%v): %s", st, wr.Err.Error())
+			}
+			return errors.E(op, errors.NotFound, errStr)
 		}
-		return errors.E(op, errors.NotFound, errStr)
 	case 1:
 	default:
 		errStr := fmt.Sprintf("expected one row updated but have %d (%s)", wr.RowsAffected, st)

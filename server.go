@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hibiken/asynq/internal/base"
 	aserrors "github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
@@ -52,6 +53,9 @@ type Server struct {
 
 // Config specifies the server's background-task processing behavior.
 type Config struct {
+	// server identifier. If not provided a random UUID is used.
+	ServerID string
+
 	// Maximum number of concurrent processing of tasks.
 	//
 	// If set to a zero or negative value, NewServer will overwrite the value
@@ -274,6 +278,9 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	if n < 1 {
 		n = runtime.NumCPU()
 	}
+	if len(cfg.ServerID) == 0 {
+		cfg.ServerID = uuid.New().String()
+	}
 	delayFunc := cfg.RetryDelayFunc
 	if delayFunc == nil {
 		delayFunc = DefaultRetryDelayFunc
@@ -319,6 +326,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	heartbeater := newHeartbeater(heartbeaterParams{
 		logger:      logger,
 		broker:      broker,
+		serverID:    cfg.ServerID,
 		interval:    5 * time.Second,
 		concurrency: n,
 		queues:      cfg.Queues,
@@ -339,6 +347,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	})
 	processor := newProcessor(processorParams{
 		logger:          logger,
+		serverID:        cfg.ServerID,
 		broker:          broker,
 		retryDelayFunc:  delayFunc,
 		isFailureFunc:   isFailureFunc,

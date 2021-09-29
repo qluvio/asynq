@@ -10,13 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
 	"github.com/hibiken/asynq/internal/rdb"
-	"github.com/hibiken/asynq/internal/rqlite"
 	"go.uber.org/multierr"
 )
 
@@ -39,20 +37,6 @@ type BatchError interface {
 	error
 	// MapErrors returns a map of index of failed tasks in the input to error
 	MapErrors() map[int]error
-}
-
-// makeBroker returns a base.Broker instance given a client connection option.
-func makeBroker(r ClientConnOpt) (base.Broker, error) {
-	c := r.MakeClient()
-
-	switch cl := c.(type) {
-	case redis.UniversalClient:
-		return rdb.NewRDB(cl), nil
-	case *rqlite.RQLite:
-		return cl, nil
-	default:
-		return nil, errors.E(errors.Op("makeBroker"), errors.Internal, fmt.Sprintf("asynq: unsupported ClientConnOpt type %T", r))
-	}
 }
 
 func NewClientWithBroker(broker base.Broker) *Client {
@@ -94,6 +78,9 @@ const (
 	ProcessAtOpt
 	ProcessInOpt
 	ForceUniqueOpt
+	RecurrentOpt
+	ReprocessAfterOpt
+	ServerAffinityOpt
 )
 
 // Option specifies the task processing behavior.
@@ -110,14 +97,17 @@ type Option interface {
 
 // Internal option representations.
 type (
-	retryOption       int
-	queueOption       string
-	timeoutOption     time.Duration
-	deadlineOption    time.Time
-	uniqueOption      time.Duration
-	processAtOption   time.Time
-	processInOption   time.Duration
-	forceUniqueOption bool
+	retryOption          int
+	queueOption          string
+	timeoutOption        time.Duration
+	deadlineOption       time.Time
+	uniqueOption         time.Duration
+	processAtOption      time.Time
+	processInOption      time.Duration
+	forceUniqueOption    bool
+	recurrentOption      bool
+	reprocessAfterOption time.Duration
+	serverAffinityOption time.Duration
 )
 
 // MaxRetry returns an option to specify the max number of times
@@ -227,19 +217,57 @@ func (d processInOption) String() string     { return fmt.Sprintf("ProcessIn(%v)
 func (d processInOption) Type() OptionType   { return ProcessInOpt }
 func (d processInOption) Value() interface{} { return time.Duration(d) }
 
+// Recurrent returns an option to define a recurrent task
+func Recurrent(b bool) Option {
+	return recurrentOption(b)
+}
+
+func (r recurrentOption) String() string     { return fmt.Sprintf("Recurrent(%v)", bool(r)) }
+func (r recurrentOption) Type() OptionType   { return RecurrentOpt }
+func (r recurrentOption) Value() interface{} { return bool(r) }
+
+// ReprocessAfter returns an option to define the delay to reprocess a recurrent task
+func ReprocessAfter(d time.Duration) Option {
+	return reprocessAfterOption(d)
+}
+
+func (r reprocessAfterOption) String() string {
+	return fmt.Sprintf("ReprocessAfter(%v)", time.Duration(r))
+}
+func (r reprocessAfterOption) Type() OptionType   { return ReprocessAfterOpt }
+func (r reprocessAfterOption) Value() interface{} { return time.Duration(r) }
+
+// ServerAffinity returns an option to define a server affinity timeout. This
+// can be used with recurrent tasks to request that execution of the task should
+// remain on the server that first started it unless the affinity timeout expired.
+// The timeout is used to compute a deadline after which other servers can take
+// the task.
+func ServerAffinity(d time.Duration) Option {
+	return serverAffinityOption(d)
+}
+
+func (r serverAffinityOption) String() string {
+	return fmt.Sprintf("ServerAffinity(%v)", time.Duration(r))
+}
+func (r serverAffinityOption) Type() OptionType   { return ServerAffinityOpt }
+func (r serverAffinityOption) Value() interface{} { return time.Duration(r) }
+
 // ErrDuplicateTask indicates that the given task could not be enqueued since it's a duplicate of another task.
 //
 // ErrDuplicateTask error only applies to tasks enqueued with a Unique option.
 var ErrDuplicateTask = errors.ErrDuplicateTask
 
 type option struct {
-	retry       int
-	queue       string
-	timeout     time.Duration
-	deadline    time.Time
-	uniqueTTL   time.Duration
-	processAt   time.Time
-	forceUnique bool
+	retry          int
+	queue          string
+	timeout        time.Duration
+	deadline       time.Time
+	uniqueTTL      time.Duration
+	processAt      time.Time
+	forceUnique    bool
+	recurrent      bool
+	reprocessAfter time.Duration
+	serverAffinity time.Duration
 }
 
 // composeOptions merges user provided options into the default options
@@ -276,6 +304,12 @@ func composeOptions(opts ...Option) (option, error) {
 			res.processAt = time.Now().Add(time.Duration(opt))
 		case forceUniqueOption:
 			res.forceUnique = bool(opt)
+		case recurrentOption:
+			res.recurrent = bool(opt)
+		case reprocessAfterOption:
+			res.reprocessAfter = time.Duration(opt)
+		case serverAffinityOption:
+			res.serverAffinity = time.Duration(opt)
 		default:
 			// ignore unexpected option
 		}
@@ -335,6 +369,11 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	if opt.serverAffinity > 0 {
+		if _, ok := c.rdb.(*rdb.RDB); ok {
+			return nil, fmt.Errorf("server affinity not supported with redis")
+		}
+	}
 	deadline := noDeadline
 	if !opt.deadline.IsZero() {
 		deadline = opt.deadline
@@ -352,14 +391,18 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 		uniqueKey = base.UniqueKey(opt.queue, task.Type(), task.Payload())
 	}
 	msg := &base.TaskMessage{
-		ID:        uuid.New(),
-		Type:      task.Type(),
-		Payload:   task.Payload(),
-		Queue:     opt.queue,
-		Retry:     opt.retry,
-		Deadline:  deadline.Unix(),
-		Timeout:   int64(timeout.Seconds()),
-		UniqueKey: uniqueKey,
+		ID:             uuid.New(),
+		Type:           task.Type(),
+		Payload:        task.Payload(),
+		Queue:          opt.queue,
+		Retry:          opt.retry,
+		Deadline:       deadline.Unix(),
+		Timeout:        int64(timeout.Seconds()),
+		UniqueKey:      uniqueKey,
+		UniqueKeyTTL:   int64(opt.uniqueTTL.Seconds()),
+		Recurrent:      opt.recurrent,
+		ReprocessAfter: int64(opt.reprocessAfter.Seconds()),
+		ServerAffinity: int64(opt.serverAffinity.Seconds()),
 	}
 
 	now := time.Now()
@@ -433,6 +476,11 @@ func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error
 			if err != nil {
 				break
 			}
+			if opt.serverAffinity > 0 {
+				if _, ok := c.rdb.(*rdb.RDB); ok {
+					return nil, fmt.Errorf("server affinity not supported with redis")
+				}
+			}
 			tasksOpts = append(tasksOpts, opt)
 		}
 		c.mu.Unlock()
@@ -468,14 +516,18 @@ func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error
 			uniqueKey = base.UniqueKey(opt.queue, task.Type(), task.Payload())
 		}
 		msg := &base.TaskMessage{
-			ID:        uuid.New(),
-			Type:      task.Type(),
-			Payload:   task.Payload(),
-			Queue:     opt.queue,
-			Retry:     opt.retry,
-			Deadline:  deadline.Unix(),
-			Timeout:   int64(timeout.Seconds()),
-			UniqueKey: uniqueKey,
+			ID:             uuid.New(),
+			Type:           task.Type(),
+			Payload:        task.Payload(),
+			Queue:          opt.queue,
+			Retry:          opt.retry,
+			Deadline:       deadline.Unix(),
+			Timeout:        int64(timeout.Seconds()),
+			UniqueKey:      uniqueKey,
+			UniqueKeyTTL:   int64(opt.uniqueTTL.Seconds()),
+			Recurrent:      opt.recurrent,
+			ReprocessAfter: int64(opt.reprocessAfter.Seconds()),
+			ServerAffinity: int64(opt.serverAffinity.Seconds()),
 		}
 
 		var bm *base.MessageBatch

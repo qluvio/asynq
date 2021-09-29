@@ -84,6 +84,9 @@ return 1
 // Enqueue adds the given task to the pending list of the queue.
 func (r *RDB) Enqueue(msg *base.TaskMessage) error {
 	var op errors.Op = "rdb.Enqueue"
+	if msg.ServerAffinity > 0 {
+		return errors.E(op, errors.Internal, fmt.Sprintf("server affinity not implemented for redis: %v", msg.Type))
+	}
 	encoded, err := base.EncodeMessage(msg)
 	if err != nil {
 		return errors.E(op, errors.Unknown, fmt.Sprintf("cannot encode message: %v", err))
@@ -153,6 +156,12 @@ return 1
 // It returns ErrDuplicateTask if the lock cannot be acquired.
 func (r *RDB) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration, forceUnique ...bool) error {
 	var op errors.Op = "rdb.EnqueueUnique"
+	if msg.UniqueKeyTTL == 0 {
+		msg.UniqueKeyTTL = int64(ttl.Seconds())
+	}
+	if msg.ServerAffinity > 0 {
+		return errors.E(op, errors.Internal, fmt.Sprintf("server affinity not implemented for redis: %v", msg.Type))
+	}
 	encoded, err := base.EncodeMessage(msg)
 	if err != nil {
 		return errors.E(op, errors.Internal, "cannot encode task message: %v", err)
@@ -243,8 +252,14 @@ return nil`)
 // off a queue if one exists and returns the message and deadline.
 // Dequeue skips a queue if the queue is paused.
 // If all queues are empty, ErrNoProcessableTask error is returned.
-func (r *RDB) Dequeue(qnames ...string) (msg *base.TaskMessage, deadline time.Time, err error) {
+func (r *RDB) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessage, deadline time.Time, err error) {
 	var op errors.Op = "rdb.Dequeue"
+
+	//
+	// PENDING(GIL): dequeue with server affinity is not implemented for redis
+	//
+	_ = serverID
+
 	for _, qname := range qnames {
 		keys := []string{
 			base.PendingKey(qname),
@@ -337,8 +352,14 @@ return redis.status_reply("OK")
 
 // Done removes the task from active queue to mark the task as done.
 // It removes a uniqueness lock acquired by the task, if any.
-func (r *RDB) Done(msg *base.TaskMessage) error {
+func (r *RDB) Done(serverID string, msg *base.TaskMessage) error {
 	var op errors.Op = "rdb.Done"
+
+	//
+	// PENDING(GIL): serverID (used to support server affinity) is ignored on redis.
+	//
+	_ = serverID
+
 	now := time.Now()
 	expireAt := now.Add(statsTTL)
 	keys := []string{
@@ -375,16 +396,44 @@ redis.call("RPUSH", KEYS[3], ARGV[1])
 redis.call("HSET", KEYS[4], "state", "pending")
 return redis.status_reply("OK")`)
 
+// requeueUniqueCmd is similar as requeueCmd and moves the unique key TTL.
+// KEYS[5] -> unique key
+// ARGV[2] -> unique key TTL
+var requeueUniqueCmd = redis.NewScript(`
+if redis.call("LREM", KEYS[1], 0, ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZREM", KEYS[2], ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+redis.call("RPUSH", KEYS[3], ARGV[1])
+redis.call("HSET", KEYS[4], "state", "pending")
+redis.call("SET", KEYS[5], ARGV[1], "EX", ARGV[2])
+return redis.status_reply("OK")`)
+
 // Requeue moves the task from active queue to the specified queue.
-func (r *RDB) Requeue(msg *base.TaskMessage) error {
+func (r *RDB) Requeue(serverID string, msg *base.TaskMessage, aborted bool) error {
+	//
+	// PENDING(GIL): serverID (used to support server affinity) is ignored on redis.
+	//
+	_ = serverID
 	var op errors.Op = "rdb.Requeue"
+
 	keys := []string{
 		base.ActiveKey(msg.Queue),
 		base.DeadlinesKey(msg.Queue),
 		base.PendingKey(msg.Queue),
 		base.TaskKey(msg.Queue, msg.ID.String()),
 	}
-	return r.runScript(op, requeueCmd, keys, msg.ID.String())
+	if aborted || len(msg.UniqueKey) == 0 {
+		return r.runScript(op, requeueCmd, keys, msg.ID.String())
+	}
+
+	keys = append(keys, msg.UniqueKey)
+	return r.runScript(op, requeueUniqueCmd, keys, []interface{}{
+		msg.ID.String(),
+		int(msg.UniqueKeyTTL),
+	})
 }
 
 // KEYS[1] -> asynq:{<qname>}:t:<task_id>
@@ -407,6 +456,10 @@ return 1
 // Schedule adds the task to the scheduled set to be processed in the future.
 func (r *RDB) Schedule(msg *base.TaskMessage, processAt time.Time) error {
 	var op errors.Op = "rdb.Schedule"
+
+	if msg.ServerAffinity > 0 {
+		return errors.E(op, errors.Internal, fmt.Sprintf("server affinity not implemented for redis: %v", msg.Type))
+	}
 	encoded, err := base.EncodeMessage(msg)
 	if err != nil {
 		return errors.E(op, errors.Unknown, fmt.Sprintf("cannot encode message: %v", err))
@@ -471,6 +524,12 @@ return 1
 // It returns ErrDuplicateTask if the lock cannot be acquired.
 func (r *RDB) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error {
 	var op errors.Op = "rdb.ScheduleUnique"
+	if msg.UniqueKeyTTL == 0 {
+		msg.UniqueKeyTTL = int64(ttl.Seconds())
+	}
+	if msg.ServerAffinity > 0 {
+		return errors.E(op, errors.Internal, fmt.Sprintf("server affinity not implemented for redis: %v", msg.Type))
+	}
 	encoded, err := base.EncodeMessage(msg)
 	if err != nil {
 		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode task message: %v", err))

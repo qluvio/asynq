@@ -174,7 +174,7 @@ func (conn *Connection) currentStats(queue string) (*base.Stats, error) {
 			"SELECT queue_name, state "+
 				" FROM "+conn.table(QueuesTable)+" WHERE queue_name=? ", queue),
 		Statement(
-			"SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at "+
+			"SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, sid, affinity_timeout, recurrent "+
 				" FROM "+conn.table(TasksTable)+
 				" WHERE queue_name=? ", queue),
 	}
