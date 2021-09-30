@@ -121,6 +121,36 @@ type Config struct {
 	//
 	// If unset or zero, the interval is set to 15 seconds.
 	HealthCheckInterval time.Duration
+
+	// ProcessorEmptyQSleep specifies the wait period when empty queues
+	// Default to 1 second
+	ProcessorEmptyQSleep time.Duration
+
+	// RecovererInterval specifies the recoverer polling period
+	// Default to 1 minute
+	RecovererInterval time.Duration
+
+	// RecovererExpiration specifies the amount of time that must have elapsed
+	// after a task deadline in order to retry or archive it.
+	// Default to 30 seconds
+	RecovererExpiration time.Duration
+
+	// ForwarderInterval specifies the forwarder polling period
+	// Default to 5 seconds
+	ForwarderInterval time.Duration
+
+	// HeartBeaterInterval specifies the heart beater polling period
+	// Default to 5 seconds
+	HeartBeaterInterval time.Duration
+
+	// SyncerInterval specifies the syncer polling period
+	// Default to 5 seconds
+	SyncerInterval time.Duration
+
+	// SubscriberRetryTimeout defines the timeout to retry connecting to the
+	// cancellation pubsub channel.
+	// Default to 5 second
+	SubscriberRetryTimeout time.Duration
 }
 
 // An ErrorHandler handles an error occured during task processing.
@@ -259,8 +289,7 @@ func DefaultRetryDelayFunc(n int, e error, t *Task) time.Duration {
 func defaultIsFailureFunc(err error) bool { return err != nil }
 
 const (
-	defaultShutdownTimeout = 8 * time.Second
-
+	defaultShutdownTimeout     = 8 * time.Second
 	defaultHealthCheckInterval = 15 * time.Second
 )
 
@@ -289,6 +318,29 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	if isFailureFunc == nil {
 		isFailureFunc = defaultIsFailureFunc
 	}
+
+	if cfg.ProcessorEmptyQSleep <= 0 {
+		cfg.ProcessorEmptyQSleep = time.Second
+	}
+	if cfg.RecovererInterval <= 0 {
+		cfg.RecovererInterval = time.Minute
+	}
+	if cfg.RecovererExpiration <= 0 {
+		cfg.RecovererExpiration = time.Second * 30
+	}
+	if cfg.ForwarderInterval <= 0 {
+		cfg.ForwarderInterval = time.Second * 5
+	}
+	if cfg.HeartBeaterInterval <= 0 {
+		cfg.HeartBeaterInterval = time.Second * 5
+	}
+	if cfg.SyncerInterval <= 0 {
+		cfg.SyncerInterval = time.Second * 5
+	}
+	if cfg.SubscriberRetryTimeout <= 0 {
+		cfg.SubscriberRetryTimeout = time.Second * 5
+	}
+
 	if cfg.Queues == nil {
 		cfg.Queues = &QueuesConfig{}
 	}
@@ -321,13 +373,13 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	syncer := newSyncer(syncerParams{
 		logger:     logger,
 		requestsCh: syncCh,
-		interval:   5 * time.Second,
+		interval:   cfg.SyncerInterval,
 	})
 	heartbeater := newHeartbeater(heartbeaterParams{
 		logger:      logger,
 		broker:      broker,
 		serverID:    cfg.ServerID,
-		interval:    5 * time.Second,
+		interval:    cfg.HeartBeaterInterval,
 		concurrency: n,
 		queues:      cfg.Queues,
 		state:       state,
@@ -338,12 +390,13 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		logger:   logger,
 		broker:   broker,
 		queues:   cfg.Queues,
-		interval: 5 * time.Second,
+		interval: cfg.ForwarderInterval,
 	})
 	subscriber := newSubscriber(subscriberParams{
 		logger:       logger,
 		broker:       broker,
 		cancelations: cancels,
+		retryTimeout: cfg.SubscriberRetryTimeout,
 	})
 	processor := newProcessor(processorParams{
 		logger:          logger,
@@ -359,6 +412,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		shutdownTimeout: shutdownTimeout,
 		starting:        starting,
 		finished:        finished,
+		emptyQSleep:     cfg.ProcessorEmptyQSleep,
 	})
 	recoverer := newRecoverer(recovererParams{
 		logger:         logger,
@@ -366,7 +420,8 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		retryDelayFunc: delayFunc,
 		isFailureFunc:  isFailureFunc,
 		queues:         cfg.Queues,
-		interval:       1 * time.Minute,
+		interval:       cfg.RecovererInterval,
+		expiration:     cfg.RecovererExpiration,
 	})
 	healthchecker := newHealthChecker(healthcheckerParams{
 		logger:          logger,

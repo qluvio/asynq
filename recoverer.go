@@ -27,6 +27,9 @@ type recoverer struct {
 
 	// poll interval.
 	interval time.Duration
+
+	// expired task
+	expiration time.Duration
 }
 
 type recovererParams struct {
@@ -34,6 +37,7 @@ type recovererParams struct {
 	broker         base.Broker
 	queues         Queues
 	interval       time.Duration
+	expiration     time.Duration
 	retryDelayFunc RetryDelayFunc
 	isFailureFunc  func(error) bool
 }
@@ -45,6 +49,7 @@ func newRecoverer(params recovererParams) *recoverer {
 		done:           make(chan struct{}),
 		queues:         params.queues,
 		interval:       params.interval,
+		expiration:     params.expiration,
 		retryDelayFunc: params.retryDelayFunc,
 		isFailureFunc:  params.isFailureFunc,
 	}
@@ -78,7 +83,7 @@ func (r *recoverer) start(wg *sync.WaitGroup) {
 
 func (r *recoverer) recover() {
 	// Get all tasks which have expired 30 seconds ago or earlier.
-	deadline := time.Now().Add(-30 * time.Second)
+	deadline := time.Now().Add(-r.expiration)
 	msgs, err := r.broker.ListDeadlineExceeded(deadline, r.queues.Names()...)
 	if err != nil {
 		r.logger.Warn("recoverer: could not list deadline exceeded tasks")

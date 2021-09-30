@@ -31,6 +31,7 @@ type subscriberParams struct {
 	logger       *log.Logger
 	broker       base.Broker
 	cancelations *base.Cancelations
+	retryTimeout time.Duration
 }
 
 func newSubscriber(params subscriberParams) *subscriber {
@@ -39,7 +40,7 @@ func newSubscriber(params subscriberParams) *subscriber {
 		broker:       params.broker,
 		done:         make(chan struct{}),
 		cancelations: params.cancelations,
-		retryTimeout: 5 * time.Second,
+		retryTimeout: params.retryTimeout,
 	}
 }
 

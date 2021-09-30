@@ -61,6 +61,8 @@ type processor struct {
 
 	starting chan<- *workerInfo
 	finished chan<- *base.TaskMessage
+
+	emptyQSleep time.Duration
 }
 
 type processorParams struct {
@@ -77,6 +79,7 @@ type processorParams struct {
 	shutdownTimeout time.Duration
 	starting        chan<- *workerInfo
 	finished        chan<- *base.TaskMessage
+	emptyQSleep     time.Duration
 }
 
 // newProcessor constructs a new processor.
@@ -101,6 +104,7 @@ func newProcessor(params processorParams) *processor {
 		shutdownTimeout: params.shutdownTimeout,
 		starting:        params.starting,
 		finished:        params.finished,
+		emptyQSleep:     params.emptyQSleep,
 	}
 }
 
@@ -163,7 +167,7 @@ func (p *processor) exec() {
 			// Sleep to avoid slamming redis and let scheduler move tasks into queues.
 			// Note: We are not using blocking pop operation and polling queues instead.
 			// This adds significant load to redis.
-			time.Sleep(time.Second)
+			time.Sleep(p.emptyQSleep)
 			<-p.sema // release token
 			return
 		case err != nil:

@@ -293,6 +293,86 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 	}
 }
 
+func TestEnqueueWithServerAffinityAfterError(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
+	m1 := base.TaskMessage{
+		ID:             uuid.New(),
+		Type:           "email",
+		Payload:        h.JSON(map[string]interface{}{"user_id": json.Number("123")}),
+		Queue:          base.DefaultQueueName,
+		UniqueKey:      base.UniqueKey(base.DefaultQueueName, "email", h.JSON(map[string]interface{}{"user_id": 123})),
+		Recurrent:      true,
+		Timeout:        1,
+		ServerAffinity: 1,
+	}
+	serverID := "inod11"
+	serverID2 := "inod222"
+	ttl := time.Minute // uniqueness ttl
+	tests := []struct {
+		msg *base.TaskMessage
+	}{
+		{msg: &m1},
+	}
+
+	for _, tc := range tests {
+		//fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
+		FlushDB(t, r.conn)
+
+		// initial dequeue
+		err := r.EnqueueUnique(tc.msg, ttl)
+		require.NoError(t, err)
+		_, _, err = r.Dequeue("", tc.msg.Queue)
+		require.NoError(t, err)
+
+		// re-queueing with a server id: can be dequeued only by this server
+		err = r.Requeue(serverID, tc.msg, false)
+		require.NoError(t, err)
+		// not available for other servers
+		_, _, err = r.Dequeue("", tc.msg.Queue)
+		require.Error(t, err)
+		require.True(t, errors.Is(err, errors.ErrNoProcessableTask), err)
+		_, _, err = r.Dequeue(serverID2, tc.msg.Queue)
+		require.Error(t, err)
+		require.True(t, errors.Is(err, errors.ErrNoProcessableTask), err)
+
+		m, _, err := r.Dequeue(serverID, tc.msg.Queue)
+		require.NoError(t, err)
+		require.Equal(t, tc.msg, m)
+
+		err = r.Archive(tc.msg, "there was an error")
+		require.NoError(t, err)
+		// after an error we can re-enqueue
+		err = r.EnqueueUnique(tc.msg, ttl)
+		require.NoError(t, err)
+
+		// the server cannot take it right away
+		m, _, err = r.Dequeue(serverID, tc.msg.Queue)
+		require.Error(t, err)
+		require.True(t, errors.Is(err, errors.ErrNoProcessableTask), err)
+
+		// but another one can
+		m, _, err = r.Dequeue(serverID2, tc.msg.Queue)
+		require.NoError(t, err)
+		err = r.Archive(tc.msg, "there was an error")
+		require.NoError(t, err)
+		// after an error we can re-enqueue
+		err = r.EnqueueUnique(tc.msg, ttl)
+		require.NoError(t, err)
+
+		// after server affinity elapsed, the same server can take it again
+		now = now.Add(time.Second * time.Duration(tc.msg.ServerAffinity))
+		utc.MockNow(now)
+		m, _, err = r.Dequeue(serverID2, tc.msg.Queue)
+		require.NoError(t, err)
+
+	}
+}
+
 func TestRequeueScheduled(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
