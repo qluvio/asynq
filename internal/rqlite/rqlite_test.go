@@ -30,7 +30,7 @@ func init() {
 
 func setup(tb testing.TB) *RQLite {
 	tb.Helper()
-	ret := NewRQLite(config, nil, nil)
+	ret := NewRQLite(&config, nil, nil)
 	err := ret.Open()
 	if err != nil {
 		tb.Fatal("Unable to connect rqlite", err)

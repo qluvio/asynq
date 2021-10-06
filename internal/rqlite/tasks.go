@@ -327,7 +327,7 @@ func (conn *Connection) setArchived(queue string, state string) (int64, error) {
 			" archived_at=?, cleanup_at=? "+
 			" WHERE queue_name=? AND state=?",
 		now.Unix(),
-		now.AddDate(0, 0, archivedExpirationInDays).Unix(),
+		now.AddDate(0, 0, conn.config.ArchivedExpirationInDays).Unix(),
 		queue,
 		state)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
@@ -346,7 +346,7 @@ func (conn *Connection) setTaskArchived(queue string, taskid string) (int64, err
 			" archived_at=?, cleanup_at=? "+
 			" WHERE queue_name=? AND task_uuid=? AND state != 'archived' AND state!='active'",
 		now.Unix(),
-		now.AddDate(0, 0, archivedExpirationInDays).Unix(),
+		now.AddDate(0, 0, conn.config.ArchivedExpirationInDays).Unix(),
 		queue,
 		taskid)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
@@ -1040,14 +1040,14 @@ func (conn *Connection) archiveTask(msg *base.TaskMessage, errMsg string) error 
 	if err != nil {
 		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode message: %v", err))
 	}
-	cutoff := now.AddDate(0, 0, -archivedExpirationInDays)
+	cutoff := now.AddDate(0, 0, -conn.config.ArchivedExpirationInDays)
 
 	affinity := " affinity_timeout=0, "
 	if len(errMsg) > 0 {
 		affinity = " affinity_timeout=-affinity_timeout, "
 	}
 	//PENDING(GIL) - TODO: add cleanup to respect max number of tasks in archive
-	_ = maxArchiveSize
+	_ = conn.config.MaxArchiveSize
 	stmts := []*gorqlite.Statement{
 		Statement(
 			"DELETE FROM "+conn.table(TasksTable)+

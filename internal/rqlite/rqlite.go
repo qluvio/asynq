@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	maxArchiveSize           = 10000               // maximum number of tasks in archive
-	archivedExpirationInDays = 90                  // number of days before an archived task gets deleted permanently
-	statsTTL                 = 90 * 24 * time.Hour // 90 days
-	maxEvents                = 1000                // Maximum number of enqueue events to store per scheduler entry.
+	maxArchiveSize            = 10000                  // maximum number of tasks in archive
+	archivedExpirationInDays  = 90                     // number of days before an archived task gets deleted permanently
+	statsTTL                  = 90 * 24 * time.Hour    // same as a duration 90 days
+	schedulerHistoryMaxEvents = 1000                   // Maximum number of enqueue events to store per scheduler entry.
+	PubsubPollingInterval     = time.Millisecond * 200 // polling period for pub-sub
 )
 
 var _ base.Broker = (*RQLite)(nil)
@@ -32,17 +33,30 @@ var _ base.Inspector = (*RQLite)(nil)
 var slog log.Base
 
 type Config struct {
-	RqliteUrl        string `json:"rqlite_url"`              // Rqlite server url, e.g. http://localhost:4001.
-	ConsistencyLevel string `json:"consistency_level"`       // consistency level: none | weak| strong
-	TablesPrefix     string `json:"tables_prefix,omitempty"` // tables prefix
+	RqliteUrl                 string        `json:"rqlite_url"`                             // Rqlite server url, e.g. http://localhost:4001.
+	ConsistencyLevel          string        `json:"consistency_level"`                      // consistency level: none | weak| strong
+	TablesPrefix              string        `json:"tables_prefix,omitempty"`                // tables prefix
+	MaxArchiveSize            int           `json:"max_archive_size,omitempty"`             // maximum number of tasks in archive
+	ArchivedExpirationInDays  int           `json:"archived_expiration_in_days,omitempty"`  // number of days before an archived task gets deleted permanently
+	ArchiveTTL                time.Duration `json:"archive_ttl,omitempty"`                  // expiration of archived entries
+	SchedulerHistoryMaxEvents int           `json:"scheduler_history_max_events,omitempty"` // Maximum number of enqueue events to store per scheduler entry.
+	PubsubPollingInterval     time.Duration `json:"pubsub_polling_interval,omitempty"`      // interval for polling the pub-sub table. Zero to disable.
 }
 
 func (c *Config) InitDefaults() *Config {
 	c.ConsistencyLevel = "strong"
+	c.MaxArchiveSize = maxArchiveSize
+	c.ArchivedExpirationInDays = archivedExpirationInDays
+	c.ArchiveTTL = statsTTL
+	c.SchedulerHistoryMaxEvents = schedulerHistoryMaxEvents
+	c.PubsubPollingInterval = PubsubPollingInterval
 	return c
 }
 
 func (c *Config) Validate() error {
+	if c == nil {
+		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "nil config")
+	}
 	if len(c.RqliteUrl) == 0 {
 		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no rqlite url provided")
 	}
@@ -51,12 +65,25 @@ func (c *Config) Validate() error {
 		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition,
 			fmt.Sprintf("invalid consistency level: %s", c.ConsistencyLevel))
 	}
+	if c.MaxArchiveSize <= 0 {
+		c.MaxArchiveSize = maxArchiveSize
+	}
+	if c.ArchivedExpirationInDays <= 0 {
+		c.ArchivedExpirationInDays = archivedExpirationInDays
+	}
+	if c.ArchiveTTL <= 0 {
+		c.ArchiveTTL = statsTTL
+	}
+	if c.SchedulerHistoryMaxEvents <= 0 {
+		c.SchedulerHistoryMaxEvents = schedulerHistoryMaxEvents
+	}
+
 	return nil
 }
 
 // RQLite is a client interface to query and mutate task queues.
 type RQLite struct {
-	config     Config
+	config     *Config
 	httpClient *http.Client
 	mu         sync.Mutex
 	conn       *Connection
@@ -69,7 +96,7 @@ type RQLite struct {
 //   each request made to the rqlite cluster.
 // * logger is an optional logger. If nil a default logger printing to stderr
 //   will be created.
-func NewRQLite(config Config, client *http.Client, logger log.Base) *RQLite {
+func NewRQLite(config *Config, client *http.Client, logger log.Base) *RQLite {
 	if logger == nil {
 		logger = log.NewLogger(nil)
 	}
@@ -117,7 +144,7 @@ func (r *RQLite) open() error {
 	if err != nil {
 		return errors.E(op, errors.Internal, err)
 	}
-	r.conn = NewConnection(&conn, r.config.TablesPrefix)
+	r.conn = NewConnection(&conn, r.config)
 	err = r.conn.SetConsistencyLevel(r.config.ConsistencyLevel)
 	if err != nil {
 		return errors.E(op, errors.Internal, err)
@@ -458,6 +485,9 @@ type rqlitePubSub struct {
 }
 
 func (ps *rqlitePubSub) Close() error {
+	if ps.done == nil {
+		return nil
+	}
 	ps.done <- true
 	return nil
 }
@@ -478,8 +508,12 @@ func (r *RQLite) CancelationPubSub() (base.PubSub, error) {
 		done: make(chan interface{}),
 		ch:   make(chan interface{}, 1),
 	}
+	if r.config.PubsubPollingInterval <= 0 {
+		ret.done = nil
+		return ret, nil
+	}
 
-	ticker := time.NewTicker(time.Millisecond * 200)
+	ticker := time.NewTicker(r.config.PubsubPollingInterval)
 	go func() {
 	out:
 		for {

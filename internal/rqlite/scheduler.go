@@ -211,7 +211,7 @@ func (conn *Connection) recordSchedulerEnqueueEvent(entryID string, event *base.
 			entryID,
 			entryID,
 			entryID,
-			maxEvents),
+			schedulerHistoryMaxEvents),
 	}
 	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
 	if err != nil {

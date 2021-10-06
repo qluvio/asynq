@@ -111,7 +111,7 @@ func (conn *Connection) buildTables() {
 	tables := make(map[string]string)
 	tableNames := make(map[string]string)
 	for table, ctorFmt := range AllTables {
-		t := conn.TablesPrefix + table
+		t := conn.config.TablesPrefix + table
 		tables[t] = fmt.Sprintf(ctorFmt, t)
 		tableNames[table] = t
 	}

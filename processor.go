@@ -177,6 +177,7 @@ func (p *processor) exec() {
 			<-p.sema // release token
 			return
 		}
+		p.logger.Debug("dequeued %s -> %v", msg.ID, deadline)
 
 		p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
 		go func() {
@@ -196,7 +197,7 @@ func (p *processor) exec() {
 			select {
 			case <-ctx.Done():
 				// already canceled (e.g. deadline exceeded).
-				p.retryOrArchive(ctx, msg, ctx.Err())
+				p.retryOrArchive(ctx, msg, "already done", ctx.Err())
 				return
 			default:
 			}
@@ -213,7 +214,7 @@ func (p *processor) exec() {
 				p.requeueAborting(msg)
 				return
 			case <-ctx.Done():
-				p.retryOrArchive(ctx, msg, ctx.Err())
+				p.retryOrArchive(ctx, msg, "done", ctx.Err())
 				return
 			case resErr := <-resCh:
 				// Note: One of three things should happen.
@@ -221,7 +222,7 @@ func (p *processor) exec() {
 				// 2) Retry    -> Removes the message from Active & Adds the message to Retry
 				// 3) Archive  -> Removes the message from Active & Adds the message to archive
 				if resErr != nil {
-					p.retryOrArchive(ctx, msg, resErr)
+					p.retryOrArchive(ctx, msg, "errored", resErr)
 					return
 				}
 				if !msg.Recurrent {
@@ -291,7 +292,8 @@ func (p *processor) markAsDone(ctx context.Context, msg *base.TaskMessage) {
 // the task should not be retried and should be archived instead.
 var SkipRetry = errors.New("skip retry for the task")
 
-func (p *processor) retryOrArchive(ctx context.Context, msg *base.TaskMessage, err error) {
+func (p *processor) retryOrArchive(ctx context.Context, msg *base.TaskMessage, reason string, err error) {
+	p.logger.Debug("Retry or archive (%s) task id=%s error:", reason, msg.ID, err)
 	if p.errHandler != nil {
 		p.errHandler.HandleError(ctx, NewTask(msg.Type, msg.Payload), err)
 	}

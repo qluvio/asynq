@@ -4133,7 +4133,7 @@ func TestRecordSchedulerEnqueueEventTrimsDataSet(t *testing.T) {
 	)
 
 	// Record maximum number of events.
-	for i := 1; i <= maxEvents; i++ {
+	for i := 1; i <= schedulerHistoryMaxEvents; i++ {
 		event := base.SchedulerEnqueueEvent{
 			TaskID:     fmt.Sprintf("task%d", i),
 			EnqueuedAt: now.Add(-time.Duration(i) * time.Second),
@@ -4146,7 +4146,7 @@ func TestRecordSchedulerEnqueueEventTrimsDataSet(t *testing.T) {
 	// Make sure the set is full.
 	evs, err := r.conn.listAllSchedulerEnqueueEvents(entryID)
 	require.NoError(t, err)
-	require.Equal(t, maxEvents, len(evs), "unexpected number of events; got %d, want %d", len(evs), maxEvents)
+	require.Equal(t, schedulerHistoryMaxEvents, len(evs), "unexpected number of events; got %d, want %d", len(evs), schedulerHistoryMaxEvents)
 
 	// Record one more event, should evict the oldest event.
 	event := base.SchedulerEnqueueEvent{
@@ -4158,17 +4158,17 @@ func TestRecordSchedulerEnqueueEventTrimsDataSet(t *testing.T) {
 	}
 	evs, err = r.conn.listAllSchedulerEnqueueEvents(entryID)
 	require.NoError(t, err)
-	require.Equal(t, maxEvents, len(evs), "unexpected number of events; got %d, want %d", len(evs), maxEvents)
+	require.Equal(t, schedulerHistoryMaxEvents, len(evs), "unexpected number of events; got %d, want %d", len(evs), schedulerHistoryMaxEvents)
 
-	events, err := r.ListSchedulerEnqueueEvents(entryID, base.Pagination{Size: maxEvents})
+	events, err := r.ListSchedulerEnqueueEvents(entryID, base.Pagination{Size: schedulerHistoryMaxEvents})
 	if err != nil {
 		t.Fatalf("ListSchedulerEnqueueEvents failed: %v", err)
 	}
 	if first := events[0]; first.TaskID != "latest" {
 		t.Errorf("unexpected first event; got %q, want %q", first.TaskID, "latest")
 	}
-	if last := events[maxEvents-1]; last.TaskID != fmt.Sprintf("task%d", maxEvents-1) {
-		t.Errorf("unexpected last event; got %q, want %q", last.TaskID, fmt.Sprintf("task%d", maxEvents-1))
+	if last := events[schedulerHistoryMaxEvents-1]; last.TaskID != fmt.Sprintf("task%d", schedulerHistoryMaxEvents-1) {
+		t.Errorf("unexpected last event; got %q, want %q", last.TaskID, fmt.Sprintf("task%d", schedulerHistoryMaxEvents-1))
 	}
 }
 

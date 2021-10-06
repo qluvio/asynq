@@ -8,15 +8,15 @@ import (
 
 type Connection struct {
 	*gorqlite.Connection
-	TablesPrefix string
-	tableNames   map[string]string
-	tables       map[string]string
+	config     *Config
+	tableNames map[string]string
+	tables     map[string]string
 }
 
-func NewConnection(conn *gorqlite.Connection, tablesPrefix string) *Connection {
+func NewConnection(conn *gorqlite.Connection, config *Config) *Connection {
 	ret := &Connection{
-		Connection:   conn,
-		TablesPrefix: tablesPrefix,
+		Connection: conn,
+		config:     config,
 	}
 	ret.buildTables()
 	return ret
