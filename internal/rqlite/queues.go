@@ -42,12 +42,12 @@ func (conn *Connection) GetQueue(qname string) (*queueRow, error) {
 	if err != nil {
 		return nil, NewRqliteRError("getQueue", qrs[0], err, st)
 	}
+	if len(qrs) == 0 || qrs[0].NumRows() == 0 {
+		return nil, nil
+	}
 	res := qrs[0]
 	if res.NumRows() > 1 {
 		return nil, errors.E(op, fmt.Sprintf("multiple queues: [%s], res: %v", qname, res))
-	}
-	if res.NumRows() == 0 {
-		return nil, nil
 	}
 	q := &queueRow{}
 	res.Next()

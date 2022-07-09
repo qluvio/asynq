@@ -76,19 +76,33 @@ type TaskInfo struct {
 	// NextProcessAt is the time the task is scheduled to be processed,
 	// zero if not applicable.
 	NextProcessAt time.Time
+
+	// Recurrent indicates a recurrent task when true
+	Recurrent bool
+
+	// Delay in seconds to re-process a recurrent task after execution.
+	ReprocessAfter time.Duration
+
+	// ServerAffinity is used with a recurrent task to specify a timeout after
+	// which the task can be handled by a server other than the one that handled
+	// it the first time.
+	ServerAffinity time.Duration
 }
 
 func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time.Time) *TaskInfo {
 	info := TaskInfo{
-		ID:            msg.ID.String(),
-		Queue:         msg.Queue,
-		Type:          msg.Type,
-		Payload:       msg.Payload, // Do we need to make a copy?
-		MaxRetry:      msg.Retry,
-		Retried:       msg.Retried,
-		LastErr:       msg.ErrorMsg,
-		Timeout:       time.Duration(msg.Timeout) * time.Second,
-		NextProcessAt: nextProcessAt,
+		ID:             msg.ID.String(),
+		Queue:          msg.Queue,
+		Type:           msg.Type,
+		Payload:        msg.Payload, // Do we need to make a copy?
+		MaxRetry:       msg.Retry,
+		Retried:        msg.Retried,
+		LastErr:        msg.ErrorMsg,
+		Timeout:        time.Duration(msg.Timeout) * time.Second,
+		NextProcessAt:  nextProcessAt,
+		Recurrent:      msg.Recurrent,
+		ReprocessAfter: time.Duration(msg.ReprocessAfter) * time.Second,
+		ServerAffinity: time.Duration(msg.ServerAffinity) * time.Second,
 	}
 	if msg.LastFailedAt == 0 {
 		info.LastFailedAt = time.Time{}

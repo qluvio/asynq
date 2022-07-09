@@ -89,6 +89,7 @@ func init() {
 	rqliteConfig.InitDefaults()
 	rootCmd.PersistentFlags().StringVar(&rqliteConfig.RqliteUrl, "rqlite_addr", "http://localhost:4001", "rqlite address to use")
 	rootCmd.PersistentFlags().StringVar(&rqliteConfig.ConsistencyLevel, "rqlite_consistency_level", "strong", "rqlite consistency level")
+	rootCmd.PersistentFlags().StringVar(&rqliteConfig.TablesPrefix, "rqlite_tables_prefix", "", "rqlite tables prefix")
 
 	// Bind flags with config.
 	_ = viper.BindPFlag("broker_type", rootCmd.PersistentFlags().Lookup("broker_type"))

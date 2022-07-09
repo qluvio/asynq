@@ -135,24 +135,29 @@ func (r *RQLite) open() error {
 	if r.conn != nil {
 		return nil
 	}
+
 	err := r.config.Validate()
 	if err != nil {
 		return err
 	}
+
 	op := errors.Op("open")
-	conn, err := gorqlite.OpenContext(r.context(), r.config.RqliteUrl, r.httpClient)
+	gorqliteConn, err := gorqlite.OpenContext(r.context(), r.config.RqliteUrl, r.httpClient)
 	if err != nil {
 		return errors.E(op, errors.Internal, err)
 	}
-	r.conn = NewConnection(&conn, r.config)
-	err = r.conn.SetConsistencyLevel(r.config.ConsistencyLevel)
+
+	conn := NewConnection(&gorqliteConn, r.config)
+	err = conn.SetConsistencyLevel(r.config.ConsistencyLevel)
 	if err != nil {
 		return errors.E(op, errors.Internal, err)
 	}
-	_, err = r.conn.CreateTablesIfNotExist()
+	_, err = conn.CreateTablesIfNotExist()
 	if err != nil {
 		return errors.E(op, errors.Internal, err)
 	}
+
+	r.conn = conn
 	return nil
 }
 
