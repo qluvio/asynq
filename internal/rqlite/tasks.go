@@ -489,7 +489,8 @@ func (conn *Connection) enqueueUniqueMessages(msgs ...*base.MessageBatch) error 
 				"   recurrent=excluded.recurrent, "+
 				"   pndx=excluded.pndx, "+
 				"   state=excluded.state "+
-				" WHERE "+conn.table(TasksTable)+".unique_key_deadline<=?",
+				" WHERE ("+conn.table(TasksTable)+".unique_key_deadline<=? "+
+				"    OR "+conn.table(TasksTable)+".unique_key_deadline IS NULL)",
 			msg.Queue,
 			msg.Type,
 			msg.ID.String(),
@@ -942,7 +943,8 @@ func (conn *Connection) scheduleUniqueTasks(msgs ...*base.MessageBatch) error {
 				"   recurrent=excluded.recurrent, "+
 				"   pndx=excluded.pndx, "+
 				"   state=excluded.state"+
-				" WHERE "+conn.table(TasksTable)+".unique_key_deadline<=?",
+				" WHERE ("+conn.table(TasksTable)+".unique_key_deadline<=? "+
+				"    OR "+conn.table(TasksTable)+".unique_key_deadline IS NULL)",
 			msg.Queue,
 			msg.Type,
 			msg.ID.String(),
