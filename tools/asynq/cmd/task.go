@@ -303,10 +303,11 @@ func listArchivedTasks(qname string, pageNum, pageSize int) {
 		return
 	}
 	printTable(
-		[]string{"ID", "Type", "Payload", "Last Failed", "Last Error"},
+		[]string{"ID", "Type", "Payload", "Last Failed", "Last Error", "Retried", "Max Retry"},
 		func(w io.Writer, tmpl string) {
 			for _, t := range tasks {
-				fmt.Fprintf(w, tmpl, t.ID, t.Type, formatPayload(t.Payload), formatLastFailedAt(t.LastFailedAt), t.LastErr)
+				fmt.Fprintf(w, tmpl, t.ID, t.Type, formatPayload(t.Payload),
+					formatLastFailedAt(t.LastFailedAt), t.LastErr, t.Retried, t.MaxRetry)
 			}
 		})
 }
@@ -346,18 +347,26 @@ func taskInspect(cmd *cobra.Command, args []string) {
 func printTaskInfo(info *asynq.TaskInfo) {
 	bold := color.New(color.Bold)
 	bold.Println("Task Info")
-	fmt.Printf("Queue:   %s\n", info.Queue)
-	fmt.Printf("ID:      %s\n", info.ID)
-	fmt.Printf("Type:    %s\n", info.Type)
-	fmt.Printf("State:   %v\n", info.State)
-	fmt.Printf("Retried: %d/%d\n", info.Retried, info.MaxRetry)
+	fmt.Printf("Queue:           %s\n", info.Queue)
+	fmt.Printf("ID:              %s\n", info.ID)
+	fmt.Printf("Type:            %s\n", info.Type)
+	fmt.Printf("State:           %v\n", info.State)
+	fmt.Printf("Deadline:        %v\n", formatLastFailedAt(info.Deadline))
+	fmt.Printf("Timeout:         %v\n", info.Timeout)
+	fmt.Printf("Retried:         %d / %d\n", info.Retried, info.MaxRetry)
+	fmt.Printf("Recurrent:       %t", info.Recurrent)
+	if info.Recurrent {
+		fmt.Printf(" / %v", info.ReprocessAfter)
+	}
 	fmt.Println()
-	fmt.Printf("Next process time: %s\n", formatNextProcessAt(info.NextProcessAt))
+	fmt.Printf("Server affinity: %v\n", info.ServerAffinity)
+	fmt.Println()
+	fmt.Printf("Next process at: %s\n", formatNextProcessAt(info.NextProcessAt))
 	if len(info.LastErr) != 0 {
 		fmt.Println()
 		bold.Println("Last Failure")
-		fmt.Printf("Failed at:     %s\n", formatLastFailedAt(info.LastFailedAt))
-		fmt.Printf("Error message: %s\n", info.LastErr)
+		fmt.Printf("Failed at:       %s\n", formatLastFailedAt(info.LastFailedAt))
+		fmt.Printf("Error message:   %s\n", info.LastErr)
 	}
 }
 
@@ -368,14 +377,14 @@ func formatNextProcessAt(processAt time.Time) string {
 	if processAt.Before(time.Now()) {
 		return "now"
 	}
-	return fmt.Sprintf("%s (in %v)", processAt.Format(time.UnixDate), processAt.Sub(time.Now()).Round(time.Second))
+	return fmt.Sprintf("%s (in %v)", processAt.UTC().Format(time.UnixDate), processAt.Sub(time.Now()).Round(time.Second))
 }
 
 func formatLastFailedAt(lastFailedAt time.Time) string {
 	if lastFailedAt.IsZero() || lastFailedAt.Unix() == 0 {
 		return ""
 	}
-	return lastFailedAt.Format(time.UnixDate)
+	return lastFailedAt.UTC().Format(time.UnixDate)
 }
 
 func taskArchive(cmd *cobra.Command, args []string) {

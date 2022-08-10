@@ -205,11 +205,12 @@ func (conn *Connection) getPending(serverID string, queue string) (*dequeueRow, 
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
 
-	qr := qrs[0]
-	// no row
-	if qr.NumRows() == 0 {
+	if len(qrs) == 0 || qrs[0].NumRows() == 0 {
+		// no row
 		return nil, nil
 	}
+
+	qr := qrs[0]
 	if qr.NumRows() > 1 {
 		// PENDING(GIL): take the first anyway because once we're in this state
 		//               this cannot change anymore !
@@ -278,7 +279,7 @@ func (conn *Connection) deleteTask(queue string, taskid string) (int64, error) {
 func (conn *Connection) setTaskPending(queue string, taskid string) (int64, error) {
 	op := errors.Op("rqlite.setTaskPending")
 	st := Statement(
-		"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=0 "+
+		"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=NULL "+
 			" WHERE queue_name=? AND task_uuid=? AND state != 'pending' AND state!='active'",
 		queue,
 		taskid)
@@ -306,7 +307,7 @@ func (conn *Connection) setTaskPending(queue string, taskid string) (int64, erro
 func (conn *Connection) setPending(queue string, state string) (int64, error) {
 	op := errors.Op("rqlite.setPending")
 	st := Statement(
-		"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=0 "+
+		"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=NULL "+
 			" WHERE queue_name=? AND state=?",
 		queue,
 		state)
@@ -323,7 +324,7 @@ func (conn *Connection) setArchived(queue string, state string) (int64, error) {
 	now := utc.Now()
 	st := Statement(
 		"UPDATE "+conn.table(TasksTable)+" SET state='archived', "+
-			" unique_key_deadline=0, affinity_timeout=0, "+
+			" unique_key_deadline=NULL, affinity_timeout=0, "+
 			" archived_at=?, cleanup_at=? "+
 			" WHERE queue_name=? AND state=?",
 		now.Unix(),
@@ -488,7 +489,8 @@ func (conn *Connection) enqueueUniqueMessages(msgs ...*base.MessageBatch) error 
 				"   recurrent=excluded.recurrent, "+
 				"   pndx=excluded.pndx, "+
 				"   state=excluded.state "+
-				" WHERE "+conn.table(TasksTable)+".unique_key_deadline<=?",
+				" WHERE ("+conn.table(TasksTable)+".unique_key_deadline<=? "+
+				"    OR "+conn.table(TasksTable)+".unique_key_deadline IS NULL)",
 			msg.Queue,
 			msg.Type,
 			msg.ID.String(),
@@ -656,7 +658,7 @@ func (conn *Connection) setTaskDone(serverID string, msg *base.TaskMessage) erro
 	if len(msg.UniqueKey) > 0 {
 		if len(serverID) > 0 {
 			st = Statement(
-				"UPDATE "+conn.table(TasksTable)+" SET state='processed', deadline=0, unique_key_deadline=0, sid=?, done_at=?, cleanup_at=?, unique_key=? "+
+				"UPDATE "+conn.table(TasksTable)+" SET state='processed', deadline=NULL, unique_key_deadline=NULL, sid=?, done_at=?, cleanup_at=?, unique_key=? "+
 					"WHERE task_uuid=? AND state='active'",
 				serverID,
 				now.Unix(),
@@ -665,7 +667,7 @@ func (conn *Connection) setTaskDone(serverID string, msg *base.TaskMessage) erro
 				msg.ID.String())
 		} else {
 			st = Statement(
-				"UPDATE "+conn.table(TasksTable)+" SET state='processed', deadline=0, unique_key_deadline=0, done_at=?, cleanup_at=?, unique_key=? "+
+				"UPDATE "+conn.table(TasksTable)+" SET state='processed', deadline=NULL, unique_key_deadline=NULL, done_at=?, cleanup_at=?, unique_key=? "+
 					"WHERE task_uuid=? AND state='active'",
 				now.Unix(),
 				expireAt.Unix(),
@@ -675,7 +677,7 @@ func (conn *Connection) setTaskDone(serverID string, msg *base.TaskMessage) erro
 	} else {
 		if len(serverID) > 0 {
 			st = Statement(
-				"UPDATE "+conn.table(TasksTable)+" SET state='processed', deadline=0, sid=?, done_at=?, cleanup_at=? "+
+				"UPDATE "+conn.table(TasksTable)+" SET state='processed', deadline=NULL, sid=?, done_at=?, cleanup_at=? "+
 					"WHERE task_uuid=? AND state='active'",
 				serverID,
 				now.Unix(),
@@ -683,7 +685,7 @@ func (conn *Connection) setTaskDone(serverID string, msg *base.TaskMessage) erro
 				msg.ID.String())
 		} else {
 			st = Statement(
-				"UPDATE "+conn.table(TasksTable)+" SET state='processed', deadline=0, done_at=?, cleanup_at=? "+
+				"UPDATE "+conn.table(TasksTable)+" SET state='processed', deadline=NULL, done_at=?, cleanup_at=? "+
 					"WHERE task_uuid=? AND state='active'",
 				now.Unix(),
 				expireAt.Unix(),
@@ -718,7 +720,7 @@ func (conn *Connection) requeueTask(serverID string, msg *base.TaskMessage, abor
 	if aborted {
 		// server is stopping: just push back to pending
 		st = Statement(
-			"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=0,"+
+			"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=NULL,"+
 				" pndx=(SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1 "+ // changed pndx=
 				" WHERE queue_name=? AND state='active' AND task_uuid=?",
 			msg.Queue,
@@ -747,7 +749,7 @@ func (conn *Connection) requeueTask(serverID string, msg *base.TaskMessage, abor
 			if len(msg.UniqueKey) > 0 {
 				scheduledAtPos = 4
 				st = Statement(
-					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=0, sid=?, done_at=?, unique_key_deadline=?, "+scheduledAtReq+
+					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=NULL, sid=?, done_at=?, unique_key_deadline=?, "+scheduledAtReq+
 						" pndx=(SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1 "+
 						" WHERE queue_name=? AND state='active' AND task_uuid=?",
 					state,
@@ -760,7 +762,7 @@ func (conn *Connection) requeueTask(serverID string, msg *base.TaskMessage, abor
 			} else {
 				scheduledAtPos = 3
 				st = Statement(
-					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=0, sid=?, done_at=?,"+scheduledAtReq+
+					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=NULL, sid=?, done_at=?,"+scheduledAtReq+
 						" pndx=(SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1 "+
 						" WHERE queue_name=? AND state='active' AND task_uuid=?",
 					state,
@@ -774,7 +776,7 @@ func (conn *Connection) requeueTask(serverID string, msg *base.TaskMessage, abor
 			if len(msg.UniqueKey) > 0 {
 				scheduledAtPos = 3
 				st = Statement(
-					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=0, done_at=?, unique_key_deadline=?,"+scheduledAtReq+
+					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=NULL, sid=NULL, done_at=?, unique_key_deadline=?,"+scheduledAtReq+
 						" pndx=(SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1 "+
 						" WHERE queue_name=? AND state='active' AND task_uuid=?",
 					state,
@@ -786,7 +788,7 @@ func (conn *Connection) requeueTask(serverID string, msg *base.TaskMessage, abor
 			} else {
 				scheduledAtPos = 2
 				st = Statement(
-					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=0, done_at=?,"+scheduledAtReq+
+					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=NULL, sid=NULL, done_at=?,"+scheduledAtReq+
 						" pndx=(SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1 "+
 						" WHERE queue_name=? AND state='active' AND task_uuid=?",
 					state,
@@ -941,7 +943,8 @@ func (conn *Connection) scheduleUniqueTasks(msgs ...*base.MessageBatch) error {
 				"   recurrent=excluded.recurrent, "+
 				"   pndx=excluded.pndx, "+
 				"   state=excluded.state"+
-				" WHERE "+conn.table(TasksTable)+".unique_key_deadline<=?",
+				" WHERE ("+conn.table(TasksTable)+".unique_key_deadline<=? "+
+				"    OR "+conn.table(TasksTable)+".unique_key_deadline IS NULL)",
 			msg.Queue,
 			msg.Type,
 			msg.ID.String(),
@@ -1006,7 +1009,7 @@ func (conn *Connection) retryTask(msg *base.TaskMessage, processAt time.Time, er
 
 	st := Statement(
 		"UPDATE "+conn.table(TasksTable)+" SET task_msg=?, state='retry', "+
-			" done_at=?, retry_at=?, failed=?, cleanup_at=? "+
+			" sid=NULL, done_at=?, retry_at=?, failed=?, cleanup_at=? "+
 			" WHERE queue_name=? AND state='active' AND task_uuid=?",
 		encoded,
 		now.Unix(),
@@ -1016,6 +1019,9 @@ func (conn *Connection) retryTask(msg *base.TaskMessage, processAt time.Time, er
 		msg.Queue,
 		msg.ID.String())
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
+	if len(wrs) == 0 {
+		wrs = append(wrs, gorqlite.WriteResult{Err: err})
+	}
 	if err != nil {
 		return NewRqliteWError(op, wrs[0], err, st)
 	}
@@ -1056,7 +1062,7 @@ func (conn *Connection) archiveTask(msg *base.TaskMessage, errMsg string) error 
 			now.Unix()),
 		Statement(
 			"UPDATE "+conn.table(TasksTable)+" SET state='archived', task_msg=?, "+affinity+
-				" archived_at=?, cleanup_at=?, failed=?, unique_key_deadline=0 "+
+				" archived_at=?, cleanup_at=?, failed=?, unique_key_deadline=NULL "+
 				" WHERE queue_name=? AND state='active' AND task_uuid=?",
 			encoded,
 			now.Unix(),
@@ -1095,6 +1101,9 @@ func (conn *Connection) forwardTasks(qname, src string) (int, error) {
 		return 0, NewRqliteWError(op, wrs[0], err, st)
 	}
 
+	if len(wrs) == 0 {
+		return 0, nil
+	}
 	return int(wrs[0].RowsAffected), nil
 }
 
@@ -1113,11 +1122,11 @@ func (conn *Connection) listDeadlineExceededTasks(qname string, deadline time.Ti
 		return nil, NewRqliteRError(op, qrs[0], err, st)
 	}
 
-	qr := qrs[0]
-	if qr.NumRows() == 0 {
+	if len(qrs) == 0 || qrs[0].NumRows() == 0 {
 		return nil, nil
 	}
 
+	qr := qrs[0]
 	data := make([]string, 0, qr.NumRows())
 	for qr.Next() {
 		s := ""

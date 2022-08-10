@@ -174,6 +174,8 @@ func (p *processor) exec() {
 			if p.errLogLimiter.Allow() {
 				p.logger.Errorf("Dequeue error: %v", err)
 			}
+			// also sleep, otherwise we create a busy loop until errors clear...
+			time.Sleep(p.emptyQSleep)
 			<-p.sema // release token
 			return
 		}
@@ -293,7 +295,7 @@ func (p *processor) markAsDone(ctx context.Context, msg *base.TaskMessage) {
 var SkipRetry = errors.New("skip retry for the task")
 
 func (p *processor) retryOrArchive(ctx context.Context, msg *base.TaskMessage, reason string, err error) {
-	p.logger.Debug("Retry or archive (%s) task id=%s error:", reason, msg.ID, err)
+	p.logger.Debugf("Retry or archive (%s) task id=%s error:%s", reason, msg.ID, err)
 	if p.errHandler != nil {
 		p.errHandler.HandleError(ctx, NewTask(msg.Type, msg.Payload), err)
 	}
@@ -311,7 +313,11 @@ func (p *processor) retryOrArchive(ctx context.Context, msg *base.TaskMessage, r
 }
 
 func (p *processor) retry(ctx context.Context, msg *base.TaskMessage, e error, isFailure bool) {
-	d := p.retryDelayFunc(msg.Retried, e, NewTask(msg.Type, msg.Payload))
+	retried := msg.Retried
+	if msg.Recurrent {
+		retried = 0
+	}
+	d := p.retryDelayFunc(retried, e, NewTask(msg.Type, msg.Payload))
 	retryAt := time.Now().Add(d)
 	err := p.broker.Retry(msg, retryAt, e.Error(), isFailure)
 	if err != nil {

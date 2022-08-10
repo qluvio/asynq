@@ -13,3 +13,5 @@ require (
 )
 
 replace github.com/hibiken/asynq => ./..
+
+replace github.com/rqlite/gorqlite => github.com/eluv-io/gorqlite v0.0.4
