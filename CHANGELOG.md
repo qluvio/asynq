@@ -7,25 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.18.5] - 2020-09-01
+## [0.19.0] - 2021-11-06
+
+### Changed
+
+- `NewTask` takes `Option` as variadic argument
+- Bumped minimum supported go version to 1.14 (i.e. go1.14 or higher is required).
+
+### Added
+
+- `Retention` option is added to allow user to specify task retention duration after completion.
+- `TaskID` option is added to allow user to specify task ID.
+- `ErrTaskIDConflict` sentinel error value is added.
+- `ResultWriter` type is added and provided through `Task.ResultWriter` method.
+- `TaskInfo` has new fields `CompletedAt`, `Result` and `Retention`.
+
+### Removed
+
+- `Client.SetDefaultOptions` is removed. Use `NewTask` instead to pass default options for tasks.
+
+## [0.18.6] - 2021-10-03
+
+### Changed
+
+- Updated `github.com/go-redis/redis` package to v8
+
+## [0.18.5] - 2021-09-01
 
 ### Added
 
 - `IsFailure` config option is added to determine whether error returned from Handler counts as a failure.
 
-## [0.18.4] - 2020-08-17
+## [0.18.4] - 2021-08-17
 
 ### Fixed
 
 - Scheduler methods are now thread-safe. It's now safe to call `Register` and `Unregister` concurrently.
 
-## [0.18.3] - 2020-08-09
+## [0.18.3] - 2021-08-09
 
 ### Changed
 
 - `Client.Enqueue` no longer enqueues tasks with empty typename; Error message is returned.
 
-## [0.18.2] - 2020-07-15
+## [0.18.2] - 2021-07-15
 
 ### Changed
 
@@ -36,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fixed latency issue around memory usage (see https://github.com/hibiken/asynq/issues/309).
 
-## [0.18.1] - 2020-07-04
+## [0.18.1] - 2021-07-04
 
 ### Changed
 

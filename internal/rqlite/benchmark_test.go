@@ -18,7 +18,7 @@ func BenchmarkEnqueue(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		msg.ID = uuid.New()
+		msg.ID = uuid.New().String()
 		if err := r.Enqueue(msg); err != nil {
 			b.Fatalf("Enqueue failed: %v", err)
 		}
@@ -34,7 +34,7 @@ func TestOneSecEnqueue(t *testing.T) {
 	count := 0
 	d := time.Since(now)
 	for d < time.Second {
-		msg.ID = uuid.New()
+		msg.ID = uuid.New().String()
 		if err := r.Enqueue(msg); err != nil {
 			require.NoError(t, err)
 		}
@@ -63,7 +63,7 @@ func doTestEnqueueBatch(t *testing.T, batchSize int) {
 	}
 	updateIds := func() {
 		for i := 0; i < batchSize; i++ {
-			msgs[i].Msg.ID = uuid.New()
+			msgs[i].Msg.ID = uuid.New().String()
 		}
 	}
 

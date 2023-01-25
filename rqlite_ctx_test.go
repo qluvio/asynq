@@ -28,6 +28,10 @@ func (c *rqliteTestContext) GetPendingMessages(qname string) []*base.TaskMessage
 	return rqlite.GetPendingMessages(c.tb, c.r, qname)
 }
 
+func (c *rqliteTestContext) GetCompletedEntries(qname string) []base.Z {
+	return rqlite.GetCompletedEntries(c.tb, c.r, qname)
+}
+
 func (c *rqliteTestContext) GetActiveMessages(qname string) []*base.TaskMessage {
 	return rqlite.GetActiveMessages(c.tb, c.r, qname)
 }
@@ -79,6 +83,10 @@ func (c *rqliteTestContext) QueueExist(qname string) bool {
 
 func (c *rqliteTestContext) SeedAllPendingQueues(pending map[string][]*base.TaskMessage) {
 	rqlite.SeedAllPendingQueues(c.tb, c.r, pending)
+}
+
+func (c *rqliteTestContext) SeedAllCompletedQueues(completed map[string][]base.Z) {
+	rqlite.SeedAllCompletedQueues(c.tb, c.r, completed)
 }
 
 func (c *rqliteTestContext) SeedPendingQueue(pending []*base.TaskMessage, queue string) {

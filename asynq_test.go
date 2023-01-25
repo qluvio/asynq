@@ -59,6 +59,7 @@ type TestContext interface {
 	Close() error
 
 	GetPendingMessages(qname string) []*base.TaskMessage
+	GetCompletedEntries(qname string) []base.Z
 	GetActiveMessages(qname string) []*base.TaskMessage
 	GetRetryMessages(qname string) []*base.TaskMessage
 	GetArchivedMessages(qname string) []*base.TaskMessage
@@ -75,6 +76,7 @@ type TestContext interface {
 	QueueExist(qname string) bool
 
 	SeedAllPendingQueues(pending map[string][]*base.TaskMessage)
+	SeedAllCompletedQueues(completed map[string][]base.Z)
 	SeedPendingQueue(pending []*base.TaskMessage, queue string)
 	SeedAllActiveQueues(inProgress map[string][]*base.TaskMessage)
 	SeedActiveQueue(msgs []*base.TaskMessage, queue string)

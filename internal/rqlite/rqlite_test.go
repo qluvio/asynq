@@ -118,7 +118,7 @@ func TestEnqueue(t *testing.T) {
 		// Check Pending list has task ID.
 		pending, err := r.conn.getPending("", tc.msg.Queue)
 		require.NoError(t, err)
-		require.Equal(t, tc.msg.ID.String(), pending.msg.ID.String())
+		require.Equal(t, tc.msg.ID, pending.msg.ID)
 		// Check the value under the task key.
 		diff := cmp.Diff(tc.msg, pending.msg)
 		require.Equal(t, "", diff, "persisted message was %v, want %v; (-want, +got)\n%s", pending.msg, tc.msg, diff)
@@ -134,14 +134,14 @@ func TestEnqueueUnique(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 	m1 := base.TaskMessage{
-		ID:        uuid.New(),
+		ID:        uuid.New().String(),
 		Type:      "email",
 		Payload:   h.JSON(map[string]interface{}{"user_id": json.Number("123")}),
 		Queue:     base.DefaultQueueName,
 		UniqueKey: base.UniqueKey(base.DefaultQueueName, "email", h.JSON(map[string]interface{}{"user_id": 123})),
 	}
 	m2 := base.TaskMessage{
-		ID:        uuid.New(),
+		ID:        uuid.New().String(),
 		Type:      "email",
 		Payload:   h.JSON(map[string]interface{}{"user_id": json.Number("456")}),
 		Queue:     base.DefaultQueueName,
@@ -168,7 +168,7 @@ func TestEnqueueUnique(t *testing.T) {
 		// Check Pending list has task ID.
 		pending, err := r.conn.getPending("", tc.msg.Queue)
 		require.NoError(t, err)
-		require.Equal(t, tc.msg.ID.String(), pending.msg.ID.String())
+		require.Equal(t, tc.msg.ID, pending.msg.ID)
 		// Check the value under the task key.
 		diff := cmp.Diff(tc.msg, pending.msg)
 		require.Equal(t, "", diff, "persisted message was %v, want %v; (-want, +got)\n%s", pending.msg, tc.msg, diff)
@@ -202,7 +202,7 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 	defer utc.MockNow(now)()
 
 	m1 := base.TaskMessage{
-		ID:             uuid.New(),
+		ID:             uuid.New().String(),
 		Type:           "email",
 		Payload:        h.JSON(map[string]interface{}{"user_id": json.Number("123")}),
 		Queue:          base.DefaultQueueName,
@@ -212,7 +212,7 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 		ServerAffinity: 1,
 	}
 	m2 := base.TaskMessage{
-		ID:             uuid.New(),
+		ID:             uuid.New().String(),
 		Type:           "email",
 		Payload:        h.JSON(map[string]interface{}{"user_id": json.Number("456")}),
 		Queue:          base.DefaultQueueName,
@@ -301,7 +301,7 @@ func TestEnqueueWithServerAffinityAfterError(t *testing.T) {
 	defer utc.MockNow(now)()
 
 	m1 := base.TaskMessage{
-		ID:             uuid.New(),
+		ID:             uuid.New().String(),
 		Type:           "email",
 		Payload:        h.JSON(map[string]interface{}{"user_id": json.Number("123")}),
 		Queue:          base.DefaultQueueName,
@@ -381,7 +381,7 @@ func TestRequeueScheduled(t *testing.T) {
 	defer utc.MockNow(now)()
 
 	m1 := base.TaskMessage{
-		ID:             uuid.New(),
+		ID:             uuid.New().String(),
 		Type:           "email",
 		Payload:        h.JSON(map[string]interface{}{"user_id": json.Number("123")}),
 		Queue:          base.DefaultQueueName,
@@ -392,7 +392,7 @@ func TestRequeueScheduled(t *testing.T) {
 		ServerAffinity: 1,
 	}
 	m2 := base.TaskMessage{
-		ID:             uuid.New(),
+		ID:             uuid.New().String(),
 		Type:           "email",
 		Payload:        h.JSON(map[string]interface{}{"user_id": json.Number("123")}),
 		Queue:          base.DefaultQueueName,
@@ -432,7 +432,7 @@ func TestRequeueScheduled(t *testing.T) {
 		err = r.Requeue(tc.serverID, tc.msg, false)
 		require.NoError(t, err)
 
-		task, err := r.conn.getTask(tc.msg.Queue, tc.msg.ID.String())
+		task, err := r.conn.getTask(tc.msg.Queue, tc.msg.ID)
 		require.NoError(t, err)
 
 		require.Equal(t, scheduled, task.state)
@@ -454,7 +454,7 @@ func TestDequeue(t *testing.T) {
 	defer utc.MockNow(now)()
 
 	t1 := &base.TaskMessage{
-		ID:       uuid.New(),
+		ID:       uuid.NewString(),
 		Type:     "send_email",
 		Payload:  h.JSON(map[string]interface{}{"subject": "hello!"}),
 		Queue:    "default",
@@ -463,7 +463,7 @@ func TestDequeue(t *testing.T) {
 	}
 	t1Deadline := now.Unix() + t1.Timeout
 	t2 := &base.TaskMessage{
-		ID:       uuid.New(),
+		ID:       uuid.NewString(),
 		Type:     "export_csv",
 		Payload:  nil,
 		Queue:    "critical",
@@ -472,7 +472,7 @@ func TestDequeue(t *testing.T) {
 	}
 	t2Deadline := t2.Deadline
 	t3 := &base.TaskMessage{
-		ID:       uuid.New(),
+		ID:       uuid.NewString(),
 		Type:     "reindex",
 		Payload:  nil,
 		Queue:    "low",
@@ -699,7 +699,7 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 	defer func() { _ = r.Close() }()
 
 	t1 := &base.TaskMessage{
-		ID:       uuid.New(),
+		ID:       uuid.NewString(),
 		Type:     "send_email",
 		Payload:  h.JSON(map[string]interface{}{"subject": "hello!"}),
 		Queue:    "default",
@@ -707,7 +707,7 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 		Deadline: 0,
 	}
 	t2 := &base.TaskMessage{
-		ID:       uuid.New(),
+		ID:       uuid.NewString(),
 		Type:     "export_csv",
 		Payload:  nil,
 		Queue:    "critical",
@@ -820,7 +820,7 @@ func TestDone(t *testing.T) {
 	defer utc.MockNow(now)()
 
 	t1 := &base.TaskMessage{
-		ID:       uuid.New(),
+		ID:       uuid.NewString(),
 		Type:     "send_email",
 		Payload:  nil,
 		Timeout:  1800,
@@ -828,7 +828,7 @@ func TestDone(t *testing.T) {
 		Queue:    "default",
 	}
 	t2 := &base.TaskMessage{
-		ID:       uuid.New(),
+		ID:       uuid.NewString(),
 		Type:     "export_csv",
 		Payload:  nil,
 		Timeout:  0,
@@ -836,7 +836,7 @@ func TestDone(t *testing.T) {
 		Queue:    "custom",
 	}
 	t3 := &base.TaskMessage{
-		ID:        uuid.New(),
+		ID:        uuid.NewString(),
 		Type:      "reindex",
 		Payload:   nil,
 		Timeout:   1800,
@@ -945,6 +945,7 @@ func TestDone(t *testing.T) {
 		require.NoError(t, err)
 		if len(gotProcessed) != 1 {
 			t.Errorf("%s; GET %q, want 1", tc.desc, len(gotProcessed))
+			continue
 		}
 
 		cleanupAt := gotProcessed[0].cleanupAt
@@ -969,21 +970,21 @@ func TestRequeue(t *testing.T) {
 	defer utc.MockNow(now)()
 
 	t1 := &base.TaskMessage{
-		ID:      uuid.New(),
+		ID:      uuid.NewString(),
 		Type:    "send_email",
 		Payload: nil,
 		Queue:   "default",
 		Timeout: 1800,
 	}
 	t2 := &base.TaskMessage{
-		ID:      uuid.New(),
+		ID:      uuid.NewString(),
 		Type:    "export_csv",
 		Payload: nil,
 		Queue:   "default",
 		Timeout: 3000,
 	}
 	t3 := &base.TaskMessage{
-		ID:      uuid.New(),
+		ID:      uuid.NewString(),
 		Type:    "send_email",
 		Payload: nil,
 		Queue:   "critical",
@@ -1139,7 +1140,7 @@ func TestSchedule(t *testing.T) {
 		msgs, err := r.conn.listTasks(tc.msg.Queue, scheduled)
 		require.NoError(t, err)
 		require.Equal(t, 1, len(msgs), "expects 1 element, got %d", len(msgs))
-		require.Equal(t, msgs[0].taskUuid, tc.msg.ID.String())
+		require.Equal(t, msgs[0].taskUuid, tc.msg.ID)
 		require.Equal(t, tc.processAt.Unix(), msgs[0].scheduledAt)
 
 		// Check the values under the task key.
@@ -1169,7 +1170,7 @@ func TestScheduleUnique(t *testing.T) {
 	defer func() { _ = r.Close() }()
 
 	m1 := base.TaskMessage{
-		ID:        uuid.New(),
+		ID:        uuid.NewString(),
 		Type:      "email",
 		Payload:   h.JSON(map[string]interface{}{"user_id": 123}),
 		Queue:     base.DefaultQueueName,
@@ -1199,7 +1200,7 @@ func TestScheduleUnique(t *testing.T) {
 		msgs, err := r.conn.listTasks(tc.msg.Queue, scheduled)
 		require.NoError(t, err)
 		require.Equal(t, 1, len(msgs), "expects 1 element, got %d", len(msgs))
-		require.Equal(t, msgs[0].taskUuid, tc.msg.ID.String())
+		require.Equal(t, msgs[0].taskUuid, tc.msg.ID)
 		require.Equal(t, tc.processAt.Unix(), msgs[0].scheduledAt)
 
 		// Check the values under the task key.
@@ -1242,6 +1243,46 @@ func TestScheduleUnique(t *testing.T) {
 	}
 }
 
+func TestScheduleUniqueTaskIdConflictError(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	m1 := base.TaskMessage{
+		ID:        "custom_id",
+		Type:      "foo",
+		Payload:   nil,
+		UniqueKey: "unique_key_one",
+	}
+	m2 := base.TaskMessage{
+		ID:        "custom_id",
+		Type:      "bar",
+		Payload:   nil,
+		UniqueKey: "unique_key_two",
+	}
+	const ttl = 30 * time.Second
+	processAt := time.Now().Add(30 * time.Second)
+
+	tests := []struct {
+		firstMsg  *base.TaskMessage
+		secondMsg *base.TaskMessage
+	}{
+		{firstMsg: &m1, secondMsg: &m2},
+	}
+
+	for _, tc := range tests {
+		FlushDB(t, r.conn) // clean up db before each test case.
+
+		if err := r.ScheduleUnique(tc.firstMsg, processAt, ttl); err != nil {
+			t.Errorf("First message: ScheduleUnique failed: %v", err)
+			continue
+		}
+		if err := r.ScheduleUnique(tc.secondMsg, processAt, ttl); !errors.Is(err, errors.ErrTaskIdConflict) {
+			t.Errorf("Second message: ScheduleUnique returned %v, want %v", err, errors.ErrTaskIdConflict)
+			continue
+		}
+	}
+}
+
 func TestRetry(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
@@ -1250,7 +1291,7 @@ func TestRetry(t *testing.T) {
 	defer utc.MockNow(now)()
 
 	t1 := &base.TaskMessage{
-		ID:      uuid.New(),
+		ID:      uuid.NewString(),
 		Type:    "send_email",
 		Payload: h.JSON(map[string]interface{}{"subject": "Hola!"}),
 		Retried: 10,
@@ -1258,21 +1299,21 @@ func TestRetry(t *testing.T) {
 		Queue:   "default",
 	}
 	t2 := &base.TaskMessage{
-		ID:      uuid.New(),
+		ID:      uuid.NewString(),
 		Type:    "gen_thumbnail",
 		Payload: h.JSON(map[string]interface{}{"path": "some/path/to/image.jpg"}),
 		Timeout: 3000,
 		Queue:   "default",
 	}
 	t3 := &base.TaskMessage{
-		ID:      uuid.New(),
+		ID:      uuid.NewString(),
 		Type:    "reindex",
 		Payload: nil,
 		Timeout: 60,
 		Queue:   "default",
 	}
 	t4 := &base.TaskMessage{
-		ID:      uuid.New(),
+		ID:      uuid.NewString(),
 		Type:    "send_notification",
 		Payload: nil,
 		Timeout: 1800,
@@ -1415,6 +1456,166 @@ func TestRetry(t *testing.T) {
 	}
 }
 
+func TestRetryWithNonFailureError(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+	now := time.Now()
+	t1 := &base.TaskMessage{
+		ID:      uuid.NewString(),
+		Type:    "send_email",
+		Payload: h.JSON(map[string]interface{}{"subject": "Hola!"}),
+		Retried: 10,
+		Timeout: 1800,
+		Queue:   "default",
+	}
+	t2 := &base.TaskMessage{
+		ID:      uuid.NewString(),
+		Type:    "gen_thumbnail",
+		Payload: h.JSON(map[string]interface{}{"path": "some/path/to/image.jpg"}),
+		Timeout: 3000,
+		Queue:   "default",
+	}
+	t3 := &base.TaskMessage{
+		ID:      uuid.NewString(),
+		Type:    "reindex",
+		Payload: nil,
+		Timeout: 60,
+		Queue:   "default",
+	}
+	t4 := &base.TaskMessage{
+		ID:      uuid.NewString(),
+		Type:    "send_notification",
+		Payload: nil,
+		Timeout: 1800,
+		Queue:   "custom",
+	}
+	t1Deadline := now.Unix() + t1.Timeout
+	t2Deadline := now.Unix() + t2.Timeout
+	t4Deadline := now.Unix() + t4.Timeout
+	errMsg := "SMTP server is not responding"
+
+	tests := []struct {
+		active        map[string][]*base.TaskMessage
+		deadlines     map[string][]base.Z
+		retry         map[string][]base.Z
+		msg           *base.TaskMessage
+		processAt     time.Time
+		errMsg        string
+		wantActive    map[string][]*base.TaskMessage
+		wantDeadlines map[string][]base.Z
+		getWantRetry  func(failedAt time.Time) map[string][]base.Z
+	}{
+		{
+			active: map[string][]*base.TaskMessage{
+				"default": {t1, t2},
+			},
+			deadlines: map[string][]base.Z{
+				"default": {{Message: t1, Score: t1Deadline}, {Message: t2, Score: t2Deadline}},
+			},
+			retry: map[string][]base.Z{
+				"default": {{Message: t3, Score: now.Add(time.Minute).Unix()}},
+			},
+			msg:       t1,
+			processAt: now.Add(5 * time.Minute),
+			errMsg:    errMsg,
+			wantActive: map[string][]*base.TaskMessage{
+				"default": {t2},
+			},
+			wantDeadlines: map[string][]base.Z{
+				"default": {{Message: t2, Score: t2Deadline}},
+			},
+			getWantRetry: func(failedAt time.Time) map[string][]base.Z {
+				return map[string][]base.Z{
+					"default": {
+						// Task message should include the error message but without incrementing the retry count.
+						{Message: h.TaskMessageWithError(*t1, errMsg, failedAt), Score: now.Add(5 * time.Minute).Unix()},
+						{Message: t3, Score: now.Add(time.Minute).Unix()},
+					},
+				}
+			},
+		},
+		{
+			active: map[string][]*base.TaskMessage{
+				"default": {t1, t2},
+				"custom":  {t4},
+			},
+			deadlines: map[string][]base.Z{
+				"default": {{Message: t1, Score: t1Deadline}, {Message: t2, Score: t2Deadline}},
+				"custom":  {{Message: t4, Score: t4Deadline}},
+			},
+			retry: map[string][]base.Z{
+				"default": {},
+				"custom":  {},
+			},
+			msg:       t4,
+			processAt: now.Add(5 * time.Minute),
+			errMsg:    errMsg,
+			wantActive: map[string][]*base.TaskMessage{
+				"default": {t1, t2},
+				"custom":  {},
+			},
+			wantDeadlines: map[string][]base.Z{
+				"default": {{Message: t1, Score: t1Deadline}, {Message: t2, Score: t2Deadline}},
+				"custom":  {},
+			},
+			getWantRetry: func(failedAt time.Time) map[string][]base.Z {
+				return map[string][]base.Z{
+					"default": {},
+					"custom": {
+						// Task message should include the error message but without incrementing the retry count.
+						{Message: h.TaskMessageWithError(*t4, errMsg, failedAt), Score: now.Add(5 * time.Minute).Unix()},
+					},
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		FlushDB(t, r.conn)
+		SeedAllActiveQueues(t, r, tc.active, true)
+		SeedAllDeadlines(t, r, tc.deadlines, 0)
+		SeedAllRetryQueues(t, r, tc.retry)
+
+		callTime := time.Now() // time when method was called
+		err := r.Retry(tc.msg, tc.processAt, tc.errMsg, false /*isFailure*/)
+		if err != nil {
+			t.Errorf("(*RDB).Retry = %v, want nil", err)
+			continue
+		}
+
+		for queue, want := range tc.wantActive {
+			gotActive := GetActiveMessages(t, r, queue)
+			if diff := cmp.Diff(want, gotActive, h.SortMsgOpt); diff != "" {
+				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.ActiveKey(queue), diff)
+			}
+		}
+		for queue, want := range tc.wantDeadlines {
+			gotDeadlines := GetDeadlinesEntries(t, r, queue)
+			if diff := cmp.Diff(want, gotDeadlines, h.SortZSetEntryOpt); diff != "" {
+				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.DeadlinesKey(queue), diff)
+			}
+		}
+		cmpOpts := []cmp.Option{
+			h.SortZSetEntryOpt,
+			cmpopts.EquateApproxTime(5 * time.Second), // for LastFailedAt field
+		}
+		wantRetry := tc.getWantRetry(callTime)
+		for queue, want := range wantRetry {
+			gotRetry := GetRetryEntries(t, r, queue)
+			if diff := cmp.Diff(want, gotRetry, cmpOpts...); diff != "" {
+				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.RetryKey(queue), diff)
+			}
+		}
+
+		// If isFailure is set to false, no stats should be recorded to avoid skewing the error rate.
+		gotProcessed := GetProcessedMessages(t, r, tc.msg.Queue)
+		if len(gotProcessed) != 0 {
+			t.Errorf("GET 'processed' in queue %s = %d, want empty",
+				tc.msg.Queue, len(gotProcessed))
+		}
+	}
+}
+
 func TestArchive(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
@@ -1423,7 +1624,7 @@ func TestArchive(t *testing.T) {
 	defer utc.MockNow(now)()
 
 	t1 := &base.TaskMessage{
-		ID:      uuid.New(),
+		ID:      uuid.NewString(),
 		Type:    "send_email",
 		Payload: nil,
 		Queue:   "default",
@@ -1433,7 +1634,7 @@ func TestArchive(t *testing.T) {
 	}
 	t1Deadline := now.Unix() + t1.Timeout
 	t2 := &base.TaskMessage{
-		ID:      uuid.New(),
+		ID:      uuid.NewString(),
 		Type:    "reindex",
 		Payload: nil,
 		Queue:   "default",
@@ -1443,7 +1644,7 @@ func TestArchive(t *testing.T) {
 	}
 	t2Deadline := now.Unix() + t2.Timeout
 	t3 := &base.TaskMessage{
-		ID:      uuid.New(),
+		ID:      uuid.NewString(),
 		Type:    "generate_csv",
 		Payload: nil,
 		Queue:   "default",
@@ -1453,7 +1654,7 @@ func TestArchive(t *testing.T) {
 	}
 	t3Deadline := now.Unix() + t3.Timeout
 	t4 := &base.TaskMessage{
-		ID:      uuid.New(),
+		ID:      uuid.NewString(),
 		Type:    "send_email",
 		Payload: nil,
 		Queue:   "custom",
@@ -1775,6 +1976,99 @@ func TestForwardIfReady(t *testing.T) {
 	}
 }
 
+func newCompletedTask(qname, typename string, payload []byte, completedAt utc.UTC) *base.TaskMessage {
+	msg := h.NewTaskMessageWithQueue(typename, payload, qname)
+	msg.CompletedAt = completedAt.Unix()
+	return msg
+}
+
+func TestDeleteExpiredCompletedTasks(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	now := utc.Unix(1674591000, 0)
+	defer utc.MockNow(now)()
+
+	secondAgo := now.Add(-time.Second)
+	hourFromNow := now.Add(time.Hour)
+	hourAgo := now.Add(-time.Hour)
+	minuteAgo := now.Add(-time.Minute)
+
+	t1 := newCompletedTask("default", "task1", nil, hourAgo)
+	t2 := newCompletedTask("default", "task2", nil, minuteAgo)
+	t3 := newCompletedTask("default", "task3", nil, secondAgo)
+	t4 := newCompletedTask("critical", "critical_task", nil, hourAgo)
+	t5 := newCompletedTask("low", "low_priority_task", nil, hourAgo)
+
+	tests := []struct {
+		desc          string
+		completed     map[string][]base.Z
+		qname         string
+		wantCompleted map[string][]base.Z
+	}{
+		{
+			desc: "deletes expired task from default queue",
+			completed: map[string][]base.Z{
+				"default": {
+					{Message: t1, Score: secondAgo.Unix()},
+					{Message: t2, Score: hourFromNow.Unix()},
+					{Message: t3, Score: now.Unix()},
+				},
+			},
+			qname: "default",
+			wantCompleted: map[string][]base.Z{
+				"default": {
+					{Message: t2, Score: hourFromNow.Unix()},
+					// the rdb test does not have t3 because we use utc.Mock
+					// and time stopped flowing
+					{Message: t3, Score: now.Unix()},
+				},
+			},
+		},
+		{
+			desc: "deletes expired task from specified queue",
+			completed: map[string][]base.Z{
+				"default": {
+					{Message: t2, Score: secondAgo.Unix()},
+				},
+				"critical": {
+					{Message: t4, Score: secondAgo.Unix()},
+				},
+				"low": {
+					{Message: t5, Score: now.Unix()},
+				},
+			},
+			qname: "critical",
+			wantCompleted: map[string][]base.Z{
+				"default": {
+					{Message: t2, Score: secondAgo.Unix()},
+				},
+				"critical": {},
+				"low": {
+					{Message: t5, Score: now.Unix()},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		FlushDB(t, r.conn)
+		SeedAllCompletedQueues(t, r, tc.completed)
+
+		if err := r.DeleteExpiredCompletedTasks(tc.qname); err != nil {
+			t.Errorf("DeleteExpiredCompletedTasks(%q) failed: %v", tc.qname, err)
+			continue
+		}
+
+		for qname, want := range tc.wantCompleted {
+			got := GetCompletedEntries(t, r, qname)
+			if diff := cmp.Diff(want, got, h.SortZSetEntryOpt); diff != "" {
+				t.Errorf("%s: diff found in %q completed set: want=%v, got=%v\n%s", tc.desc, qname, want, got, diff)
+			}
+		}
+	}
+}
+
 func TestListDeadlineExceeded(t *testing.T) {
 	t1 := h.NewTaskMessageWithQueue("task1", nil, "default")
 	t2 := h.NewTaskMessageWithQueue("task2", nil, "default")
@@ -1939,7 +2233,7 @@ func TestWriteServerStateWithWorkers(t *testing.T) {
 		{
 			Host:    host,
 			PID:     pid,
-			ID:      msg1.ID.String(),
+			ID:      msg1.ID,
 			Type:    msg1.Type,
 			Queue:   msg1.Queue,
 			Payload: msg1.Payload,
@@ -1948,7 +2242,7 @@ func TestWriteServerStateWithWorkers(t *testing.T) {
 		{
 			Host:    host,
 			PID:     pid,
-			ID:      msg2.ID.String(),
+			ID:      msg2.ID,
 			Type:    msg2.Type,
 			Queue:   msg2.Queue,
 			Payload: msg2.Payload,
@@ -2028,7 +2322,7 @@ func TestClearServerState(t *testing.T) {
 		{
 			Host:    host,
 			PID:     pid,
-			ID:      msg1.ID.String(),
+			ID:      msg1.ID,
 			Type:    msg1.Type,
 			Queue:   msg1.Queue,
 			Payload: msg1.Payload,
@@ -2051,7 +2345,7 @@ func TestClearServerState(t *testing.T) {
 		{
 			Host:    otherHost,
 			PID:     otherPID,
-			ID:      msg2.ID.String(),
+			ID:      msg2.ID,
 			Type:    msg2.Type,
 			Queue:   msg2.Queue,
 			Payload: msg2.Payload,
@@ -2152,4 +2446,52 @@ func TestCancelationPubSub(t *testing.T) {
 		t.Errorf("subscriber received %v, want %v; (-want,+got)\n%s", received, publish, diff)
 	}
 	mu.Unlock()
+}
+
+func TestWriteResult(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	tests := []struct {
+		qname  string
+		taskID string
+		data   []byte
+	}{
+		{
+			qname:  "default",
+			taskID: uuid.NewString(),
+			data:   []byte("hello"),
+		},
+	}
+
+	for _, tc := range tests {
+		FlushDB(t, r.conn)
+		SeedActiveQueue(t, r, []*base.TaskMessage{
+			{
+				Type:  "x",
+				ID:    tc.taskID,
+				Queue: tc.qname,
+			},
+		}, tc.qname, true)
+
+		n, err := r.WriteResult(tc.qname, tc.taskID, tc.data)
+		if err != nil {
+			t.Errorf("WriteResult failed: %v", err)
+			continue
+		}
+		if n != len(tc.data) {
+			t.Errorf("WriteResult returned %d, want %d", n, len(tc.data))
+		}
+
+		ti, err := r.GetTaskInfo(tc.qname, tc.taskID)
+		if err != nil {
+			t.Errorf("GetTaskInfo failed: %v", err)
+			continue
+		}
+
+		if string(ti.Result) != string(tc.data) {
+			t.Errorf("`result` field under queue %s, taks %s is set to %q, want %q",
+				tc.qname, tc.taskID, string(ti.Result), string(tc.data))
+		}
+	}
 }

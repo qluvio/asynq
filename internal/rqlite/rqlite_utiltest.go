@@ -15,6 +15,18 @@ func GetPendingMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMess
 	return getMessages(tb, r, queue, pending)
 }
 
+func GetProcessedMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMessage {
+	return getMessages(tb, r, queue, processed)
+}
+
+func GetCompletedEntries(tb testing.TB, r *RQLite, qname string) []base.Z {
+	require.NotNil(tb, r.conn)
+	rows, err := r.conn.listTasks(qname, completed)
+	require.NoError(tb, err)
+
+	return scoredEntries(rows, func(r *taskRow) int64 { return r.retainUntil })
+}
+
 func GetActiveMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMessage {
 	return getMessages(tb, r, queue, active)
 }
@@ -29,6 +41,10 @@ func GetArchivedMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMes
 
 func GetScheduledMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMessage {
 	return getMessages(tb, r, queue, scheduled)
+}
+
+func GetCompletedMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMessage {
+	return getMessages(tb, r, queue, completed)
 }
 
 func getMessages(tb testing.TB, r *RQLite, queue string, state string) []*base.TaskMessage {
@@ -77,7 +93,7 @@ func GetDeadlinesEntries(tb testing.TB, r *RQLite, queue string) []base.Z {
 	}
 
 	sort.Slice(ret, func(i, j int) bool {
-		return ret[i].Message.ID.String() < ret[j].Message.ID.String()
+		return ret[i].Message.ID < ret[j].Message.ID
 	})
 
 	return ret
@@ -87,7 +103,7 @@ func GetDeadlinesEntries(tb testing.TB, r *RQLite, queue string) []base.Z {
 var SortDeadlineEntryOpt = cmp.Transformer("SortDeadlineEntryOpt", func(in []base.Z) []base.Z {
 	out := append([]base.Z(nil), in...) // Copy input to avoid mutating it
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].Message.ID.String() < out[j].Message.ID.String()
+		return out[i].Message.ID < out[j].Message.ID
 	})
 	return out
 })
@@ -137,7 +153,7 @@ func GetUniqueKeyTTL(tb testing.TB, r *RQLite, queue string, taskType string, ta
 	uniqueKey := base.UniqueKey(queue, taskType, taskPayload)
 
 	st := Statement(
-		"SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, sid, affinity_timeout, recurrent "+
+		"SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, retain_until, sid, affinity_timeout, recurrent, result "+
 			" FROM "+r.conn.table(TasksTable)+
 			" WHERE queue_name=? "+
 			" AND unique_key=?",

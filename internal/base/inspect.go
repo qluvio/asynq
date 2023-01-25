@@ -2,8 +2,6 @@ package base
 
 import (
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // Inspector groups function required for inspection
@@ -27,20 +25,21 @@ type Inspector interface {
 	HistoricalStats(qname string, n int) ([]*DailyStats, error)
 
 	// GetTaskInfo returns a TaskInfo describing the task from the given queue.
-	GetTaskInfo(qname string, taskid uuid.UUID) (*TaskInfo, error)
+	GetTaskInfo(qname string, taskid string) (*TaskInfo, error)
 	// ListPending returns pending tasks that are ready to be processed.
-	ListPending(qname string, pgn Pagination) ([]*TaskMessage, error)
+	ListPending(qname string, pgn Pagination) ([]*TaskInfo, error)
 	// ListActive returns all tasks that are currently being processed for the given queue.
-	ListActive(qname string, pgn Pagination) ([]*TaskMessage, error)
+	ListActive(qname string, pgn Pagination) ([]*TaskInfo, error)
 	// ListScheduled returns all tasks from the given queue that are scheduled
 	// to be processed in the future.
-	ListScheduled(qname string, pgn Pagination) ([]Z, error)
+	ListScheduled(qname string, pgn Pagination) ([]*TaskInfo, error)
 	// ListRetry returns all tasks from the given queue that have failed before
 	// and will be retried in the future.
-	ListRetry(qname string, pgn Pagination) ([]Z, error)
+	ListRetry(qname string, pgn Pagination) ([]*TaskInfo, error)
 	// ListArchived returns all tasks from the given queue that have exhausted its retry limit.
-	ListArchived(qname string, pgn Pagination) ([]Z, error)
-
+	ListArchived(qname string, pgn Pagination) ([]*TaskInfo, error)
+	// ListCompleted returns all tasks from the given queue that have completed successfully.
+	ListCompleted(qname string, pgn Pagination) ([]*TaskInfo, error)
 	// DeleteAllPendingTasks deletes all pending tasks from the given queue
 	// and returns the number of tasks deleted.
 	DeleteAllPendingTasks(qname string) (int64, error)
@@ -53,6 +52,9 @@ type Inspector interface {
 	// DeleteAllArchivedTasks deletes all archived tasks from the given queue
 	// and returns the number of tasks deleted.
 	DeleteAllArchivedTasks(qname string) (int64, error)
+	// DeleteAllCompletedTasks deletes all completed tasks from the given queue
+	// and returns the number of tasks deleted.
+	DeleteAllCompletedTasks(qname string) (int64, error)
 
 	// DeleteTask finds a task that matches the id from the given queue and deletes it.
 	// It returns nil if it successfully archived the task.
@@ -60,7 +62,7 @@ type Inspector interface {
 	// If a queue with the given name doesn't exist, it returns QueueNotFoundError.
 	// If a task with the given id doesn't exist in the queue, it returns TaskNotFoundError
 	// If a task is in active state it returns non-nil error with Code FailedPrecondition.
-	DeleteTask(qname string, taskid uuid.UUID) error
+	DeleteTask(qname string, taskid string) error
 
 	// RunAllScheduledTasks enqueues all scheduled tasks from the given queue
 	// and returns the number of tasks enqueued.
@@ -80,7 +82,7 @@ type Inspector interface {
 	// If a queue with the given name doesn't exist, it returns QueueNotFoundError.
 	// If a task with the given id doesn't exist in the queue, it returns TaskNotFoundError
 	// If a task is in active or pending state it returns non-nil error with Code FailedPrecondition.
-	RunTask(qname string, taskid uuid.UUID) error
+	RunTask(qname string, taskid string) error
 
 	// ArchiveAllPendingTasks archives all pending tasks from the given queue and
 	// returns the number of tasks moved.
@@ -101,7 +103,7 @@ type Inspector interface {
 	// If a task with the given id doesn't exist in the queue, it returns TaskNotFoundError
 	// If a task is already archived, it returns TaskAlreadyArchivedError.
 	// If a task is in active state it returns non-nil error with FailedPrecondition code.
-	ArchiveTask(qname string, taskid uuid.UUID) error
+	ArchiveTask(qname string, taskid string) error
 
 	// Pause pauses processing of tasks from the given queue.
 	Pause(qname string) error
@@ -161,6 +163,7 @@ type Stats struct {
 	Scheduled int
 	Retry     int
 	Archived  int
+	Completed int
 	// Total number of tasks processed during the current date.
 	// The number includes both succeeded and failed tasks.
 	Processed int

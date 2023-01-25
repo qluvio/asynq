@@ -6,6 +6,7 @@ import (
 
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/hibiken/asynq/internal/utc"
 	"github.com/rqlite/gorqlite"
 	"github.com/stretchr/testify/require"
 )
@@ -30,6 +31,52 @@ func SeedPendingQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname 
 	}
 }
 
+func SeedAllCompletedQueues(tb testing.TB, r *RQLite, completed map[string][]base.Z) {
+	for q, msgs := range completed {
+		SeedCompletedQueue(tb, r, msgs, q)
+	}
+}
+
+func SeedCompletedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
+	err := r.conn.EnsureQueue(qname)
+	require.NoError(tb, err)
+
+	now := utc.Now()
+	state := completed
+
+	for _, mz := range msgs {
+		msg := mz.Message
+		retainUntil := mz.Score
+		require.Equal(tb, qname, msg.Queue)
+
+		if msg.CompletedAt == 0 {
+			msg.CompletedAt = now.Unix()
+		}
+		expireAt := msg.CompletedAt + int64(statsTTL)
+		encoded, err := encodeMessage(msg)
+		require.NoError(tb, err)
+
+		SeedPendingQueue(tb, r, []*base.TaskMessage{msg}, qname)
+		//SeedActiveQueue(tb, r, []*base.TaskMessage{msg.Message}, qname, true)
+		//err = r.MarkAsComplete("", msg)
+
+		// tests insist on passing completed_at in the message + score in the Z
+		st := Statement(
+			"UPDATE "+r.conn.table(TasksTable)+" SET state=?, task_msg=?, deadline=NULL, done_at=?, cleanup_at=?, retain_until=? "+
+				"WHERE task_uuid=?",
+			state,
+			encoded,
+			msg.CompletedAt,
+			expireAt,
+			retainUntil,
+			msg.ID)
+		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
+		require.NoError(tb, err, "error %v", wrs[0].Err)
+
+		require.NoError(tb, err)
+	}
+}
+
 func SeedAllDeadlines(tb testing.TB, r *RQLite, deadlines map[string][]base.Z, uniqueKeyTTL time.Duration) {
 	for q, msgs := range deadlines {
 		seedDeadlines(tb, r, msgs, q, uniqueKeyTTL)
@@ -44,7 +91,7 @@ func seedDeadlines(tb testing.TB, r *RQLite, deadlines []base.Z, qname string, u
 
 		count, err := r.conn.getTaskCount(
 			qname,
-			"task_uuid", msg.Message.ID.String())
+			"task_uuid", msg.Message.ID)
 		require.NoError(tb, err)
 
 		if count == 0 {
@@ -60,7 +107,7 @@ func seedDeadlines(tb testing.TB, r *RQLite, deadlines []base.Z, qname string, u
 		st := Statement(
 			"UPDATE "+r.conn.table(TasksTable)+" SET deadline=? WHERE task_uuid=?",
 			deadline,
-			msg.Message.ID.String())
+			msg.Message.ID)
 		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 	}
@@ -97,7 +144,7 @@ func SeedActiveQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname s
 
 		st := Statement(
 			"UPDATE "+r.conn.table(TasksTable)+" SET state='active' WHERE task_uuid=?",
-			msg.ID.String())
+			msg.ID)
 		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.Equal(tb, int64(1), wrs[0].RowsAffected)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
@@ -133,7 +180,7 @@ func SeedRetryQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 		st := Statement(
 			"UPDATE "+r.conn.table(TasksTable)+" SET state='retry', retry_at=? WHERE task_uuid=?",
 			retryAt,
-			msg.Message.ID.String())
+			msg.Message.ID)
 		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 	}
@@ -168,7 +215,7 @@ func SeedArchivedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 		st := Statement(
 			"UPDATE "+r.conn.table(TasksTable)+" SET state='archived', archived_at=? WHERE task_uuid=?",
 			deadline,
-			msg.Message.ID.String())
+			msg.Message.ID)
 		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 
@@ -234,8 +281,8 @@ func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneA
 					"VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+r.conn.table(TasksTable)+")+1, ?, ?)",
 				qname,
 				task.Type,
-				task.ID.String(),
-				task.ID.String(),
+				task.ID,
+				task.ID,
 				em,
 				0,
 				0,
@@ -247,8 +294,8 @@ func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneA
 					"VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+r.conn.table(TasksTable)+")+1, ?, ?, ?)",
 				qname,
 				task.Type,
-				task.ID.String(),
-				task.ID.String(),
+				task.ID,
+				task.ID,
 				em,
 				0,
 				0,
