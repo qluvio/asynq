@@ -763,7 +763,7 @@ func TestClientEnqueueError(t *testing.T) {
 	}
 }
 
-func TestClientDefaultOptions(t *testing.T) {
+func TestClientWithDefaultOptions(t *testing.T) {
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
 
