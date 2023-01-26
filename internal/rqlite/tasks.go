@@ -832,16 +832,6 @@ func (conn *Connection) deleteExpiredCompletedTasks(qname string) error {
 		qname,
 		state,
 		now.Unix())
-	// or move to 'archived' ?
-	//stmt := Statement(
-	//	"UPDATE "+conn.table(TasksTable)+" SET state='archived', "+
-	//		" archived_at=?, cleanup_at=?, unique_key_deadline=NULL "+
-	//		" WHERE queue_name=? AND state=? AND retain_until<?",
-	//	now.Unix(),
-	//	now.Add(statsTTL).Unix(), //expireAt
-	//	qname,
-	//	state,
-	//	now.Unix())
 	wrs, err := conn.WriteStmt(conn.ctx(), stmt)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, []*gorqlite.Statement{stmt})

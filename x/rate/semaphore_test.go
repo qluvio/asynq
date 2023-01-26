@@ -403,6 +403,14 @@ func getRedisConnOpt(tb testing.TB) asynq.RedisConnOpt {
 type badConnOpt struct {
 }
 
+func (b badConnOpt) Logger() asynq.Logger {
+	return nil
+}
+
+func (b badConnOpt) MakeClient() interface{} {
+	return nil
+}
+
 func (b badConnOpt) MakeRedisClient() interface{} {
 	return nil
 }

@@ -1031,7 +1031,6 @@ func createCompletedTask(z base.Z) *TaskInfo {
 }
 
 func TestInspectorListCompletedTasks(t *testing.T) {
-	brokerType = "rqlite"
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
 	now := utc.Now()
