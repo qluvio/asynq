@@ -91,11 +91,11 @@ type RQLite struct {
 }
 
 // NewRQLite returns a new instance of RQLite.
-// * config must be a valid Config
-// * client is an optional http.Client. If nil a new client will be used for
-//   each request made to the rqlite cluster.
-// * logger is an optional logger. If nil a default logger printing to stderr
-//   will be created.
+//   - config must be a valid Config
+//   - client is an optional http.Client. If nil a new client will be used for
+//     each request made to the rqlite cluster.
+//   - logger is an optional logger. If nil a default logger printing to stderr
+//     will be created.
 func NewRQLite(config *Config, client *http.Client, logger log.Base) *RQLite {
 	if logger == nil {
 		logger = log.NewLogger(nil)
@@ -378,6 +378,30 @@ func (r *RQLite) Archive(msg *base.TaskMessage, errMsg string) error {
 		return err
 	}
 	return conn.archiveTask(msg, errMsg)
+}
+
+func (r *RQLite) MarkAsComplete(serverID string, msg *base.TaskMessage) error {
+	conn, err := r.client("rqlite.Complete")
+	if err != nil {
+		return err
+	}
+	return conn.setTaskCompleted(serverID, msg)
+}
+
+func (r *RQLite) DeleteExpiredCompletedTasks(qname string) error {
+	conn, err := r.client("rqlite.DeleteExpiredCompletedTasks")
+	if err != nil {
+		return err
+	}
+	return conn.deleteExpiredCompletedTasks(qname)
+}
+
+func (r *RQLite) WriteResult(qname, id string, data []byte) (int, error) {
+	conn, err := r.client("rqlite.WriteResult")
+	if err != nil {
+		return 0, err
+	}
+	return conn.writeTaskResult(qname, id, data, true)
 }
 
 // ForwardIfReady checks scheduled and retry sets of the given queues

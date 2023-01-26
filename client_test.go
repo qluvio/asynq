@@ -423,6 +423,40 @@ func TestClientEnqueue(t *testing.T) {
 				},
 			},
 		},
+		{
+			desc: "With Retention option",
+			task: task,
+			opts: []Option{
+				Retention(24 * time.Hour),
+			},
+			wantInfo: &TaskInfo{
+				Queue:         "default",
+				Type:          task.Type(),
+				Payload:       task.Payload(),
+				State:         TaskStatePending,
+				MaxRetry:      defaultMaxRetry,
+				Retried:       0,
+				LastErr:       "",
+				LastFailedAt:  time.Time{},
+				Timeout:       defaultTimeout,
+				Deadline:      time.Time{},
+				NextProcessAt: now,
+				Retention:     24 * time.Hour,
+			},
+			wantPending: map[string][]*base.TaskMessage{
+				"default": {
+					{
+						Type:      task.Type(),
+						Payload:   task.Payload(),
+						Retry:     defaultMaxRetry,
+						Queue:     "default",
+						Timeout:   int64(defaultTimeout.Seconds()),
+						Deadline:  noDeadline.Unix(),
+						Retention: int64((24 * time.Hour).Seconds()),
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -449,6 +483,104 @@ func TestClientEnqueue(t *testing.T) {
 				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.PendingKey(qname), diff)
 			}
 		}
+	}
+}
+
+func TestClientEnqueueWithTaskIDOption(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	task := NewTask("send_email", nil)
+	now := time.Now()
+
+	tests := []struct {
+		desc        string
+		task        *Task
+		opts        []Option
+		wantInfo    *TaskInfo
+		wantPending map[string][]*base.TaskMessage
+	}{
+		{
+			desc: "With a valid TaskID option",
+			task: task,
+			opts: []Option{
+				TaskID("custom_id"),
+			},
+			wantInfo: &TaskInfo{
+				ID:            "custom_id",
+				Queue:         "default",
+				Type:          task.Type(),
+				Payload:       task.Payload(),
+				State:         TaskStatePending,
+				MaxRetry:      defaultMaxRetry,
+				Retried:       0,
+				LastErr:       "",
+				LastFailedAt:  time.Time{},
+				Timeout:       defaultTimeout,
+				Deadline:      time.Time{},
+				NextProcessAt: now,
+			},
+			wantPending: map[string][]*base.TaskMessage{
+				"default": {
+					{
+						ID:       "custom_id",
+						Type:     task.Type(),
+						Payload:  task.Payload(),
+						Retry:    defaultMaxRetry,
+						Queue:    "default",
+						Timeout:  int64(defaultTimeout.Seconds()),
+						Deadline: noDeadline.Unix(),
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		ctx.FlushDB() // clean up db before each test case.
+
+		gotInfo, err := client.Enqueue(tc.task, tc.opts...)
+		if err != nil {
+			t.Errorf("got non-nil error %v, want nil", err)
+			continue
+		}
+
+		cmpOptions := []cmp.Option{
+			cmpopts.EquateApproxTime(500 * time.Millisecond),
+		}
+		if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
+			t.Errorf("%s;\nEnqueue(task) returned %v, want %v; (-want,+got)\n%s",
+				tc.desc, gotInfo, tc.wantInfo, diff)
+		}
+
+		for qname, want := range tc.wantPending {
+			got := ctx.GetPendingMessages(qname)
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("%s;\nmismatch found in %q; (-want,+got)\n%s", tc.desc, base.PendingKey(qname), diff)
+			}
+		}
+	}
+}
+
+func TestClientEnqueueWithConflictingTaskID(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	const taskID = "custom_id"
+	task := NewTask("foo", nil)
+
+	if _, err := client.Enqueue(task, TaskID(taskID)); err != nil {
+		t.Fatalf("First task: Enqueue failed: %v", err)
+	}
+	_, err := client.Enqueue(task, TaskID(taskID))
+	if !errors.Is(err, ErrTaskIDConflict) {
+		t.Errorf("Second task: Enqueue returned %v, want %v", err, ErrTaskIDConflict)
 	}
 }
 
@@ -609,6 +741,16 @@ func TestClientEnqueueError(t *testing.T) {
 			task: NewTask("    ", h.JSON(map[string]interface{}{})),
 			opts: []Option{},
 		},
+		{
+			desc: "With empty task ID",
+			task: NewTask("foo", nil),
+			opts: []Option{TaskID("")},
+		},
+		{
+			desc: "With blank task ID",
+			task: NewTask("foo", nil),
+			opts: []Option{TaskID("  ")},
+		},
 	}
 
 	for _, tc := range tests {
@@ -621,7 +763,7 @@ func TestClientEnqueueError(t *testing.T) {
 	}
 }
 
-func TestClientDefaultOptions(t *testing.T) {
+func TestClientWithDefaultOptions(t *testing.T) {
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
 
@@ -630,9 +772,10 @@ func TestClientDefaultOptions(t *testing.T) {
 
 	tests := []struct {
 		desc        string
-		defaultOpts []Option // options set at the client level.
+		defaultOpts []Option // options set at task initialization time
 		opts        []Option // options used at enqueue time.
-		task        *Task
+		tasktype    string
+		payload     []byte
 		wantInfo    *TaskInfo
 		queue       string // queue that the message should go into.
 		want        *base.TaskMessage
@@ -641,7 +784,8 @@ func TestClientDefaultOptions(t *testing.T) {
 			desc:        "With queue routing option",
 			defaultOpts: []Option{Queue("feed")},
 			opts:        []Option{},
-			task:        NewTask("feed:import", nil),
+			tasktype:    "feed:import",
+			payload:     nil,
 			wantInfo: &TaskInfo{
 				Queue:         "feed",
 				Type:          "feed:import",
@@ -669,7 +813,8 @@ func TestClientDefaultOptions(t *testing.T) {
 			desc:        "With multiple options",
 			defaultOpts: []Option{Queue("feed"), MaxRetry(5)},
 			opts:        []Option{},
-			task:        NewTask("feed:import", nil),
+			tasktype:    "feed:import",
+			payload:     nil,
 			wantInfo: &TaskInfo{
 				Queue:         "feed",
 				Type:          "feed:import",
@@ -697,7 +842,8 @@ func TestClientDefaultOptions(t *testing.T) {
 			desc:        "With overriding options at enqueue time",
 			defaultOpts: []Option{Queue("feed"), MaxRetry(5)},
 			opts:        []Option{Queue("critical")},
-			task:        NewTask("feed:import", nil),
+			tasktype:    "feed:import",
+			payload:     nil,
 			wantInfo: &TaskInfo{
 				Queue:         "critical",
 				Type:          "feed:import",
@@ -729,8 +875,10 @@ func TestClientDefaultOptions(t *testing.T) {
 			client := NewClient(getClientConnOpt(t))
 			defer func() { _ = client.Close() }()
 
-			client.SetDefaultOptions(tc.task.Type(), tc.defaultOpts...)
-			gotInfo, err := client.Enqueue(tc.task, tc.opts...)
+			task := NewTask(tc.tasktype, tc.payload, tc.defaultOpts...)
+			gotInfo, err := client.Enqueue(task, tc.opts...)
+			//client.SetDefaultOptions(tc.task.Type(), tc.defaultOpts...)
+			//gotInfo, err := client.Enqueue(tc.task, tc.opts...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -754,6 +902,35 @@ func TestClientDefaultOptions(t *testing.T) {
 					tc.desc, diff)
 			}
 		})
+		/* =======
+				h.FlushDB(t, r)
+				c := NewClient(getRedisConnOpt(t))
+				defer c.Close()
+				task := NewTask(tc.tasktype, tc.payload, tc.defaultOpts...)
+				gotInfo, err := c.Enqueue(task, tc.opts...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cmpOptions := []cmp.Option{
+					cmpopts.IgnoreFields(TaskInfo{}, "ID"),
+					cmpopts.EquateApproxTime(500 * time.Millisecond),
+				}
+				if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
+					t.Errorf("%s;\nEnqueue(task, opts...) returned %v, want %v; (-want,+got)\n%s",
+						tc.desc, gotInfo, tc.wantInfo, diff)
+				}
+				pending := h.GetPendingMessages(t, r, tc.queue)
+				if len(pending) != 1 {
+					t.Errorf("%s;\nexpected queue %q to have one message; got %d messages in the queue.",
+						tc.desc, tc.queue, len(pending))
+					continue
+				}
+				got := pending[0]
+				if diff := cmp.Diff(tc.want, got, h.IgnoreIDOpt); diff != "" {
+					t.Errorf("%s;\nmismatch found in pending task message; (-want,+got)\n%s",
+						tc.desc, diff)
+				}
+		    >>>>>>> v0_19_0 */
 	}
 }
 

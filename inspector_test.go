@@ -282,6 +282,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 		scheduled  map[string][]base.Z
 		retry      map[string][]base.Z
 		archived   map[string][]base.Z
+		completed  map[string][]base.Z
 		processed  map[string]int
 		failed     map[string]int
 		qname      string
@@ -317,6 +318,11 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				"critical": {},
 				"low":      {},
 			},
+			completed: map[string][]base.Z{
+				"default":  {},
+				"critical": {},
+				"low":      {},
+			},
 			processed: map[string]int{
 				"default":  120,
 				"critical": 100,
@@ -336,6 +342,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				Scheduled: 2,
 				Retry:     0,
 				Archived:  0,
+				Completed: 0,
 				Processed: 120,
 				Failed:    2,
 				Paused:    false,
@@ -366,6 +373,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 		ctx.SeedAllRetryQueues(tc.retry)
 		ctx.SeedAllArchivedQueues(tc.archived)
 
+		ctx.SeedAllCompletedQueues(tc.completed)
 		ctx.SeedAllProcessedQueues(tc.processed, now)
 		ctx.SeedAllFailedQueues(tc.failed, now)
 
@@ -462,7 +470,7 @@ func TestInspectorHistory(t *testing.T) {
 }
 
 func createPendingTask(msg *base.TaskMessage) *TaskInfo {
-	return newTaskInfo(msg, base.TaskStatePending, time.Now())
+	return newTaskInfo(msg, base.TaskStatePending, time.Now(), nil)
 }
 
 func TestInspectorGetTaskInfo(t *testing.T) {
@@ -522,47 +530,52 @@ func TestInspectorGetTaskInfo(t *testing.T) {
 	}{
 		{
 			qname: "default",
-			id:    m1.ID.String(),
+			id:    m1.ID,
 			want: newTaskInfo(
 				m1,
 				base.TaskStateActive,
 				time.Time{}, // zero value for n/a
+				nil,
 			),
 		},
 		{
 			qname: "default",
-			id:    m2.ID.String(),
+			id:    m2.ID,
 			want: newTaskInfo(
 				m2,
 				base.TaskStateScheduled,
 				fiveMinsFromNow,
+				nil,
 			),
 		},
 		{
 			qname: "custom",
-			id:    m3.ID.String(),
+			id:    m3.ID,
 			want: newTaskInfo(
 				m3,
 				base.TaskStateRetry,
 				oneHourFromNow,
+				nil,
 			),
 		},
 		{
 			qname: "custom",
-			id:    m4.ID.String(),
+			id:    m4.ID,
 			want: newTaskInfo(
 				m4,
 				base.TaskStateArchived,
 				time.Time{}, // zero value for n/a
+				nil,
 			),
 		},
 		{
 			qname: "custom",
-			id:    m5.ID.String(),
+			id:    m5.ID,
 			want: newTaskInfo(
 				m5,
 				base.TaskStatePending,
 				now,
+				nil,
 			),
 		},
 	}
@@ -643,7 +656,7 @@ func TestInspectorGetTaskInfoError(t *testing.T) {
 	}{
 		{
 			qname:   "nonexistent",
-			id:      m1.ID.String(),
+			id:      m1.ID,
 			wantErr: ErrQueueNotFound,
 		},
 		{
@@ -765,8 +778,8 @@ func TestInspectorListActiveTasks(t *testing.T) {
 			},
 			qname: "default",
 			want: []*TaskInfo{
-				newTaskInfo(m1, base.TaskStateActive, time.Time{}),
-				newTaskInfo(m2, base.TaskStateActive, time.Time{}),
+				newTaskInfo(m1, base.TaskStateActive, time.Time{}, nil),
+				newTaskInfo(m2, base.TaskStateActive, time.Time{}, nil),
 			},
 		},
 	}
@@ -792,6 +805,7 @@ func createScheduledTask(z base.Z) *TaskInfo {
 		z.Message,
 		base.TaskStateScheduled,
 		time.Unix(z.Score, 0),
+		nil,
 	)
 }
 
@@ -862,6 +876,7 @@ func createRetryTask(z base.Z) *TaskInfo {
 		z.Message,
 		base.TaskStateRetry,
 		time.Unix(z.Score, 0),
+		nil,
 	)
 }
 
@@ -933,6 +948,7 @@ func createArchivedTask(z base.Z) *TaskInfo {
 		z.Message,
 		base.TaskStateArchived,
 		time.Time{}, // zero value for n/a
+		nil,
 	)
 }
 
@@ -993,6 +1009,90 @@ func TestInspectorListArchivedTasks(t *testing.T) {
 		}
 		if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(TaskInfo{})); diff != "" {
 			t.Errorf("%s; ListArchivedTask(%q) = %v, want %v; (-want,+got)\n%s",
+				tc.desc, tc.qname, got, tc.want, diff)
+		}
+	}
+}
+
+func newCompletedTaskMessage(typename, qname string, retention time.Duration, completedAt utc.UTC) *base.TaskMessage {
+	msg := h.NewTaskMessageWithQueue(typename, nil, qname)
+	msg.Retention = int64(retention.Seconds())
+	msg.CompletedAt = completedAt.Unix()
+	return msg
+}
+
+func createCompletedTask(z base.Z) *TaskInfo {
+	return newTaskInfo(
+		z.Message,
+		base.TaskStateCompleted,
+		time.Time{}, // zero value for n/a
+		nil,         // TODO: Test with result data
+	)
+}
+
+func TestInspectorListCompletedTasks(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
+	//      completed   now     retention
+	//      m3  m2  m1   |      m2  m1    m3
+	// -----|---|---|    +   ---|---|-----|
+
+	m1 := newCompletedTaskMessage("task1", "default", 1*time.Hour, now.Add(-3*time.Minute))     // Expires in 57 mins
+	m2 := newCompletedTaskMessage("task2", "default", 30*time.Minute, now.Add(-10*time.Minute)) // Expires in 20 mins
+	m3 := newCompletedTaskMessage("task3", "default", 2*time.Hour, now.Add(-30*time.Minute))    // Expires in 90 mins
+	m4 := newCompletedTaskMessage("task4", "custom", 15*time.Minute, now.Add(-2*time.Minute))   // Expires in 13 mins
+	z1 := base.Z{Message: m1, Score: m1.CompletedAt + m1.Retention}
+	z2 := base.Z{Message: m2, Score: m2.CompletedAt + m2.Retention}
+	z3 := base.Z{Message: m3, Score: m3.CompletedAt + m3.Retention}
+	z4 := base.Z{Message: m4, Score: m4.CompletedAt + m4.Retention}
+
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
+
+	tests := []struct {
+		desc      string
+		completed map[string][]base.Z
+		qname     string
+		want      []*TaskInfo
+	}{
+		{
+			desc: "with a few completed tasks",
+			completed: map[string][]base.Z{
+				"default": {z1, z2, z3},
+				"custom":  {z4},
+			},
+			qname: "default",
+			// Should be sorted by expiration time (CompletedAt + Retention).
+			want: []*TaskInfo{
+				createCompletedTask(z2),
+				createCompletedTask(z1),
+				createCompletedTask(z3),
+			},
+		},
+		{
+			desc: "with empty completed queue",
+			completed: map[string][]base.Z{
+				"default": {},
+			},
+			qname: "default",
+			want:  []*TaskInfo(nil),
+		},
+	}
+
+	for _, tc := range tests {
+		ctx.FlushDB()
+		ctx.SeedAllCompletedQueues(tc.completed)
+
+		got, err := inspector.ListCompletedTasks(tc.qname)
+		if err != nil {
+			t.Errorf("%s; ListCompletedTasks(%q) returned error: %v", tc.desc, tc.qname, err)
+			continue
+		}
+		if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(TaskInfo{})); diff != "" {
+			t.Errorf("%s; ListCompletedTasks(%q) = %v, want %v; (-want,+got)\n%s",
 				tc.desc, tc.qname, got, tc.want, diff)
 		}
 	}
@@ -1097,6 +1197,9 @@ func TestInspectorListTasksQueueNotFoundError(t *testing.T) {
 		}
 		if _, err := inspector.ListArchivedTasks(tc.qname); !errors.Is(err, tc.wantErr) {
 			t.Errorf("ListArchivedTasks(%q) returned error %v, want %v", tc.qname, err, tc.wantErr)
+		}
+		if _, err := inspector.ListCompletedTasks(tc.qname); !errors.Is(err, tc.wantErr) {
+			t.Errorf("ListCompletedTasks(%q) returned error %v, want %v", tc.qname, err, tc.wantErr)
 		}
 	}
 }
@@ -1362,6 +1465,76 @@ func TestInspectorDeleteAllArchivedTasks(t *testing.T) {
 			gotArchived := ctx.GetArchivedEntries(qname)
 			if diff := cmp.Diff(want, gotArchived, h.SortZSetEntryOpt); diff != "" {
 				t.Errorf("unexpected archived tasks in queue %q: (-want, +got)\n%s", qname, diff)
+			}
+		}
+	}
+}
+
+func TestInspectorDeleteAllCompletedTasks(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
+	m1 := newCompletedTaskMessage("task1", "default", 30*time.Minute, now.Add(-2*time.Minute))
+	m2 := newCompletedTaskMessage("task2", "default", 30*time.Minute, now.Add(-5*time.Minute))
+	m3 := newCompletedTaskMessage("task3", "default", 30*time.Minute, now.Add(-10*time.Minute))
+	m4 := newCompletedTaskMessage("task4", "custom", 30*time.Minute, now.Add(-3*time.Minute))
+	z1 := base.Z{Message: m1, Score: m1.CompletedAt + m1.Retention}
+	z2 := base.Z{Message: m2, Score: m2.CompletedAt + m2.Retention}
+	z3 := base.Z{Message: m3, Score: m3.CompletedAt + m3.Retention}
+	z4 := base.Z{Message: m4, Score: m4.CompletedAt + m4.Retention}
+
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
+
+	tests := []struct {
+		completed     map[string][]base.Z
+		qname         string
+		want          int
+		wantCompleted map[string][]base.Z
+	}{
+		{
+			completed: map[string][]base.Z{
+				"default": {z1, z2, z3},
+				"custom":  {z4},
+			},
+			qname: "default",
+			want:  3,
+			wantCompleted: map[string][]base.Z{
+				"default": {},
+				"custom":  {z4},
+			},
+		},
+		{
+			completed: map[string][]base.Z{
+				"default": {},
+			},
+			qname: "default",
+			want:  0,
+			wantCompleted: map[string][]base.Z{
+				"default": {},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		ctx.FlushDB()
+		ctx.SeedAllCompletedQueues(tc.completed)
+
+		got, err := inspector.DeleteAllCompletedTasks(tc.qname)
+		if err != nil {
+			t.Errorf("DeleteAllCompletedTasks(%q) returned error: %v", tc.qname, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("DeleteAllCompletedTasks(%q) = %d, want %d", tc.qname, got, tc.want)
+		}
+		for qname, want := range tc.wantCompleted {
+			gotCompleted := ctx.GetCompletedEntries(qname)
+			if diff := cmp.Diff(want, gotCompleted, h.SortZSetEntryOpt); diff != "" {
+				t.Errorf("unexpected completed tasks in queue %q: (-want, +got)\n%s", qname, diff)
 			}
 		}
 	}
@@ -3121,6 +3294,7 @@ func TestParseOption(t *testing.T) {
 		{`Unique(1h)`, UniqueOpt, 1 * time.Hour},
 		{ProcessAt(oneHourFromNow).String(), ProcessAtOpt, oneHourFromNow},
 		{`ProcessIn(10m)`, ProcessInOpt, 10 * time.Minute},
+		{`Retention(24h)`, RetentionOpt, 24 * time.Hour},
 	}
 
 	for _, tc := range tests {
@@ -3152,7 +3326,7 @@ func TestParseOption(t *testing.T) {
 				if gotVal != tc.wantVal.(int) {
 					t.Fatalf("got value %v, want %v", gotVal, tc.wantVal)
 				}
-			case TimeoutOpt, UniqueOpt, ProcessInOpt:
+			case TimeoutOpt, UniqueOpt, ProcessInOpt, RetentionOpt:
 				gotVal, ok := got.Value().(time.Duration)
 				if !ok {
 					t.Fatal("returned Option with non duration value")

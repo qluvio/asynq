@@ -81,6 +81,8 @@ const (
 	RecurrentOpt
 	ReprocessAfterOpt
 	ServerAffinityOpt
+	TaskIDOpt
+	RetentionOpt
 )
 
 // Option specifies the task processing behavior.
@@ -99,6 +101,7 @@ type Option interface {
 type (
 	retryOption          int
 	queueOption          string
+	taskIDOption         string
 	timeoutOption        time.Duration
 	deadlineOption       time.Time
 	uniqueOption         time.Duration
@@ -108,6 +111,7 @@ type (
 	recurrentOption      bool
 	reprocessAfterOption time.Duration
 	serverAffinityOption time.Duration
+	retentionOption      time.Duration
 )
 
 // MaxRetry returns an option to specify the max number of times
@@ -133,6 +137,15 @@ func Queue(qname string) Option {
 func (qname queueOption) String() string     { return fmt.Sprintf("Queue(%q)", string(qname)) }
 func (qname queueOption) Type() OptionType   { return QueueOpt }
 func (qname queueOption) Value() interface{} { return string(qname) }
+
+// TaskID returns an option to specify the task ID.
+func TaskID(id string) Option {
+	return taskIDOption(id)
+}
+
+func (id taskIDOption) String() string     { return fmt.Sprintf("TaskID(%q)", string(id)) }
+func (id taskIDOption) Type() OptionType   { return TaskIDOpt }
+func (id taskIDOption) Value() interface{} { return string(id) }
 
 // Timeout returns an option to specify how long a task may run.
 // If the timeout elapses before the Handler returns, then the task
@@ -172,9 +185,9 @@ func (t deadlineOption) Value() interface{} { return time.Time(t) }
 // ErrDuplicateTask error is returned when enqueueing a duplicate task.
 //
 // Uniqueness of a task is based on the following properties:
-//     - Task Type
-//     - Task Payload
-//     - Queue Name
+//   - Task Type
+//   - Task Payload
+//   - Queue Name
 func Unique(ttl time.Duration) Option {
 	return uniqueOption(ttl)
 }
@@ -252,14 +265,31 @@ func (r serverAffinityOption) String() string {
 func (r serverAffinityOption) Type() OptionType   { return ServerAffinityOpt }
 func (r serverAffinityOption) Value() interface{} { return time.Duration(r) }
 
+// Retention returns an option to specify the duration of retention period for the task.
+// If this option is provided, the task will be stored as a completed task after successful processing.
+// A completed task will be deleted after the specified duration elapses.
+func Retention(d time.Duration) Option {
+	return retentionOption(d)
+}
+
+func (ttl retentionOption) String() string     { return fmt.Sprintf("Retention(%v)", time.Duration(ttl)) }
+func (ttl retentionOption) Type() OptionType   { return RetentionOpt }
+func (ttl retentionOption) Value() interface{} { return time.Duration(ttl) }
+
 // ErrDuplicateTask indicates that the given task could not be enqueued since it's a duplicate of another task.
 //
 // ErrDuplicateTask error only applies to tasks enqueued with a Unique option.
 var ErrDuplicateTask = errors.ErrDuplicateTask
 
+// ErrTaskIDConflict indicates that the given task could not be enqueued since its task ID already exists.
+//
+// ErrTaskIDConflict error only applies to tasks enqueued with a TaskID option.
+var ErrTaskIDConflict = errors.New("task ID conflicts with another task")
+
 type option struct {
 	retry          int
 	queue          string
+	taskID         string
 	timeout        time.Duration
 	deadline       time.Time
 	uniqueTTL      time.Duration
@@ -268,6 +298,7 @@ type option struct {
 	recurrent      bool
 	reprocessAfter time.Duration
 	serverAffinity time.Duration
+	retention      time.Duration
 }
 
 // composeOptions merges user provided options into the default options
@@ -278,6 +309,7 @@ func composeOptions(opts ...Option) (option, error) {
 	res := option{
 		retry:     defaultMaxRetry,
 		queue:     base.DefaultQueueName,
+		taskID:    uuid.NewString(),
 		timeout:   0, // do not set to defaultTimeout here
 		deadline:  time.Time{},
 		processAt: time.Now(),
@@ -292,6 +324,12 @@ func composeOptions(opts ...Option) (option, error) {
 				return option{}, err
 			}
 			res.queue = qname
+		case taskIDOption:
+			id := string(opt)
+			if err := validateTaskID(id); err != nil {
+				return option{}, err
+			}
+			res.taskID = id
 		case timeoutOption:
 			res.timeout = time.Duration(opt)
 		case deadlineOption:
@@ -310,11 +348,21 @@ func composeOptions(opts ...Option) (option, error) {
 			res.reprocessAfter = time.Duration(opt)
 		case serverAffinityOption:
 			res.serverAffinity = time.Duration(opt)
+		case retentionOption:
+			res.retention = time.Duration(opt)
 		default:
 			// ignore unexpected option
 		}
 	}
 	return res, nil
+}
+
+// validates user provided task ID string.
+func validateTaskID(id string) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("task ID cannot be empty")
+	}
+	return nil
 }
 
 const (
@@ -331,17 +379,6 @@ var (
 	noDeadline               = time.Unix(0, 0)
 )
 
-// SetDefaultOptions sets options to be used for a given task type.
-// The argument opts specifies the behavior of task processing.
-// If there are conflicting Option values the last one overrides others.
-//
-// Default options can be overridden by options passed at enqueue time.
-func (c *Client) SetDefaultOptions(taskType string, opts ...Option) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.opts[taskType] = opts
-}
-
 // Close closes the connection with redis.
 func (c *Client) Close() error {
 	return c.rdb.Close()
@@ -353,6 +390,7 @@ func (c *Client) Close() error {
 //
 // The argument opts specifies the behavior of task processing.
 // If there are conflicting Option values the last one overrides others.
+// Any options provided to NewTask can be overridden by options passed to Enqueue.
 // By default, max retry is set to 25 and timeout is set to 30 minutes.
 //
 // If no ProcessAt or ProcessIn options are provided, the task will be pending immediately.
@@ -360,11 +398,8 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 	if strings.TrimSpace(task.Type()) == "" {
 		return nil, fmt.Errorf("task typename cannot be empty")
 	}
-	c.mu.Lock()
-	if defaults, ok := c.opts[task.Type()]; ok {
-		opts = append(defaults, opts...)
-	}
-	c.mu.Unlock()
+	// merge task options with the options provided at enqueue time.
+	opts = append(task.opts, opts...)
 	opt, err := composeOptions(opts...)
 	if err != nil {
 		return nil, err
@@ -391,7 +426,7 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 		uniqueKey = base.UniqueKey(opt.queue, task.Type(), task.Payload())
 	}
 	msg := &base.TaskMessage{
-		ID:             uuid.New(),
+		ID:             opt.taskID,
 		Type:           task.Type(),
 		Payload:        task.Payload(),
 		Queue:          opt.queue,
@@ -403,6 +438,7 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 		Recurrent:      opt.recurrent,
 		ReprocessAfter: int64(opt.reprocessAfter.Seconds()),
 		ServerAffinity: int64(opt.serverAffinity.Seconds()),
+		Retention:      int64(opt.retention.Seconds()),
 	}
 
 	now := time.Now()
@@ -422,11 +458,15 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 	switch {
 	case errors.Is(err, errors.ErrDuplicateTask):
 		return nil, fmt.Errorf("%w", ErrDuplicateTask)
+	case errors.Is(err, errors.ErrTaskIdConflict):
+		return nil, fmt.Errorf("%w", ErrTaskIDConflict)
 	case err != nil:
-		c.logger.Debug("enqueue", err, "state", state, "type", msg.Type, "id", msg.ID)
+		c.logger.Debug(fmt.Sprintf(
+			"enqueue errors: %v, state: %v, type: %v, id: %v",
+			err, state, msg.Type, msg.ID))
 		return nil, err
 	}
-	return newTaskInfo(msg, state, opt.processAt), nil
+	return newTaskInfo(msg, state, opt.processAt, nil), nil
 }
 
 func (c *Client) enqueue(msg *base.TaskMessage, uniqueTTL time.Duration, forceUnique bool) error {
@@ -516,7 +556,7 @@ func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error
 			uniqueKey = base.UniqueKey(opt.queue, task.Type(), task.Payload())
 		}
 		msg := &base.TaskMessage{
-			ID:             uuid.New(),
+			ID:             uuid.New().String(),
 			Type:           task.Type(),
 			Payload:        task.Payload(),
 			Queue:          opt.queue,
@@ -599,18 +639,19 @@ func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error
 	allErrs := make(map[int]error)
 	for i, msg := range allBm {
 		if msg.Err == nil {
-			ret[i] = newTaskInfo(msg.Msg, msg.State, msg.ProcessAt)
+			ret[i] = newTaskInfo(msg.Msg, msg.State, msg.ProcessAt, nil)
 		} else {
 			allErrs[i] = msg.Err
 		}
 	}
 	if err != nil {
-		c.logger.Debug("enqueueBatch", "error", err,
-			"enqueuing tasks_count", len(enqueue),
-			"enqueuing unique tasks_count", len(enqueueUnique),
-			"scheduling tasks_count", len(schedule),
-			"scheduling unique tasks_count", len(scheduleUnique),
-			"inner errors", allErrs)
+		c.logger.Debug(fmt.Sprintf("enqueueBatch error %v enqueuing "+
+			"[tasks_count: %d unique tasks_count: %d], "+
+			"scheduling [tasks_count: %d unique tasks_count: %d], "+
+			"inner errors: %v", err,
+			len(enqueue), len(enqueueUnique),
+			len(schedule), len(scheduleUnique),
+			allErrs))
 	}
 	if len(allErrs) > 0 {
 		return ret, &errors.BatchError{Errors: allErrs}

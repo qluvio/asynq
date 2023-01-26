@@ -88,6 +88,10 @@ func TestSchedulerRegister(t *testing.T) {
 }
 
 func TestSchedulerWhenRedisDown(t *testing.T) {
+	if brokerType == rqliteType {
+		t.Skip("redis specific test")
+	}
+
 	var (
 		mu      sync.Mutex
 		counter int

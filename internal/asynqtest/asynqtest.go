@@ -32,7 +32,7 @@ func EquateInt64Approx(margin int64) cmp.Option {
 var SortMsgOpt = cmp.Transformer("SortTaskMessages", func(in []*base.TaskMessage) []*base.TaskMessage {
 	out := append([]*base.TaskMessage(nil), in...) // Copy input to avoid mutating it
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].ID.String() < out[j].ID.String()
+		return out[i].ID < out[j].ID
 	})
 	return out
 })
@@ -41,7 +41,7 @@ var SortMsgOpt = cmp.Transformer("SortTaskMessages", func(in []*base.TaskMessage
 var SortZSetEntryOpt = cmp.Transformer("SortZSetEntries", func(in []base.Z) []base.Z {
 	out := append([]base.Z(nil), in...) // Copy input to avoid mutating it
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].Message.ID.String() < out[j].Message.ID.String()
+		return out[i].Message.ID < out[j].Message.ID
 	})
 	return out
 })
@@ -104,7 +104,7 @@ func NewTaskMessage(taskType string, payload []byte) *base.TaskMessage {
 // task type, payload and queue name.
 func NewTaskMessageWithQueue(taskType string, payload []byte, qname string) *base.TaskMessage {
 	return &base.TaskMessage{
-		ID:       uuid.New(),
+		ID:       uuid.New().String(),
 		Type:     taskType,
 		Queue:    qname,
 		Retry:    25,
@@ -136,6 +136,12 @@ func TaskMessageAfterRetry(t base.TaskMessage, errMsg string, failedAt time.Time
 func TaskMessageWithError(t base.TaskMessage, errMsg string, failedAt time.Time) *base.TaskMessage {
 	t.ErrorMsg = errMsg
 	t.LastFailedAt = failedAt.Unix()
+	return &t
+}
+
+// TaskMessageWithCompletedAt returns an updated copy of t after completion.
+func TaskMessageWithCompletedAt(t base.TaskMessage, completedAt time.Time) *base.TaskMessage {
+	t.CompletedAt = completedAt.Unix()
 	return &t
 }
 
@@ -224,6 +230,13 @@ func SeedDeadlines(tb testing.TB, r redis.UniversalClient, entries []base.Z, qna
 	seedRedisZSet(tb, r, base.DeadlinesKey(qname), entries, base.TaskStateActive)
 }
 
+// SeedCompletedQueue initializes the completed set witht the given entries.
+func SeedCompletedQueue(tb testing.TB, r redis.UniversalClient, entries []base.Z, qname string) {
+	tb.Helper()
+	r.SAdd(context.Background(), base.AllQueues, qname)
+	seedRedisZSet(tb, r, base.CompletedKey(qname), entries, base.TaskStateCompleted)
+}
+
 // SeedAllPendingQueues initializes all of the specified queues with the given messages.
 //
 // pending maps a queue name to a list of messages.
@@ -274,15 +287,23 @@ func SeedAllDeadlines(tb testing.TB, r redis.UniversalClient, deadlines map[stri
 	}
 }
 
+// SeedAllCompletedQueues initializes all of the completed queues with the given entries.
+func SeedAllCompletedQueues(tb testing.TB, r redis.UniversalClient, completed map[string][]base.Z) {
+	tb.Helper()
+	for q, entries := range completed {
+		SeedCompletedQueue(tb, r, entries, q)
+	}
+}
+
 func seedRedisList(tb testing.TB, c redis.UniversalClient, key string,
 	msgs []*base.TaskMessage, state base.TaskState) {
 	tb.Helper()
 	for _, msg := range msgs {
 		encoded := MustMarshal(tb, msg)
-		if err := c.LPush(context.Background(), key, msg.ID.String()).Err(); err != nil {
+		if err := c.LPush(context.Background(), key, msg.ID).Err(); err != nil {
 			tb.Fatal(err)
 		}
-		key := base.TaskKey(msg.Queue, msg.ID.String())
+		key := base.TaskKey(msg.Queue, msg.ID)
 		data := map[string]interface{}{
 			"msg":        encoded,
 			"state":      state.String(),
@@ -294,7 +315,7 @@ func seedRedisList(tb testing.TB, c redis.UniversalClient, key string,
 			tb.Fatal(err)
 		}
 		if len(msg.UniqueKey) > 0 {
-			err := c.SetNX(context.Background(), msg.UniqueKey, msg.ID.String(), 1*time.Minute).Err()
+			err := c.SetNX(context.Background(), msg.UniqueKey, msg.ID, 1*time.Minute).Err()
 			if err != nil {
 				tb.Fatalf("Failed to set unique lock in redis: %v", err)
 			}
@@ -308,11 +329,11 @@ func seedRedisZSet(tb testing.TB, c redis.UniversalClient, key string,
 	for _, item := range items {
 		msg := item.Message
 		encoded := MustMarshal(tb, msg)
-		z := &redis.Z{Member: msg.ID.String(), Score: float64(item.Score)}
+		z := &redis.Z{Member: msg.ID, Score: float64(item.Score)}
 		if err := c.ZAdd(context.Background(), key, z).Err(); err != nil {
 			tb.Fatal(err)
 		}
-		key := base.TaskKey(msg.Queue, msg.ID.String())
+		key := base.TaskKey(msg.Queue, msg.ID)
 		data := map[string]interface{}{
 			"msg":        encoded,
 			"state":      state.String(),
@@ -324,7 +345,7 @@ func seedRedisZSet(tb testing.TB, c redis.UniversalClient, key string,
 			tb.Fatal(err)
 		}
 		if len(msg.UniqueKey) > 0 {
-			err := c.SetNX(context.Background(), msg.UniqueKey, msg.ID.String(), 1*time.Minute).Err()
+			err := c.SetNX(context.Background(), msg.UniqueKey, msg.ID, 1*time.Minute).Err()
 			if err != nil {
 				tb.Fatalf("Failed to set unique lock in redis: %v", err)
 			}
@@ -367,6 +388,13 @@ func GetArchivedMessages(tb testing.TB, r redis.UniversalClient, qname string) [
 	return getMessagesFromZSet(tb, r, qname, base.ArchivedKey, base.TaskStateArchived)
 }
 
+// GetCompletedMessages returns all completed task messages in the given queue.
+// It also asserts the state field of the task.
+func GetCompletedMessages(tb testing.TB, r redis.UniversalClient, qname string) []*base.TaskMessage {
+	tb.Helper()
+	return getMessagesFromZSet(tb, r, qname, base.CompletedKey, base.TaskStateCompleted)
+}
+
 // GetScheduledEntries returns all scheduled messages and its score in the given queue.
 // It also asserts the state field of the task.
 func GetScheduledEntries(tb testing.TB, r redis.UniversalClient, qname string) []base.Z {
@@ -393,6 +421,13 @@ func GetArchivedEntries(tb testing.TB, r redis.UniversalClient, qname string) []
 func GetDeadlinesEntries(tb testing.TB, r redis.UniversalClient, qname string) []base.Z {
 	tb.Helper()
 	return getMessagesFromZSetWithScores(tb, r, qname, base.DeadlinesKey, base.TaskStateActive)
+}
+
+// GetCompletedEntries returns all completed messages and its score in the given queue.
+// It also asserts the state field of the task.
+func GetCompletedEntries(tb testing.TB, r redis.UniversalClient, qname string) []base.Z {
+	tb.Helper()
+	return getMessagesFromZSetWithScores(tb, r, qname, base.CompletedKey, base.TaskStateCompleted)
 }
 
 // Retrieves all messages stored under `keyFn(qname)` key in redis list.

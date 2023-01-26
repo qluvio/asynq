@@ -1,10 +1,10 @@
 package rqlite
 
 import (
+	"encoding/base64"
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/utc"
@@ -174,7 +174,7 @@ func (conn *Connection) currentStats(queue string) (*base.Stats, error) {
 			"SELECT queue_name, state "+
 				" FROM "+conn.table(QueuesTable)+" WHERE queue_name=? ", queue),
 		Statement(
-			"SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, sid, affinity_timeout, recurrent "+
+			"SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, retain_until, sid, affinity_timeout, recurrent, result "+
 				" FROM "+conn.table(TasksTable)+
 				" WHERE queue_name=? ", queue),
 	}
@@ -318,17 +318,21 @@ func (conn *Connection) historicalStats(queue string, ndays int) ([]*base.DailyS
 	return ret, nil
 }
 
-func (conn *Connection) getTaskInfo(qname string, taskid uuid.UUID) (*base.TaskInfo, error) {
+func (conn *Connection) getTaskInfo(qname string, taskid string) (*base.TaskInfo, error) {
 	var op errors.Op = "getTaskInfo"
 
-	tr, err := conn.getTask(qname, taskid.String())
+	tr, err := conn.getTask(qname, taskid)
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}
+	return getTaskInfo(op, tr)
+}
 
+func getTaskInfo(op errors.Op, tr *taskRow) (*base.TaskInfo, error) {
 	var state base.TaskState
 	if tr.state != processed {
 		// PENDING(GIL): 'processed' is not in base.TaskState
+		var err error
 		state, err = base.TaskStateFromString(tr.state)
 		if err != nil {
 			return nil, errors.E(op, errors.Internal, err)
@@ -344,10 +348,19 @@ func (conn *Connection) getTaskInfo(qname string, taskid uuid.UUID) (*base.TaskI
 	case retry:
 		nextProcessAt = time.Unix(tr.retryAt, 0).UTC()
 	}
+	var result []byte
+	if tr.result != "" {
+		var err error
+		result, err = base64.StdEncoding.DecodeString(tr.result)
+		if err != nil {
+			return nil, errors.E(op, errors.Internal, err)
+		}
+	}
 
 	return &base.TaskInfo{
 		Message:       tr.msg,
 		State:         state,
 		NextProcessAt: nextProcessAt,
+		Result:        result,
 	}, nil
 }

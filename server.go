@@ -49,6 +49,7 @@ type Server struct {
 	subscriber    *subscriber
 	recoverer     *recoverer
 	healthchecker *healthchecker
+	janitor       *janitor
 }
 
 // Config specifies the server's background-task processing behavior.
@@ -429,6 +430,12 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		interval:        healthcheckInterval,
 		healthcheckFunc: cfg.HealthCheckFunc,
 	})
+	janitor := newJanitor(janitorParams{
+		logger:   logger,
+		broker:   broker,
+		queues:   cfg.Queues,
+		interval: 8 * time.Second,
+	})
 	return &Server{
 		logger:        logger,
 		broker:        broker,
@@ -440,6 +447,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		subscriber:    subscriber,
 		recoverer:     recoverer,
 		healthchecker: healthchecker,
+		janitor:       janitor,
 	}
 }
 
@@ -521,6 +529,7 @@ func (srv *Server) Start(handler Handler) error {
 	srv.recoverer.start(&srv.wg)
 	srv.forwarder.start(&srv.wg)
 	srv.processor.start(&srv.wg)
+	srv.janitor.start(&srv.wg)
 	return nil
 }
 
@@ -545,6 +554,7 @@ func (srv *Server) Shutdown() {
 	srv.recoverer.shutdown()
 	srv.syncer.shutdown()
 	srv.subscriber.shutdown()
+	srv.janitor.shutdown()
 	srv.healthchecker.shutdown()
 	srv.heartbeater.shutdown()
 

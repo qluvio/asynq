@@ -58,6 +58,19 @@ func (r *RDB) runScript(op errors.Op, script *redis.Script, keys []string, args 
 	return nil
 }
 
+// Runs the given script with keys and args and returns the script's return value as int64.
+func (r *RDB) runScriptWithErrorCode(op errors.Op, script *redis.Script, keys []string, args ...interface{}) (int64, error) {
+	res, err := script.Run(context.Background(), r.client, keys, args...).Result()
+	if err != nil {
+		return 0, errors.E(op, errors.Unknown, fmt.Sprintf("redis eval error: %v", err))
+	}
+	n, ok := res.(int64)
+	if !ok {
+		return 0, errors.E(op, errors.Internal, fmt.Sprintf("unexpected return value from Lua script: %v", res))
+	}
+	return n, nil
+}
+
 // enqueueCmd enqueues a given task message.
 //
 // Input:
@@ -71,7 +84,11 @@ func (r *RDB) runScript(op errors.Op, script *redis.Script, keys []string, args 
 //
 // Output:
 // Returns 1 if successfully enqueued
+// Returns 0 if task ID already exists
 var enqueueCmd = redis.NewScript(`
+if redis.call("EXISTS", KEYS[1]) == 1 then
+	return 0
+end
 redis.call("HSET", KEYS[1],
            "msg", ARGV[1],
            "state", "pending",
@@ -95,16 +112,23 @@ func (r *RDB) Enqueue(msg *base.TaskMessage) error {
 		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "sadd", Err: err})
 	}
 	keys := []string{
-		base.TaskKey(msg.Queue, msg.ID.String()),
+		base.TaskKey(msg.Queue, msg.ID),
 		base.PendingKey(msg.Queue),
 	}
 	argv := []interface{}{
 		encoded,
-		msg.ID.String(),
+		msg.ID,
 		msg.Timeout,
 		msg.Deadline,
 	}
-	return r.runScript(op, enqueueCmd, keys, argv...)
+	n, err := r.runScriptWithErrorCode(op, enqueueCmd, keys, argv...)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.E(op, errors.AlreadyExists, errors.ErrTaskIdConflict)
+	}
+	return nil
 }
 
 // enqueueUniqueCmd enqueues the task message if the task is unique.
@@ -121,10 +145,14 @@ func (r *RDB) Enqueue(msg *base.TaskMessage) error {
 //
 // Output:
 // Returns 1 if successfully enqueued
-// Returns 0 if task already exists
+// Returns 0 if task ID conflicts with another task
+// Returns -1 if task unique key already exists
 var enqueueUniqueCmd = redis.NewScript(`
 local ok = redis.call("SET", KEYS[1], ARGV[1], "NX", "EX", ARGV[2])
 if not ok then
+  return -1
+end
+if redis.call("EXISTS", KEYS[2]) == 1 then
   return 0
 end
 redis.call("HSET", KEYS[2],
@@ -175,31 +203,30 @@ func (r *RDB) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration, forceUniqu
 	}
 	keys := []string{
 		msg.UniqueKey,
-		base.TaskKey(msg.Queue, msg.ID.String()),
+		base.TaskKey(msg.Queue, msg.ID),
 		base.PendingKey(msg.Queue),
 	}
 	argv := []interface{}{
-		msg.ID.String(),
+		msg.ID,
 		int(ttl.Seconds()),
 		encoded,
 		msg.Timeout,
 		msg.Deadline,
 	}
-	var res interface{}
+	script := enqueueUniqueCmd
 	if funique {
-		res, err = enqueueUniqueForceCmd.Run(context.Background(), r.client, keys, argv...).Result()
-	} else {
-		res, err = enqueueUniqueCmd.Run(context.Background(), r.client, keys, argv...).Result()
+		script = enqueueUniqueForceCmd
 	}
+
+	n, err := r.runScriptWithErrorCode(op, script, keys, argv...)
 	if err != nil {
-		return errors.E(op, errors.Unknown, fmt.Sprintf("redis eval error: %v", err))
+		return err
 	}
-	n, ok := res.(int64)
-	if !ok {
-		return errors.E(op, errors.Internal, fmt.Sprintf("unexpected return value from Lua script: %v", res))
+	if n == -1 {
+		return errors.E(op, errors.AlreadyExists, errors.ErrDuplicateTask)
 	}
 	if n == 0 {
-		return errors.E(op, errors.AlreadyExists, errors.ErrDuplicateTask)
+		return errors.E(op, errors.AlreadyExists, errors.ErrTaskIdConflict)
 	}
 	return nil
 }
@@ -350,7 +377,7 @@ end
 return redis.status_reply("OK")
 `)
 
-// Done removes the task from active queue to mark the task as done.
+// Done removes the task from active queue and deletes the task.
 // It removes a uniqueness lock acquired by the task, if any.
 func (r *RDB) Done(serverID string, msg *base.TaskMessage) error {
 	var op errors.Op = "rdb.Done"
@@ -365,18 +392,114 @@ func (r *RDB) Done(serverID string, msg *base.TaskMessage) error {
 	keys := []string{
 		base.ActiveKey(msg.Queue),
 		base.DeadlinesKey(msg.Queue),
-		base.TaskKey(msg.Queue, msg.ID.String()),
+		base.TaskKey(msg.Queue, msg.ID),
 		base.ProcessedKey(msg.Queue, now),
 	}
 	argv := []interface{}{
-		msg.ID.String(),
+		msg.ID,
 		expireAt.Unix(),
 	}
+	// Note: We cannot pass empty unique key when running this script in redis-cluster.
 	if len(msg.UniqueKey) > 0 {
 		keys = append(keys, msg.UniqueKey)
 		return r.runScript(op, doneUniqueCmd, keys, argv...)
 	}
 	return r.runScript(op, doneCmd, keys, argv...)
+}
+
+// KEYS[1] -> asynq:{<qname>}:active
+// KEYS[2] -> asynq:{<qname>}:deadlines
+// KEYS[3] -> asynq:{<qname>}:completed
+// KEYS[4] -> asynq:{<qname>}:t:<task_id>
+// KEYS[5] -> asynq:{<qname>}:processed:<yyyy-mm-dd>
+// ARGV[1] -> task ID
+// ARGV[2] -> stats expiration timestamp
+// ARGV[3] -> task exipration time in unix time
+// ARGV[4] -> task message data
+var markAsCompleteCmd = redis.NewScript(`
+if redis.call("LREM", KEYS[1], 0, ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZREM", KEYS[2], ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZADD", KEYS[3], ARGV[3], ARGV[1]) ~= 1 then
+  redis.redis.error_reply("INTERNAL")
+end
+redis.call("HSET", KEYS[4], "msg", ARGV[4], "state", "completed")
+local n = redis.call("INCR", KEYS[5])
+if tonumber(n) == 1 then
+	redis.call("EXPIREAT", KEYS[5], ARGV[2])
+end
+return redis.status_reply("OK")
+`)
+
+// KEYS[1] -> asynq:{<qname>}:active
+// KEYS[2] -> asynq:{<qname>}:deadlines
+// KEYS[3] -> asynq:{<qname>}:completed
+// KEYS[4] -> asynq:{<qname>}:t:<task_id>
+// KEYS[5] -> asynq:{<qname>}:processed:<yyyy-mm-dd>
+// KEYS[6] -> asynq:{<qname>}:unique:{<checksum>}
+// ARGV[1] -> task ID
+// ARGV[2] -> stats expiration timestamp
+// ARGV[3] -> task exipration time in unix time
+// ARGV[4] -> task message data
+var markAsCompleteUniqueCmd = redis.NewScript(`
+if redis.call("LREM", KEYS[1], 0, ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZREM", KEYS[2], ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZADD", KEYS[3], ARGV[3], ARGV[1]) ~= 1 then
+  redis.redis.error_reply("INTERNAL")
+end
+redis.call("HSET", KEYS[4], "msg", ARGV[4], "state", "completed")
+local n = redis.call("INCR", KEYS[5])
+if tonumber(n) == 1 then
+	redis.call("EXPIREAT", KEYS[5], ARGV[2])
+end
+if redis.call("GET", KEYS[6]) == ARGV[1] then
+  redis.call("DEL", KEYS[6])
+end
+return redis.status_reply("OK")
+`)
+
+// MarkAsComplete removes the task from active queue to mark the task as completed.
+// It removes a uniqueness lock acquired by the task, if any.
+func (r *RDB) MarkAsComplete(serverID string, msg *base.TaskMessage) error {
+	//
+	// PENDING(GIL): serverID (used to support server affinity) is ignored on redis.
+	//
+	_ = serverID
+
+	var op errors.Op = "rdb.MarkAsComplete"
+	now := time.Now()
+	statsExpireAt := now.Add(statsTTL)
+	msg.CompletedAt = now.Unix()
+	encoded, err := base.EncodeMessage(msg)
+	if err != nil {
+		return errors.E(op, errors.Unknown, fmt.Sprintf("cannot encode message: %v", err))
+	}
+	keys := []string{
+		base.ActiveKey(msg.Queue),
+		base.DeadlinesKey(msg.Queue),
+		base.CompletedKey(msg.Queue),
+		base.TaskKey(msg.Queue, msg.ID),
+		base.ProcessedKey(msg.Queue, now),
+	}
+	argv := []interface{}{
+		msg.ID,
+		statsExpireAt.Unix(),
+		now.Unix() + msg.Retention,
+		encoded,
+	}
+	// Note: We cannot pass empty unique key when running this script in redis-cluster.
+	if len(msg.UniqueKey) > 0 {
+		keys = append(keys, msg.UniqueKey)
+		return r.runScript(op, markAsCompleteUniqueCmd, keys, argv...)
+	}
+	return r.runScript(op, markAsCompleteCmd, keys, argv...)
 }
 
 // KEYS[1] -> asynq:{<qname>}:active
@@ -423,15 +546,15 @@ func (r *RDB) Requeue(serverID string, msg *base.TaskMessage, aborted bool) erro
 		base.ActiveKey(msg.Queue),
 		base.DeadlinesKey(msg.Queue),
 		base.PendingKey(msg.Queue),
-		base.TaskKey(msg.Queue, msg.ID.String()),
+		base.TaskKey(msg.Queue, msg.ID),
 	}
 	if aborted || len(msg.UniqueKey) == 0 {
-		return r.runScript(op, requeueCmd, keys, msg.ID.String())
+		return r.runScript(op, requeueCmd, keys, msg.ID)
 	}
 
 	keys = append(keys, msg.UniqueKey)
 	return r.runScript(op, requeueUniqueCmd, keys, []interface{}{
-		msg.ID.String(),
+		msg.ID,
 		int(msg.UniqueKeyTTL),
 	})
 }
@@ -443,7 +566,14 @@ func (r *RDB) Requeue(serverID string, msg *base.TaskMessage, aborted bool) erro
 // ARGV[3] -> task ID
 // ARGV[4] -> task timeout in seconds (0 if not timeout)
 // ARGV[5] -> task deadline in unix time (0 if no deadline)
+//
+// Output:
+// Returns 1 if successfully enqueued
+// Returns 0 if task ID already exists
 var scheduleCmd = redis.NewScript(`
+if redis.call("EXISTS", KEYS[1]) == 1 then
+	return 0
+end
 redis.call("HSET", KEYS[1],
            "msg", ARGV[1],
            "state", "scheduled",
@@ -468,17 +598,24 @@ func (r *RDB) Schedule(msg *base.TaskMessage, processAt time.Time) error {
 		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "sadd", Err: err})
 	}
 	keys := []string{
-		base.TaskKey(msg.Queue, msg.ID.String()),
+		base.TaskKey(msg.Queue, msg.ID),
 		base.ScheduledKey(msg.Queue),
 	}
 	argv := []interface{}{
 		encoded,
 		processAt.Unix(),
-		msg.ID.String(),
+		msg.ID,
 		msg.Timeout,
 		msg.Deadline,
 	}
-	return r.runScript(op, scheduleCmd, keys, argv...)
+	n, err := r.runScriptWithErrorCode(op, scheduleCmd, keys, argv...)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.E(op, errors.AlreadyExists, errors.ErrTaskIdConflict)
+	}
+	return nil
 }
 
 // KEYS[1] -> unique key
@@ -490,9 +627,17 @@ func (r *RDB) Schedule(msg *base.TaskMessage, processAt time.Time) error {
 // ARGV[4] -> task message
 // ARGV[5] -> task timeout in seconds (0 if not timeout)
 // ARGV[6] -> task deadline in unix time (0 if no deadline)
+//
+// Output:
+// Returns 1 if successfully scheduled
+// Returns 0 if task ID already exists
+// Returns -1 if task unique key already exists
 var scheduleUniqueCmd = redis.NewScript(`
 local ok = redis.call("SET", KEYS[1], ARGV[1], "NX", "EX", ARGV[2])
 if not ok then
+  return -1
+end
+if redis.call("EXISTS", KEYS[2]) == 1 then
   return 0
 end
 redis.call("HSET", KEYS[2],
@@ -539,36 +684,36 @@ func (r *RDB) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl tim
 	}
 	keys := []string{
 		msg.UniqueKey,
-		base.TaskKey(msg.Queue, msg.ID.String()),
+		base.TaskKey(msg.Queue, msg.ID),
 		base.ScheduledKey(msg.Queue),
 	}
 	argv := []interface{}{
-		msg.ID.String(),
+		msg.ID,
 		int(ttl.Seconds()),
 		processAt.Unix(),
 		encoded,
 		msg.Timeout,
 		msg.Deadline,
 	}
+
 	funique := false
 	if len(forceUnique) > 0 {
 		funique = forceUnique[0]
 	}
-	var res interface{}
+	script := scheduleUniqueCmd
 	if funique {
-		res, err = scheduleUniqueForceCmd.Run(context.Background(), r.client, keys, argv...).Result()
-	} else {
-		res, err = scheduleUniqueCmd.Run(context.Background(), r.client, keys, argv...).Result()
+		script = scheduleUniqueForceCmd
 	}
+
+	n, err := r.runScriptWithErrorCode(op, script, keys, argv...)
 	if err != nil {
-		return errors.E(op, errors.Unknown, fmt.Sprintf("redis eval error: %v", err))
+		return err
 	}
-	n, ok := res.(int64)
-	if !ok {
-		return errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from Lua script: %v", res))
+	if n == -1 {
+		return errors.E(op, errors.AlreadyExists, errors.ErrDuplicateTask)
 	}
 	if n == 0 {
-		return errors.E(op, errors.AlreadyExists, errors.ErrDuplicateTask)
+		return errors.E(op, errors.AlreadyExists, errors.ErrTaskIdConflict)
 	}
 	return nil
 }
@@ -623,7 +768,7 @@ func (r *RDB) Retry(msg *base.TaskMessage, processAt time.Time, errMsg string, i
 	}
 	expireAt := now.Add(statsTTL)
 	keys := []string{
-		base.TaskKey(msg.Queue, msg.ID.String()),
+		base.TaskKey(msg.Queue, msg.ID),
 		base.ActiveKey(msg.Queue),
 		base.DeadlinesKey(msg.Queue),
 		base.RetryKey(msg.Queue),
@@ -631,7 +776,7 @@ func (r *RDB) Retry(msg *base.TaskMessage, processAt time.Time, errMsg string, i
 		base.FailedKey(msg.Queue, now),
 	}
 	argv := []interface{}{
-		msg.ID.String(),
+		msg.ID,
 		encoded,
 		processAt.Unix(),
 		expireAt.Unix(),
@@ -693,7 +838,7 @@ func (r *RDB) Archive(msg *base.TaskMessage, errMsg string) error {
 	cutoff := now.AddDate(0, 0, -archivedExpirationInDays)
 	expireAt := now.Add(statsTTL)
 	keys := []string{
-		base.TaskKey(msg.Queue, msg.ID.String()),
+		base.TaskKey(msg.Queue, msg.ID),
 		base.ActiveKey(msg.Queue),
 		base.DeadlinesKey(msg.Queue),
 		base.ArchivedKey(msg.Queue),
@@ -701,7 +846,7 @@ func (r *RDB) Archive(msg *base.TaskMessage, errMsg string) error {
 		base.FailedKey(msg.Queue, now),
 	}
 	argv := []interface{}{
-		msg.ID.String(),
+		msg.ID,
 		encoded,
 		now.Unix(),
 		cutoff.Unix(),
@@ -768,6 +913,57 @@ func (r *RDB) forwardAll(qname string) (err error) {
 		}
 	}
 	return nil
+}
+
+// KEYS[1] -> asynq:{<qname>}:completed
+// ARGV[1] -> current time in unix time
+// ARGV[2] -> task key prefix
+// ARGV[3] -> batch size (i.e. maximum number of tasks to delete)
+//
+// Returns the number of tasks deleted.
+var deleteExpiredCompletedTasksCmd = redis.NewScript(`
+local ids = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", ARGV[1], "LIMIT", 0, tonumber(ARGV[3]))
+for _, id in ipairs(ids) do
+	redis.call("DEL", ARGV[2] .. id)
+	redis.call("ZREM", KEYS[1], id)
+end
+return table.getn(ids)`)
+
+// DeleteExpiredCompletedTasks checks for any expired tasks in the given queue's completed set,
+// and delete all expired tasks.
+func (r *RDB) DeleteExpiredCompletedTasks(qname string) error {
+	// Note: Do this operation in fix batches to prevent long running script.
+	const batchSize = 100
+	for {
+		n, err := r.deleteExpiredCompletedTasks(qname, batchSize)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+	}
+}
+
+// deleteExpiredCompletedTasks runs the lua script to delete expired deleted task with the specified
+// batch size. It reports the number of tasks deleted.
+func (r *RDB) deleteExpiredCompletedTasks(qname string, batchSize int) (int64, error) {
+	var op errors.Op = "rdb.DeleteExpiredCompletedTasks"
+	keys := []string{base.CompletedKey(qname)}
+	argv := []interface{}{
+		time.Now().Unix(),
+		base.TaskKeyPrefix(qname),
+		batchSize,
+	}
+	res, err := deleteExpiredCompletedTasksCmd.Run(context.Background(), r.client, keys, argv...).Result()
+	if err != nil {
+		return 0, errors.E(op, errors.Internal, fmt.Sprintf("redis eval error: %v", err))
+	}
+	n, ok := res.(int64)
+	if !ok {
+		return 0, errors.E(op, errors.Internal, fmt.Sprintf("unexpected return value from Lua script: %v", res))
+	}
+	return n, nil
 }
 
 // KEYS[1] -> asynq:{<qname>}:deadlines
@@ -1084,4 +1280,14 @@ func (r *RDB) ScheduleUniqueBatch(msgs ...*base.MessageBatch) error {
 		return &errors.BatchError{Errors: allErrors}
 	}
 	return nil
+}
+
+// WriteResult writes the given result data for the specified task.
+func (r *RDB) WriteResult(qname, taskID string, data []byte) (int, error) {
+	var op errors.Op = "rdb.WriteResult"
+	taskKey := base.TaskKey(qname, taskID)
+	if err := r.client.HSet(context.Background(), taskKey, "result", data).Err(); err != nil {
+		return 0, errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "hset", Err: err})
+	}
+	return len(data), nil
 }

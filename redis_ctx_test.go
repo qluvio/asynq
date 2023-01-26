@@ -47,6 +47,10 @@ func (c *redisTestContext) GetPendingMessages(qname string) []*base.TaskMessage 
 	return h.GetPendingMessages(c.tb, c.r, qname)
 }
 
+func (c *redisTestContext) GetCompletedEntries(qname string) []base.Z {
+	return h.GetCompletedEntries(c.tb, c.r, qname)
+}
+
 func (c *redisTestContext) GetActiveMessages(qname string) []*base.TaskMessage {
 	return h.GetActiveMessages(c.tb, c.r, qname)
 }
@@ -94,6 +98,10 @@ func (c *redisTestContext) QueueExist(qname string) bool {
 
 func (c *redisTestContext) SeedAllPendingQueues(pending map[string][]*base.TaskMessage) {
 	h.SeedAllPendingQueues(c.tb, c.r, pending)
+}
+
+func (c *redisTestContext) SeedAllCompletedQueues(completed map[string][]base.Z) {
+	h.SeedAllCompletedQueues(c.tb, c.r, completed)
 }
 
 func (c *redisTestContext) SeedPendingQueue(pending []*base.TaskMessage, queue string) {

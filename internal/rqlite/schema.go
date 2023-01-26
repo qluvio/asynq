@@ -43,6 +43,7 @@ const (
 	retry     = "retry"
 	archived  = "archived"
 	processed = "processed"
+	completed = "completed"
 
 	TasksTable          = "asynq_tasks"
 	CreateTasksTableFmt = `CREATE TABLE IF NOT EXISTS %s (
@@ -64,9 +65,11 @@ const (
 	failed                 boolean,
 	archived_at            integer,
 	cleanup_at             integer,
+	retain_until           integer,
 	sid                    text,
 	affinity_timeout       integer,
-	recurrent              boolean
+	recurrent              boolean,
+	result                 text 
 )`
 
 	ServersTable          = "asynq_servers"

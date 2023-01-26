@@ -2,7 +2,7 @@
 // Use of this source code is governed by a MIT license
 // that can be found in the LICENSE file.
 
-package asynq
+package context
 
 import (
 	"context"
@@ -24,12 +24,11 @@ func TestCreateContextWithFutureDeadline(t *testing.T) {
 	for _, tc := range tests {
 		msg := &base.TaskMessage{
 			Type:    "something",
-			ID:      uuid.New(),
+			ID:      uuid.NewString(),
 			Payload: nil,
 		}
 
-		ctx, cancel := createContext(msg, tc.deadline)
-
+		ctx, cancel := New(msg, tc.deadline)
 		select {
 		case x := <-ctx.Done():
 			t.Errorf("<-ctx.Done() == %v, want nothing (it should block)", x)
@@ -64,11 +63,11 @@ func TestCreateContextWithPastDeadline(t *testing.T) {
 	for _, tc := range tests {
 		msg := &base.TaskMessage{
 			Type:    "something",
-			ID:      uuid.New(),
+			ID:      uuid.NewString(),
 			Payload: nil,
 		}
 
-		ctx, cancel := createContext(msg, tc.deadline)
+		ctx, cancel := New(msg, tc.deadline)
 		defer cancel()
 
 		select {
@@ -92,21 +91,21 @@ func TestGetTaskMetadataFromContext(t *testing.T) {
 		desc string
 		msg  *base.TaskMessage
 	}{
-		{"with zero retried message", &base.TaskMessage{Type: "something", ID: uuid.New(), Retry: 25, Retried: 0, Timeout: 1800, Queue: "default"}},
-		{"with non-zero retried message", &base.TaskMessage{Type: "something", ID: uuid.New(), Retry: 10, Retried: 5, Timeout: 1800, Queue: "default"}},
-		{"with custom queue name", &base.TaskMessage{Type: "something", ID: uuid.New(), Retry: 25, Retried: 0, Timeout: 1800, Queue: "custom"}},
+		{"with zero retried message", &base.TaskMessage{Type: "something", ID: uuid.NewString(), Retry: 25, Retried: 0, Timeout: 1800, Queue: "default"}},
+		{"with non-zero retried message", &base.TaskMessage{Type: "something", ID: uuid.NewString(), Retry: 10, Retried: 5, Timeout: 1800, Queue: "default"}},
+		{"with custom queue name", &base.TaskMessage{Type: "something", ID: uuid.NewString(), Retry: 25, Retried: 0, Timeout: 1800, Queue: "custom"}},
 	}
 
 	for _, tc := range tests {
-		ctx, cancel := createContext(tc.msg, time.Now().Add(30*time.Minute))
+		ctx, cancel := New(tc.msg, time.Now().Add(30*time.Minute))
 		defer cancel()
 
 		id, ok := GetTaskID(ctx)
 		if !ok {
 			t.Errorf("%s: GetTaskID(ctx) returned ok == false", tc.desc)
 		}
-		if ok && id != tc.msg.ID.String() {
-			t.Errorf("%s: GetTaskID(ctx) returned id == %q, want %q", tc.desc, id, tc.msg.ID.String())
+		if ok && id != tc.msg.ID {
+			t.Errorf("%s: GetTaskID(ctx) returned id == %q, want %q", tc.desc, id, tc.msg.ID)
 		}
 
 		retried, ok := GetRetryCount(ctx)

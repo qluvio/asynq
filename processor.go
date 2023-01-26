@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq/internal/base"
+	asynqcontext "github.com/hibiken/asynq/internal/context"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
 	"golang.org/x/time/rate"
@@ -188,25 +189,35 @@ func (p *processor) exec() {
 				<-p.sema // release token
 			}()
 
-			ctx, cancel := createContext(msg, deadline)
-			p.cancelations.Add(msg.ID.String(), cancel)
+			ctx, cancel := asynqcontext.New(msg, deadline)
+			p.cancelations.Add(msg.ID, cancel)
 			defer func() {
 				cancel()
-				p.cancelations.Delete(msg.ID.String())
+				p.cancelations.Delete(msg.ID)
 			}()
 
 			// check context before starting a worker goroutine.
 			select {
 			case <-ctx.Done():
 				// already canceled (e.g. deadline exceeded).
-				p.retryOrArchive(ctx, msg, "already done", ctx.Err())
+				p.handleFailedMessage(ctx, msg, "already done", ctx.Err())
 				return
 			default:
 			}
 
 			resCh := make(chan error, 1)
 			go func() {
-				resCh <- p.perform(ctx, NewTask(msg.Type, msg.Payload))
+				task := newTask(
+					msg.Type,
+					msg.Payload,
+					&ResultWriter{
+						id:     msg.ID,
+						qname:  msg.Queue,
+						broker: p.broker,
+						ctx:    ctx,
+					},
+				)
+				resCh <- p.perform(ctx, task)
 			}()
 
 			select {
@@ -216,19 +227,15 @@ func (p *processor) exec() {
 				p.requeueAborting(msg)
 				return
 			case <-ctx.Done():
-				p.retryOrArchive(ctx, msg, "done", ctx.Err())
+				p.handleFailedMessage(ctx, msg, "done", ctx.Err())
 				return
 			case resErr := <-resCh:
-				// Note: One of three things should happen.
-				// 1) Done     -> Removes the message from Active
-				// 2) Retry    -> Removes the message from Active & Adds the message to Retry
-				// 3) Archive  -> Removes the message from Active & Adds the message to archive
 				if resErr != nil {
-					p.retryOrArchive(ctx, msg, "errored", resErr)
+					p.handleFailedMessage(ctx, msg, "errored", resErr)
 					return
 				}
 				if !msg.Recurrent {
-					p.markAsDone(ctx, msg)
+					p.handleSucceededMessage(ctx, msg)
 				} else {
 					p.requeue(ctx, msg)
 				}
@@ -271,6 +278,34 @@ func (p *processor) requeueAborting(msg *base.TaskMessage) {
 	}
 }
 
+func (p *processor) handleSucceededMessage(ctx context.Context, msg *base.TaskMessage) {
+	if msg.Retention > 0 {
+		p.markAsComplete(ctx, msg)
+	} else {
+		p.markAsDone(ctx, msg)
+	}
+}
+
+func (p *processor) markAsComplete(ctx context.Context, msg *base.TaskMessage) {
+	err := p.broker.MarkAsComplete(p.serverID, msg)
+	if err != nil {
+		errMsg := fmt.Sprintf("Could not move task id=%s type=%q from %q to %q:  %+v",
+			msg.ID, msg.Type, base.ActiveKey(msg.Queue), base.CompletedKey(msg.Queue), err)
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			panic("asynq: internal error: missing deadline in context")
+		}
+		p.logger.Warnf("%s; Will retry syncing", errMsg)
+		p.syncRequestCh <- &syncRequest{
+			fn: func() error {
+				return p.broker.MarkAsComplete(p.serverID, msg)
+			},
+			errMsg:   errMsg,
+			deadline: deadline,
+		}
+	}
+}
+
 func (p *processor) markAsDone(ctx context.Context, msg *base.TaskMessage) {
 	err := p.broker.Done(p.serverID, msg)
 	if err != nil {
@@ -294,7 +329,7 @@ func (p *processor) markAsDone(ctx context.Context, msg *base.TaskMessage) {
 // the task should not be retried and should be archived instead.
 var SkipRetry = errors.New("skip retry for the task")
 
-func (p *processor) retryOrArchive(ctx context.Context, msg *base.TaskMessage, reason string, err error) {
+func (p *processor) handleFailedMessage(ctx context.Context, msg *base.TaskMessage, reason string, err error) {
 	p.logger.Debugf("Retry or archive (%s) task id=%s error:%s", reason, msg.ID, err)
 	if p.errHandler != nil {
 		p.errHandler.HandleError(ctx, NewTask(msg.Type, msg.Payload), err)

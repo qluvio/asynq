@@ -15,14 +15,13 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/ptypes"
-	"github.com/google/uuid"
 	"github.com/hibiken/asynq/internal/errors"
 	pb "github.com/hibiken/asynq/internal/proto"
 	"google.golang.org/protobuf/proto"
 )
 
 // Version of asynq library and CLI.
-const Version = "0.18.5"
+const Version = "0.19.0"
 
 // DefaultQueueName is the queue name used if none are specified by user.
 const DefaultQueueName = "default"
@@ -48,6 +47,7 @@ const (
 	TaskStateScheduled
 	TaskStateRetry
 	TaskStateArchived
+	TaskStateCompleted
 )
 
 func (s TaskState) String() string {
@@ -62,6 +62,8 @@ func (s TaskState) String() string {
 		return "retry"
 	case TaskStateArchived:
 		return "archived"
+	case TaskStateCompleted:
+		return "completed"
 	}
 	panic(fmt.Sprintf("internal error: unknown task state %d", s))
 }
@@ -78,6 +80,8 @@ func TaskStateFromString(s string) (TaskState, error) {
 		return TaskStateRetry, nil
 	case "archived":
 		return TaskStateArchived, nil
+	case "completed":
+		return TaskStateCompleted, nil
 	}
 	return 0, errors.E(errors.FailedPrecondition, fmt.Sprintf("%q is not supported task state", s))
 }
@@ -136,6 +140,10 @@ func DeadlinesKey(qname string) string {
 	return fmt.Sprintf("%sdeadlines", QueueKeyPrefix(qname))
 }
 
+func CompletedKey(qname string) string {
+	return fmt.Sprintf("%scompleted", QueueKeyPrefix(qname))
+}
+
 // PausedKey returns a redis key to indicate that the given queue is paused.
 func PausedKey(qname string) string {
 	return fmt.Sprintf("%spaused", QueueKeyPrefix(qname))
@@ -190,7 +198,7 @@ type TaskMessage struct {
 	Payload []byte
 
 	// ID is a unique identifier for each task.
-	ID uuid.UUID
+	ID string
 
 	// Queue is a name this message should be enqueued to.
 	Queue string
@@ -243,6 +251,15 @@ type TaskMessage struct {
 	// which the task can be handled by a server other than the one that handled
 	// it the first time.
 	ServerAffinity int64
+
+	// Retention specifies the number of seconds the task should be retained after completion.
+	Retention int64
+
+	// CompletedAt is the time the task was processed successfully in Unix time,
+	// the number of seconds elapsed since January 1, 1970 UTC.
+	//
+	// Use zero to indicate no value.
+	CompletedAt int64
 }
 
 type MessageBatch struct {
@@ -267,7 +284,7 @@ func EncodeMessage(msg *TaskMessage) ([]byte, error) {
 	return proto.Marshal(&pb.TaskMessage{
 		Type:             msg.Type,
 		Payload:          msg.Payload,
-		Id:               msg.ID.String(),
+		Id:               msg.ID,
 		Queue:            msg.Queue,
 		Retry:            int32(msg.Retry),
 		Retried:          int32(msg.Retried),
@@ -280,6 +297,8 @@ func EncodeMessage(msg *TaskMessage) ([]byte, error) {
 		Recurrent:        recurrent,
 		ReprocessAfter:   msg.ReprocessAfter,
 		ServerAffinity:   msg.ServerAffinity,
+		Retention:        msg.Retention,
+		CompletedAt:      msg.CompletedAt,
 	})
 }
 
@@ -292,7 +311,7 @@ func DecodeMessage(data []byte) (*TaskMessage, error) {
 	return &TaskMessage{
 		Type:           pbmsg.GetType(),
 		Payload:        pbmsg.GetPayload(),
-		ID:             uuid.MustParse(pbmsg.GetId()),
+		ID:             pbmsg.GetId(),
 		Queue:          pbmsg.GetQueue(),
 		Retry:          int(pbmsg.GetRetry()),
 		Retried:        int(pbmsg.GetRetried()),
@@ -305,6 +324,8 @@ func DecodeMessage(data []byte) (*TaskMessage, error) {
 		Recurrent:      pbmsg.GetRecurrent() > 0,
 		ReprocessAfter: pbmsg.GetReprocessAfter(),
 		ServerAffinity: pbmsg.GetServerAffinity(),
+		Retention:      pbmsg.GetRetention(),
+		CompletedAt:    pbmsg.GetCompletedAt(),
 	}, nil
 }
 
@@ -313,6 +334,7 @@ type TaskInfo struct {
 	Message       *TaskMessage
 	State         TaskState
 	NextProcessAt time.Time
+	Result        []byte
 }
 
 // Z represents sorted set member.
@@ -697,6 +719,8 @@ type Broker interface {
 	// It removes a uniqueness lock acquired by the task, if any.
 	// ServerID is the ID of the server that processed the task (used for server affinity)
 	Done(serverID string, msg *TaskMessage) error
+	// MarkAsComplete marks the task as completed
+	MarkAsComplete(serverID string, msg *TaskMessage) error
 	// Requeue moves the task from active queue to the specified queue.
 	// ServerID is the ID of the server that processed the task (used for server affinity)
 	// aborted is true when re-queuing occurs because the server stops and false for recurrent tasks
@@ -717,6 +741,7 @@ type Broker interface {
 	// and move any tasks that are ready to be processed to the pending set.
 	ForwardIfReady(qnames ...string) error
 	// ListDeadlineExceeded returns a list of task messages that have exceeded the deadline from the given queues.
+	DeleteExpiredCompletedTasks(qname string) error
 	ListDeadlineExceeded(deadline time.Time, qnames ...string) ([]*TaskMessage, error)
 	// WriteServerState writes server state data to the store with expiration set to the value ttl.
 	WriteServerState(info *ServerInfo, workers []*WorkerInfo, ttl time.Duration) error
@@ -727,6 +752,8 @@ type Broker interface {
 	// PublishCancelation publish cancelation message to all subscribers.
 	// The message is the ID for the task to be canceled.
 	PublishCancelation(id string) error
+	// WriteResult
+	WriteResult(qname, taskID string, data []byte) (n int, err error)
 	// Close closes the connection with the store server.
 	Close() error
 	// ListServers returns the list of server info.

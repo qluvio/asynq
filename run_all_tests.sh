@@ -5,7 +5,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 RESET='\033[0m'
 
-tags="byollvm LLVM avpipe"
+tags=""
 flags=""
 debug_flags=""
 short="-short"     # run only short tests per default
@@ -131,7 +131,7 @@ fi
 if [[ "${run_rqlite}" == "true" ]]; then
     echo "running rqlite tests"
     ret=0
-    go test ${debug_flags} $flags -tags "$tags" $short -count=1 ./internal/rqlite 2>&1 |
+    go test ${debug_flags} $flags -tags "$tags" $short -count=1 ./internal/rqlite --broker_type rqlite 2>&1 |
         tee "$out" |
         grep -av "?.*\[no test files\]"
     if [[ ${PIPESTATUS[0]} != 0 ]]; then

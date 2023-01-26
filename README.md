@@ -49,7 +49,7 @@ Task queues are used as a mechanism to distribute work across multiple machines.
 
 ## Quickstart
 
-Make sure you have Go installed ([download](https://golang.org/dl/)). Version `1.13` or higher is required.
+Make sure you have Go installed ([download](https://golang.org/dl/)). Version `1.14` or higher is required.
 
 Initialize your project by creating a folder and then running `go mod init github.com/your/repo` ([learn more](https://blog.golang.org/using-go-modules)) inside the folder. Then install Asynq library with the [`go get`](https://golang.org/cmd/go/#hdr-Add_dependencies_to_current_module_and_install_them) command:
 
@@ -103,7 +103,8 @@ func NewImageResizeTask(src string) (*asynq.Task, error) {
     if err != nil {
         return nil, err
     }
-    return asynq.NewTask(TypeImageResize, payload), nil
+    // task options can be passed to NewTask, which can be overridden at enqueue time.
+    return asynq.NewTask(TypeImageResize, payload, asynq.MaxRetry(5), asynq.Timeout(20 * time.Minute)), nil
 }
 
 //---------------------------------------------------------------
@@ -196,24 +197,11 @@ func main() {
     //            Options include MaxRetry, Queue, Timeout, Deadline, Unique etc.
     // ----------------------------------------------------------------------------
 
-    client.SetDefaultOptions(tasks.TypeImageResize, asynq.MaxRetry(10), asynq.Timeout(3*time.Minute))
-
     task, err = tasks.NewImageResizeTask("https://example.com/myassets/image.jpg")
     if err != nil {
         log.Fatalf("could not create task: %v", err)
     }
-    info, err = client.Enqueue(task)
-    if err != nil {
-        log.Fatalf("could not enqueue task: %v", err)
-    }
-    log.Printf("enqueued task: id=%s queue=%s", info.ID, info.Queue)
-
-    // ---------------------------------------------------------------------------
-    // Example 4: Pass options to tune task processing behavior at enqueue time.
-    //            Options passed at enqueue time override default ones.
-    // ---------------------------------------------------------------------------
-
-    info, err = client.Enqueue(task, asynq.Queue("critical"), asynq.Timeout(30*time.Second))
+    info, err = client.Enqueue(task, asynq.MaxRetry(10), asynq.Timeout(3 * time.Minute))
     if err != nil {
         log.Fatalf("could not enqueue task: %v", err)
     }

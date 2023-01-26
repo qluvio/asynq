@@ -5,6 +5,7 @@
 package asynq
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -23,16 +24,39 @@ type Task struct {
 
 	// payload holds data needed to perform the task.
 	payload []byte
+
+	// opts holds options for the task.
+	opts []Option
+
+	// w is the ResultWriter for the task.
+	w *ResultWriter
 }
 
 func (t *Task) Type() string    { return t.typename }
 func (t *Task) Payload() []byte { return t.payload }
 
+// ResultWriter returns a pointer to the ResultWriter associated with the task.
+//
+// Nil pointer is returned if called on a newly created task (i.e. task created by calling NewTask).
+// Only the tasks passed to Handler.ProcessTask have a valid ResultWriter pointer.
+func (t *Task) ResultWriter() *ResultWriter { return t.w }
+
 // NewTask returns a new Task given a type name and payload data.
-func NewTask(typename string, payload []byte) *Task {
+// Options can be passed to configure task processing behavior.
+func NewTask(typename string, payload []byte, opts ...Option) *Task {
 	return &Task{
 		typename: typename,
 		payload:  payload,
+		opts:     opts,
+	}
+}
+
+// newTask creates a task with the given typename, payload and ResultWriter.
+func newTask(typename string, payload []byte, w *ResultWriter) *Task {
+	return &Task{
+		typename: typename,
+		payload:  payload,
+		w:        w,
 	}
 }
 
@@ -87,11 +111,31 @@ type TaskInfo struct {
 	// which the task can be handled by a server other than the one that handled
 	// it the first time.
 	ServerAffinity time.Duration
+
+	// Retention is duration of the retention period after the task is successfully processed.
+	Retention time.Duration
+
+	// CompletedAt is the time when the task is processed successfully.
+	// Zero value (i.e. time.Time{}) indicates no value.
+	CompletedAt time.Time
+
+	// Result holds the result data associated with the task.
+	// Use ResultWriter to write result data from the Handler.
+	Result []byte
 }
 
-func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time.Time) *TaskInfo {
+// If t is non-zero, returns time converted from t as unix time in seconds.
+// If t is zero, returns zero value of time.Time.
+func fromUnixTimeOrZero(t int64) time.Time {
+	if t == 0 {
+		return time.Time{}
+	}
+	return time.Unix(t, 0)
+}
+
+func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time.Time, result []byte) *TaskInfo {
 	info := TaskInfo{
-		ID:             msg.ID.String(),
+		ID:             msg.ID,
 		Queue:          msg.Queue,
 		Type:           msg.Type,
 		Payload:        msg.Payload, // Do we need to make a copy?
@@ -100,20 +144,14 @@ func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time
 		LastErr:        msg.ErrorMsg,
 		Timeout:        time.Duration(msg.Timeout) * time.Second,
 		NextProcessAt:  nextProcessAt,
+		LastFailedAt:   fromUnixTimeOrZero(msg.LastFailedAt),
 		Recurrent:      msg.Recurrent,
 		ReprocessAfter: time.Duration(msg.ReprocessAfter) * time.Second,
 		ServerAffinity: time.Duration(msg.ServerAffinity) * time.Second,
-	}
-	if msg.LastFailedAt == 0 {
-		info.LastFailedAt = time.Time{}
-	} else {
-		info.LastFailedAt = time.Unix(msg.LastFailedAt, 0)
-	}
-
-	if msg.Deadline == 0 {
-		info.Deadline = time.Time{}
-	} else {
-		info.Deadline = time.Unix(msg.Deadline, 0)
+		Deadline:       fromUnixTimeOrZero(msg.Deadline),
+		Retention:      time.Duration(msg.Retention) * time.Second,
+		CompletedAt:    fromUnixTimeOrZero(msg.CompletedAt),
+		Result:         result,
 	}
 
 	switch state {
@@ -127,6 +165,8 @@ func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time
 		info.State = TaskStateRetry
 	case base.TaskStateArchived:
 		info.State = TaskStateArchived
+	case base.TaskStateCompleted:
+		info.State = TaskStateCompleted
 	default:
 		panic(fmt.Sprintf("internal error: unknown state: %d", state))
 	}
@@ -151,6 +191,9 @@ const (
 
 	// TaskStateArchived indicates that the task is archived and stored for inspection purposes.
 	TaskStateArchived
+
+	// Indicates that the task is processed successfully and retained until the retention TTL expires.
+	TaskStateCompleted
 )
 
 func (s TaskState) String() string {
@@ -165,6 +208,8 @@ func (s TaskState) String() string {
 		return "retry"
 	case TaskStateArchived:
 		return "archived"
+	case TaskStateCompleted:
+		return "completed"
 	}
 	panic("asynq: unknown task state")
 }
@@ -175,4 +220,28 @@ type ClientConnOpt interface {
 	// MakeClient returns a new client instance.
 	// Return value is intentionally opaque to hide the implementation detail of client.
 	MakeClient() interface{}
+}
+
+// ResultWriter is a client interface to write result data for a task.
+// It writes the data to the redis instance the server is connected to.
+type ResultWriter struct {
+	id     string // task ID this writer is responsible for
+	qname  string // queue name the task belongs to
+	broker base.Broker
+	ctx    context.Context // context associated with the task
+}
+
+// Write writes the given data as a result of the task the ResultWriter is associated with.
+func (w *ResultWriter) Write(data []byte) (n int, err error) {
+	select {
+	case <-w.ctx.Done():
+		return 0, fmt.Errorf("failed to result task result: %v", w.ctx.Err())
+	default:
+	}
+	return w.broker.WriteResult(w.qname, w.id, data)
+}
+
+// TaskID returns the ID of the task the ResultWriter is associated with.
+func (w *ResultWriter) TaskID() string {
+	return w.id
 }

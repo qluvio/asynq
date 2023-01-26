@@ -3,7 +3,6 @@ package rqlite
 import (
 	"fmt"
 
-	"github.com/google/uuid"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 )
@@ -141,7 +140,7 @@ func (r *RQLite) HistoricalStats(qname string, n int) ([]*base.DailyStats, error
 	return conn.historicalStats(qname, n)
 }
 
-func (r *RQLite) GetTaskInfo(qname string, taskid uuid.UUID) (*base.TaskInfo, error) {
+func (r *RQLite) GetTaskInfo(qname string, taskid string) (*base.TaskInfo, error) {
 	var op errors.Op = "rqlite.GetTaskInfo"
 
 	err := r.queueMustExist(op, qname)
@@ -153,7 +152,7 @@ func (r *RQLite) GetTaskInfo(qname string, taskid uuid.UUID) (*base.TaskInfo, er
 	return conn.getTaskInfo(qname, taskid)
 }
 
-func (r *RQLite) listMessages(qname string, state string, pgn base.Pagination) ([]*base.TaskMessage, error) {
+func (r *RQLite) listMessages(qname string, state string, pgn base.Pagination) ([]*base.TaskInfo, error) {
 	var op errors.Op = "rqlite.listMessages"
 	err := r.queueMustExist(op, qname)
 	if err != nil {
@@ -167,21 +166,25 @@ func (r *RQLite) listMessages(qname string, state string, pgn base.Pagination) (
 	if len(tasks) == 0 {
 		return nil, nil
 	}
-	ret := make([]*base.TaskMessage, 0, len(tasks))
+	ret := make([]*base.TaskInfo, 0, len(tasks))
 	for _, task := range tasks {
-		ret = append(ret, task.msg)
+		ti, err := getTaskInfo(op, task)
+		if err != nil {
+			return nil, errors.E(op, errors.Internal, err)
+		}
+		ret = append(ret, ti)
 	}
 	return ret, nil
 }
 
-func (r *RQLite) ListPending(qname string, pgn base.Pagination) ([]*base.TaskMessage, error) {
+func (r *RQLite) ListPending(qname string, pgn base.Pagination) ([]*base.TaskInfo, error) {
 	return r.listMessages(qname, pending, pgn)
 }
-func (r *RQLite) ListActive(qname string, pgn base.Pagination) ([]*base.TaskMessage, error) {
+func (r *RQLite) ListActive(qname string, pgn base.Pagination) ([]*base.TaskInfo, error) {
 	return r.listMessages(qname, active, pgn)
 }
 
-func (r *RQLite) listEntries(qname string, state string, pgn base.Pagination, orderBy string) ([]base.Z, error) {
+func (r *RQLite) listEntries(qname string, state string, pgn base.Pagination, orderBy string) ([]*base.TaskInfo, error) {
 	var op errors.Op = "rqlite.listEntries"
 	err := r.queueMustExist(op, qname)
 	if err != nil {
@@ -195,30 +198,30 @@ func (r *RQLite) listEntries(qname string, state string, pgn base.Pagination, or
 	if len(tasks) == 0 {
 		return nil, nil
 	}
-	ret := make([]base.Z, 0, len(tasks))
+	ret := make([]*base.TaskInfo, 0, len(tasks))
 	for _, task := range tasks {
-		score := int64(0)
-		switch state {
-		case scheduled:
-			score = task.scheduledAt
-		case retry:
-			score = task.retryAt
-		case archived:
-			score = task.archivedAt
+		ti, err := getTaskInfo(op, task)
+		if err != nil {
+			return nil, errors.E(op, errors.Internal, err)
 		}
-		ret = append(ret, base.Z{Message: task.msg, Score: score})
+		ret = append(ret, ti)
 	}
 	return ret, nil
 }
 
-func (r *RQLite) ListScheduled(qname string, pgn base.Pagination) ([]base.Z, error) {
+func (r *RQLite) ListScheduled(qname string, pgn base.Pagination) ([]*base.TaskInfo, error) {
 	return r.listEntries(qname, scheduled, pgn, "scheduled_at")
 }
-func (r *RQLite) ListRetry(qname string, pgn base.Pagination) ([]base.Z, error) {
+func (r *RQLite) ListRetry(qname string, pgn base.Pagination) ([]*base.TaskInfo, error) {
 	return r.listEntries(qname, retry, pgn, "retry_at")
 }
-func (r *RQLite) ListArchived(qname string, pgn base.Pagination) ([]base.Z, error) {
+func (r *RQLite) ListArchived(qname string, pgn base.Pagination) ([]*base.TaskInfo, error) {
 	return r.listEntries(qname, archived, pgn, "archived_at")
+}
+
+// ListCompleted returns all tasks from the given queue that have completed successfully.
+func (r *RQLite) ListCompleted(qname string, pgn base.Pagination) ([]*base.TaskInfo, error) {
+	return r.listEntries(qname, completed, pgn, "retain_until")
 }
 
 func (r *RQLite) deleteTasks(qname, state string) (int64, error) {
@@ -247,15 +250,18 @@ func (r *RQLite) DeleteAllRetryTasks(qname string) (int64, error) {
 func (r *RQLite) DeleteAllArchivedTasks(qname string) (int64, error) {
 	return r.deleteTasks(qname, archived)
 }
+func (r *RQLite) DeleteAllCompletedTasks(qname string) (int64, error) {
+	return r.deleteTasks(qname, completed)
+}
 
-func (r *RQLite) DeleteTask(qname string, taskid uuid.UUID) error {
+func (r *RQLite) DeleteTask(qname string, taskid string) error {
 	var op errors.Op = "rqlite.deleteTasks"
 	err := r.queueMustExist(op, qname)
 	if err != nil {
 		return err
 	}
 	conn, _ := r.Client()
-	count, err := conn.deleteTask(qname, taskid.String())
+	count, err := conn.deleteTask(qname, taskid)
 	if err != nil {
 		return errors.E(op, errors.Unknown, err)
 	}
@@ -264,7 +270,7 @@ func (r *RQLite) DeleteTask(qname string, taskid uuid.UUID) error {
 	case 1:
 		return nil
 	case 0:
-		return errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: taskid.String()})
+		return errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: taskid})
 	case -1:
 		return errors.E(op, errors.FailedPrecondition, "cannot delete task in active state. use CancelTask instead.")
 	default:
@@ -297,7 +303,7 @@ func (r *RQLite) RunAllArchivedTasks(qname string) (int64, error) {
 	return r.runAllTasks(qname, archived)
 }
 
-func (r *RQLite) RunTask(qname string, taskid uuid.UUID) error {
+func (r *RQLite) RunTask(qname string, taskid string) error {
 	var op errors.Op = "rqlite.runTask"
 
 	err := r.queueMustExist(op, qname)
@@ -306,7 +312,7 @@ func (r *RQLite) RunTask(qname string, taskid uuid.UUID) error {
 	}
 	conn, _ := r.Client()
 
-	count, err := conn.setTaskPending(qname, taskid.String())
+	count, err := conn.setTaskPending(qname, taskid)
 	if err != nil {
 		return errors.E(op, errors.Unknown, err)
 	}
@@ -314,7 +320,7 @@ func (r *RQLite) RunTask(qname string, taskid uuid.UUID) error {
 	case 1:
 		return nil
 	case 0:
-		return errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: taskid.String()})
+		return errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: taskid})
 	case -1:
 		return errors.E(op, errors.FailedPrecondition, "task is already running")
 	case -2:
@@ -350,7 +356,7 @@ func (r *RQLite) ArchiveAllRetryTasks(qname string) (int64, error) {
 	return r.archiveAllTasks(qname, retry)
 }
 
-func (r *RQLite) ArchiveTask(qname string, taskid uuid.UUID) error {
+func (r *RQLite) ArchiveTask(qname string, taskid string) error {
 	var op errors.Op = "rqlite.archiveTasks"
 
 	err := r.queueMustExist(op, qname)
@@ -359,7 +365,7 @@ func (r *RQLite) ArchiveTask(qname string, taskid uuid.UUID) error {
 	}
 	conn, _ := r.Client()
 
-	count, err := conn.setTaskArchived(qname, taskid.String())
+	count, err := conn.setTaskArchived(qname, taskid)
 	if err != nil {
 		return errors.E(op, errors.Unknown, err)
 	}
@@ -367,9 +373,9 @@ func (r *RQLite) ArchiveTask(qname string, taskid uuid.UUID) error {
 	case 1:
 		return nil
 	case 0:
-		return errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: taskid.String()})
+		return errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: taskid})
 	case -1:
-		return errors.E(op, errors.FailedPrecondition, &errors.TaskAlreadyArchivedError{Queue: qname, ID: taskid.String()})
+		return errors.E(op, errors.FailedPrecondition, &errors.TaskAlreadyArchivedError{Queue: qname, ID: taskid})
 	case -2:
 		return errors.E(op, errors.FailedPrecondition, "cannot archive task in active state. use CancelTask instead.")
 	default:
