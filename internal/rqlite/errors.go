@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/hibiken/asynq/internal/errors"
-	"github.com/rqlite/gorqlite"
+	"github.com/hibiken/asynq/internal/sqlite3"
 )
 
 type StatementError struct {
@@ -43,7 +43,7 @@ func (e *RqliteError) Error() string {
 
 func (e *RqliteError) Unwrap() error { return e.Err }
 
-func NewRqliteWError(op errors.Op, wr gorqlite.WriteResult, err error, stmt interface{}) error {
+func NewRqliteWError(op errors.Op, wr sqlite3.WriteResult, err error, stmt interface{}) error {
 	return &RqliteError{
 		Op:         op,
 		Err:        err,
@@ -51,7 +51,7 @@ func NewRqliteWError(op errors.Op, wr gorqlite.WriteResult, err error, stmt inte
 	}
 }
 
-func NewRqliteWsError(op errors.Op, wrs []gorqlite.WriteResult, err error, stmts []*gorqlite.Statement) error {
+func NewRqliteWsError(op errors.Op, wrs []sqlite3.WriteResult, err error, stmts []*sqlite3.Statement) error {
 	statements := make([]StatementError, 0)
 	for ndx, wr := range wrs {
 		if wr.Err != nil {
@@ -65,19 +65,19 @@ func NewRqliteWsError(op errors.Op, wrs []gorqlite.WriteResult, err error, stmts
 	}
 }
 
-func NewRqliteRError(op errors.Op, qr gorqlite.QueryResult, err error, stmt interface{}) error {
+func NewRqliteRError(op errors.Op, qr sqlite3.QueryResult, err error, stmt interface{}) error {
 	return &RqliteError{
 		Op:         op,
 		Err:        err,
-		Statements: []StatementError{{Error: qr.Err, Statement: stmt}},
+		Statements: []StatementError{{Error: qr.Err(), Statement: stmt}},
 	}
 }
 
-func NewRqliteRsError(op errors.Op, qrs []gorqlite.QueryResult, err error, stmts []*gorqlite.Statement) error {
+func NewRqliteRsError(op errors.Op, qrs []sqlite3.QueryResult, err error, stmts []*sqlite3.Statement) error {
 	statements := make([]StatementError, 0)
 	for ndx, qr := range qrs {
-		if qr.Err != nil {
-			statements = append(statements, StatementError{Error: qr.Err, Statement: stmts[ndx]})
+		if qr.Err() != nil {
+			statements = append(statements, StatementError{Error: qr.Err(), Statement: stmts[ndx]})
 		}
 	}
 	return &RqliteError{
@@ -89,7 +89,7 @@ func NewRqliteRsError(op errors.Op, qrs []gorqlite.QueryResult, err error, stmts
 
 // expectQueryResultCount returns an error if the expected count does not match
 // with the returned result
-func expectQueryResultCount(op errors.Op, expectedCount int, qrs []gorqlite.QueryResult) error {
+func expectQueryResultCount(op errors.Op, expectedCount int, qrs []sqlite3.QueryResult) error {
 	if len(qrs) != expectedCount {
 		return errors.E(op, errors.Internal, fmt.Sprintf(
 			"query result length (%d) does not match expected count (%d)",
@@ -102,7 +102,7 @@ func expectQueryResultCount(op errors.Op, expectedCount int, qrs []gorqlite.Quer
 // expectOneRowUpdated returns an error if the write-result indicates that more
 // than one row was updated. If strict is true it also returns an error if no
 // row were updated.
-func expectOneRowUpdated(op errors.Op, wr gorqlite.WriteResult, st interface{}, strict bool) error {
+func expectOneRowUpdated(op errors.Op, wr sqlite3.WriteResult, st interface{}, strict bool) error {
 	switch wr.RowsAffected {
 	case 0:
 		if strict {

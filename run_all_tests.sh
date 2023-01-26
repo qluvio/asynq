@@ -13,6 +13,7 @@ short="-short"     # run only short tests per default
 run_reg="true"     # run regular tests per default
 run_redis="false"  # don't run redis tests per default
 run_rqlite="false" # don't run rqlite tests per default
+run_sqlite="false" # don't run rqlite tests per default
 
 if [ -n "${SET_DEBUG_OUTPUT:-}" ]; then
     debug_flags="-v -x"
@@ -28,7 +29,7 @@ out=$(mktemp "$TMPDIR/run_all_tests.XXXXXX")
 ret_global=0
 
 function usage() {
-    echo "usage: $0 [-tags \"TAGS\"] [-rqlite|-no-rqlite] [-redis|-no-redis] "
+    echo "usage: $0 [-tags \"TAGS\"] [-redis|-no-redis] [-rqlite|-no-rqlite] [-sqlite|-no-sqlite]"
     echo
     echo "Default: run regular tests against redis"
     echo -e "${RESET}"
@@ -72,6 +73,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         -no-rqlite | --no-rqlite)
             run_rqlite="false"
+            shift
+            ;;
+        -sqlite | --sqlite)
+            run_sqlite="true"
+            shift
+            ;;
+        -no-sqlite | --no-sqlite)
+            run_sqlite="false"
             shift
             ;;
         -v | --verbose)
@@ -146,5 +155,22 @@ if [[ "${run_rqlite}" == "true" ]]; then
     handleResult "${ret}"
 fi
 
+if [[ "${run_sqlite}" == "true" ]]; then
+    echo "running sqlite tests"
+    ret=0
+    go test ${debug_flags} $flags -tags "$tags" $short -count=1 ./internal/rqlite --broker_type sqlite 2>&1 |
+        tee "$out" |
+        grep -av "?.*\[no test files\]"
+    if [[ ${PIPESTATUS[0]} != 0 ]]; then
+        ret=1
+    fi
+    go test ${debug_flags} $flags -tags "$tags" $short -count=1 . --broker_type sqlite 2>&1 |
+        tee "$out" |
+        grep -av "?.*\[no test files\]"
+    if [[ ${PIPESTATUS[0]} != 0 ]]; then
+        ret=1
+    fi
+    handleResult "${ret}"
+fi
 
 exit ${ret_global}

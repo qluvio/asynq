@@ -75,7 +75,7 @@ func init() {
 	rootCmd.SetVersionTemplate(versionOutput)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file to set flag defaut values (default is $HOME/.asynq.yaml)")
-	rootCmd.PersistentFlags().StringVarP(&brokerType, "broker_type", "", "redis", "broker type: redis|rqlite")
+	rootCmd.PersistentFlags().StringVarP(&brokerType, "broker_type", "", "redis", "broker type: redis|rqlite|sqlite")
 	rootCmd.PersistentFlags().StringVarP(&uri, "uri", "u", "127.0.0.1:6379", "redis server URI")
 	rootCmd.PersistentFlags().IntVarP(&db, "db", "n", 0, "redis database number (default is 0)")
 	rootCmd.PersistentFlags().StringVarP(&password, "password", "p", "", "password to use when connecting to redis server")
@@ -87,7 +87,8 @@ func init() {
 		"", "server name for TLS validation")
 
 	rqliteConfig.InitDefaults()
-	rootCmd.PersistentFlags().StringVar(&rqliteConfig.RqliteUrl, "rqlite_addr", "http://localhost:4001", "rqlite address to use")
+	rootCmd.PersistentFlags().StringVar(&rqliteConfig.SqliteDbPath, "sqlite_db_path", "", "sqlite DB path")
+	rootCmd.PersistentFlags().StringVar(&rqliteConfig.RqliteUrl, "rqlite_url", "http://localhost:4001", "rqlite address to use")
 	rootCmd.PersistentFlags().StringVar(&rqliteConfig.ConsistencyLevel, "rqlite_consistency_level", "strong", "rqlite consistency level")
 	rootCmd.PersistentFlags().StringVar(&rqliteConfig.TablesPrefix, "rqlite_tables_prefix", "", "rqlite tables prefix")
 
@@ -99,7 +100,8 @@ func init() {
 	_ = viper.BindPFlag("cluster", rootCmd.PersistentFlags().Lookup("cluster"))
 	_ = viper.BindPFlag("cluster_addrs", rootCmd.PersistentFlags().Lookup("cluster_addrs"))
 	_ = viper.BindPFlag("tls_server", rootCmd.PersistentFlags().Lookup("tls_server"))
-	_ = viper.BindPFlag("rqlite_addr", rootCmd.PersistentFlags().Lookup("rqlite_addr"))
+	_ = viper.BindPFlag("rqlite_url", rootCmd.PersistentFlags().Lookup("rqlite_url"))
+	_ = viper.BindPFlag("sqlite_db_path", rootCmd.PersistentFlags().Lookup("sqlite_db_path"))
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -158,7 +160,8 @@ func getClientConnOpt() asynq.ClientConnOpt {
 	switch brokerType {
 	case "redis":
 		return getRedisConnOpt()
-	case "rqlite":
+	case "rqlite", "sqlite":
+		rqliteConfig.Type = brokerType
 		return asynq.RqliteConnOpt{Config: rqliteConfig}
 	}
 	panic("invalid broker type: " + brokerType)
@@ -195,18 +198,22 @@ func getTLSConfig() *tls.Config {
 // cols is a list of headers and printRow specifies how to print rows.
 //
 // Example:
-// type User struct {
-//     Name string
-//     Addr string
-//     Age  int
-// }
+//
+//	type User struct {
+//	    Name string
+//	    Addr string
+//	    Age  int
+//	}
+//
 // data := []*User{{"user1", "addr1", 24}, {"user2", "addr2", 42}, ...}
 // cols := []string{"Name", "Addr", "Age"}
-// printRows := func(w io.Writer, tmpl string) {
-//     for _, u := range data {
-//         fmt.Fprintf(w, tmpl, u.Name, u.Addr, u.Age)
-//     }
-// }
+//
+//	printRows := func(w io.Writer, tmpl string) {
+//	    for _, u := range data {
+//	        fmt.Fprintf(w, tmpl, u.Name, u.Addr, u.Age)
+//	    }
+//	}
+//
 // printTable(cols, printRows)
 func printTable(cols []string, printRows func(w io.Writer, tmpl string)) {
 	format := strings.Repeat("%v\t", len(cols)) + "\n"

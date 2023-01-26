@@ -16,7 +16,6 @@ import (
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
 	"github.com/hibiken/asynq/internal/utc"
-	"github.com/rqlite/gorqlite"
 )
 
 const (
@@ -25,6 +24,8 @@ const (
 	statsTTL                  = 90 * 24 * time.Hour    // same as a duration 90 days
 	schedulerHistoryMaxEvents = 1000                   // Maximum number of enqueue events to store per scheduler entry.
 	PubsubPollingInterval     = time.Millisecond * 200 // polling period for pub-sub
+	rqliteType                = "rqlite"
+	sqliteType                = "sqlite"
 )
 
 var _ base.Broker = (*RQLite)(nil)
@@ -33,8 +34,11 @@ var _ base.Inspector = (*RQLite)(nil)
 var slog log.Base
 
 type Config struct {
-	RqliteUrl                 string        `json:"rqlite_url"`                             // Rqlite server url, e.g. http://localhost:4001.
-	ConsistencyLevel          string        `json:"consistency_level"`                      // consistency level: none | weak| strong
+	Type                      string        `json:"type"`                                   // rqlite | sqlite
+	SqliteDbPath              string        `json:"sqlite_db_path,omitempty"`               // sqlite: db path
+	SqliteInMemory            bool          `json:"sqlite_in_memory,omitempty"`             // sqlite: im memory DB
+	RqliteUrl                 string        `json:"rqlite_url,omitempty"`                   // rqlite: server url, e.g. http://localhost:4001.
+	ConsistencyLevel          string        `json:"consistency_level"`                      // rqlite: consistency level: none | weak| strong
 	TablesPrefix              string        `json:"tables_prefix,omitempty"`                // tables prefix
 	MaxArchiveSize            int           `json:"max_archive_size,omitempty"`             // maximum number of tasks in archive
 	ArchivedExpirationInDays  int           `json:"archived_expiration_in_days,omitempty"`  // number of days before an archived task gets deleted permanently
@@ -57,8 +61,34 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "nil config")
 	}
-	if len(c.RqliteUrl) == 0 {
-		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no rqlite url provided")
+	if c.RqliteUrl == "" && c.SqliteDbPath == "" {
+		if !c.SqliteInMemory {
+			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no rqlite url and no sqlite db path provided")
+		} else if c.Type == "" {
+			c.Type = sqliteType
+		}
+	}
+	switch c.Type {
+	case rqliteType:
+		if c.RqliteUrl == "" {
+			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no rqlite url provided")
+		}
+		c.SqliteDbPath = ""
+	case sqliteType:
+		if c.SqliteDbPath == "" && !c.SqliteInMemory {
+			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no sqlite db path provided")
+		}
+		c.RqliteUrl = ""
+	default:
+		if c.RqliteUrl != "" && c.SqliteDbPath != "" {
+			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "both rqlite url and sqlite db path provided")
+		}
+		if c.RqliteUrl != "" {
+			c.Type = rqliteType
+		}
+		if c.SqliteDbPath != "" {
+			c.Type = sqliteType
+		}
 	}
 	c.ConsistencyLevel = strings.ToLower(c.ConsistencyLevel)
 	if c.ConsistencyLevel != "none" && c.ConsistencyLevel != "weak" && c.ConsistencyLevel != "strong" {
@@ -141,22 +171,18 @@ func (r *RQLite) open() error {
 		return err
 	}
 
-	op := errors.Op("open")
-	gorqliteConn, err := gorqlite.OpenContext(r.context(), r.config.RqliteUrl, r.httpClient)
-	if err != nil {
-		return errors.E(op, errors.Internal, err)
+	// PENDING(GIL): use a context with deadline ...
+	ctx := context.Background()
+	var conn *Connection
+	switch r.config.Type {
+	case rqliteType:
+		conn, err = NewRQLiteConnection(ctx, r.config, r.httpClient)
+	case sqliteType:
+		conn, err = NewSQLiteConnection(ctx, r.config)
 	}
-
-	conn := NewConnection(&gorqliteConn, r.config)
-	err = conn.SetConsistencyLevel(r.config.ConsistencyLevel)
 	if err != nil {
-		return errors.E(op, errors.Internal, err)
+		return err
 	}
-	_, err = conn.CreateTablesIfNotExist()
-	if err != nil {
-		return errors.E(op, errors.Internal, err)
-	}
-
 	r.conn = conn
 	return nil
 }
@@ -191,8 +217,7 @@ func (r *RQLite) Ping() error {
 	if err != nil {
 		return err
 	}
-	_, err = conn.Leader(r.context())
-	return err
+	return conn.PingContext(r.context())
 }
 
 // Enqueue adds the given task to the pending list of the queue.

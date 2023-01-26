@@ -383,7 +383,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				tc.qname, got, err, tc.want)
 			continue
 		}
-		if brokerType == rqliteType {
+		if brokerType == rqliteType || brokerType == sqliteType {
 			if diff := cmp.Diff(tc.wantRqlite, got, timeCmpOpt, ignoreMemUsg); diff != "" {
 				t.Errorf("r.GetQueueInfo(%q) = %v, %v, want %v, nil; (-want, +got)\n%s",
 					tc.qname, got, err, tc.want, diff)
@@ -419,13 +419,13 @@ func TestInspectorHistory(t *testing.T) {
 	}
 
 	processedCount := func(i int) int {
-		if brokerType == rqliteType {
+		if brokerType == rqliteType || brokerType == sqliteType {
 			return (i + 1) * 10
 		}
 		return (i + 1) * 1000
 	}
 	failedCount := func(i int) int {
-		if brokerType == rqliteType {
+		if brokerType == rqliteType || brokerType == sqliteType {
 			return i + 1
 		}
 		return i + 10
