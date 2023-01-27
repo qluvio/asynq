@@ -62,11 +62,7 @@ func (c *Config) Validate() error {
 		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "nil config")
 	}
 	if c.RqliteUrl == "" && c.SqliteDbPath == "" {
-		if !c.SqliteInMemory {
-			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no rqlite url and no sqlite db path provided")
-		} else if c.Type == "" {
-			c.Type = sqliteType
-		}
+		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no rqlite url and no sqlite db path provided")
 	}
 	switch c.Type {
 	case rqliteType:
@@ -75,13 +71,14 @@ func (c *Config) Validate() error {
 		}
 		c.SqliteDbPath = ""
 	case sqliteType:
-		if c.SqliteDbPath == "" && !c.SqliteInMemory {
+		// require a db path even with in-memory as we need it to share the connection
+		if c.SqliteDbPath == "" {
 			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no sqlite db path provided")
 		}
 		c.RqliteUrl = ""
 	default:
 		if c.RqliteUrl != "" && c.SqliteDbPath != "" {
-			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "both rqlite url and sqlite db path provided")
+			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no type specified and both rqlite url and sqlite db path provided")
 		}
 		if c.RqliteUrl != "" {
 			c.Type = rqliteType

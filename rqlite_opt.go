@@ -10,16 +10,18 @@ import (
 
 type RqliteConfig struct {
 	Type                  string        `json:"type"`                        // rqlite | sqlite
-	SqliteDbPath          string        `json:"db_path,omitempty"`           // qqlite: DB path
+	SqliteDbPath          string        `json:"db_path,omitempty"`           // sqlite: DB path
+	SqliteInMemory        bool          `json:"sqlite_in_memory,omitempty"`  // sqlite: true to use in-memory DB
 	RqliteUrl             string        `json:"rqlite_url,omitempty"`        // Rqlite server url, e.g. http://localhost:4001.
 	ConsistencyLevel      string        `json:"consistency_level,omitempty"` // consistency level: none | weak| strong
 	TablesPrefix          string        `json:"tables_prefix,omitempty"`     // tables prefix
 	PubsubPollingInterval time.Duration `json:"pubsub_polling_interval"`     // cancellation pub-sub polling period
 }
 
-func (c *RqliteConfig) InitDefaults() {
+func (c *RqliteConfig) InitDefaults() *RqliteConfig {
 	c.ConsistencyLevel = "strong"
 	c.PubsubPollingInterval = rqlite.PubsubPollingInterval
+	return c
 }
 
 func (c *RqliteConfig) make() *rqlite.Config {
@@ -28,6 +30,7 @@ func (c *RqliteConfig) make() *rqlite.Config {
 	//  their own package and be accessed from both package 'asynq' and internal/* ...
 	ret.Type = c.Type
 	ret.SqliteDbPath = c.SqliteDbPath
+	ret.SqliteInMemory = c.SqliteInMemory
 	ret.RqliteUrl = c.RqliteUrl
 	if len(c.ConsistencyLevel) > 0 {
 		ret.ConsistencyLevel = c.ConsistencyLevel
@@ -42,7 +45,7 @@ func (c *RqliteConfig) make() *rqlite.Config {
 }
 
 type RqliteConnOpt struct {
-	Config     RqliteConfig
+	Config     *RqliteConfig
 	HttpClient *http.Client
 	Log        log.Base
 }

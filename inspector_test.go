@@ -3032,7 +3032,10 @@ func TestInspectorArchiveTaskArchivesRetryTask(t *testing.T) {
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "custom")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
-	now := time.Now()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
 	z1 := base.Z{Message: m1, Score: now.Add(5 * time.Minute).Unix()}
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}

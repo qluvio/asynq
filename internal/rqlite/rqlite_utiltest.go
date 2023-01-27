@@ -1,7 +1,9 @@
 package rqlite
 
 import (
+	"math/rand"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,18 @@ import (
 	"github.com/hibiken/asynq/internal/utc"
 	"github.com/stretchr/testify/require"
 )
+
+func RandomInMemoryDbPath() string {
+	var output strings.Builder
+	chars := "abcdedfghijklmnopqrstABCDEFGHIJKLMNOP"
+
+	for i := 0; i < 20; i++ {
+		random := rand.Intn(len(chars))
+		randomChar := chars[random]
+		output.WriteString(string(randomChar))
+	}
+	return output.String()
+}
 
 func GetPendingMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMessage {
 	return getMessages(tb, r, queue, pending)

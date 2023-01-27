@@ -17,12 +17,17 @@ func NewSQLiteConnection(ctx context.Context, config *Config) (*Connection, erro
 	case false:
 		conn, err = db.OpenContext(ctx, config.SqliteDbPath, false)
 	case true:
-		conn, err = db.OpenInMemory(false)
+		conn, err = db.OpenInMemoryPath(config.SqliteDbPath, false)
 	}
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}
-	return newSQLiteConnection(conn, config), nil
+	ret := newSQLiteConnection(conn, config)
+	_, err = ret.CreateTablesIfNotExist()
+	if err != nil {
+		return nil, errors.E(op, errors.Internal, err)
+	}
+	return ret, nil
 }
 
 func newSQLiteConnection(conn *db.DB, config *Config) *Connection {

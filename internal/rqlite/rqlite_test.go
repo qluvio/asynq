@@ -2,9 +2,6 @@ package rqlite
 
 import (
 	"encoding/json"
-	"flag"
-	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -18,55 +15,6 @@ import (
 	"github.com/hibiken/asynq/internal/utc"
 	"github.com/stretchr/testify/require"
 )
-
-// variables used for package testing.
-var (
-	config Config
-)
-
-func init() {
-	config.InitDefaults()
-	flag.StringVar(&config.Type, "broker_type", "", "broker type to use in testing: rqlite | sqlite")
-	flag.StringVar(&config.SqliteDbPath, "db_path", "", "sqlite DB path to use in testing")
-	flag.StringVar(&config.RqliteUrl, "rqlite_url", "http://localhost:4001", "rqlite url to use in testing")
-	flag.StringVar(&config.ConsistencyLevel, "consistency_level", "strong", "consistency level (rqlite)")
-	flag.BoolVar(&config.SqliteInMemory, "sqlite_in_memory", false, "use in memory DB (sqlite)")
-}
-
-func skipUnknownBroker(tb testing.TB) {
-	run := false
-	switch config.Type {
-	case rqliteType, sqliteType:
-		run = true
-	}
-	if !run {
-		tb.Skip(fmt.Sprintf("skipping test with broker type: [%s]", config.Type))
-	}
-}
-
-func setup(tb testing.TB) *RQLite {
-	skipUnknownBroker(tb)
-
-	if config.Type == sqliteType {
-		if config.SqliteDbPath == "" {
-			db, err := os.CreateTemp("", "sqlite")
-			require.NoError(tb, err)
-			config.SqliteDbPath = db.Name()
-			fmt.Println("sqlite db path:", db.Name())
-			tb.Cleanup(func() { _ = os.Remove(db.Name()) })
-		}
-		config.RqliteUrl = ""
-	}
-
-	tb.Helper()
-	ret := NewRQLite(&config, nil, nil)
-	err := ret.Open()
-	if err != nil {
-		tb.Fatal("Unable to connect rqlite", err)
-	}
-	FlushDB(tb, ret.conn)
-	return ret
-}
 
 func TestCreateTables(t *testing.T) {
 	r := setup(t)

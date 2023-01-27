@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,14 +27,16 @@ import (
 
 // variables used for package testing.
 var (
-	brokerType string // redis | rqlite | sqlite
-	redisAddr  string
-	redisDB    int
+	initBrokerOnce sync.Once
+	sqliteDbTemp   bool
+	brokerType     string // redis | rqlite | sqlite
+	redisAddr      string
+	redisDB        int
 
 	useRedisCluster   bool
 	redisClusterAddrs string // comma-separated list of host:port
 
-	rqliteConfig RqliteConfig
+	rqliteConfig = (&RqliteConfig{}).InitDefaults()
 
 	testLogLevel = FatalLevel
 )
@@ -50,6 +53,7 @@ func init() {
 
 	rqliteConfig.InitDefaults()
 	flag.StringVar(&rqliteConfig.SqliteDbPath, "sqlite_db_path", "", "sqlite db path")
+	flag.BoolVar(&rqliteConfig.SqliteInMemory, "sqlite_in_memory", false, "use in memory DB (sqlite)")
 	flag.StringVar(&rqliteConfig.RqliteUrl, "rqlite_url", "http://localhost:4001", "rqlite address to use")
 	flag.StringVar(&rqliteConfig.ConsistencyLevel, "rqlite_consistency_level", "strong", "consistency level (rqlite)")
 
@@ -94,6 +98,26 @@ type TestContext interface {
 	SeedFailedQueue(failedCount int, qname string, ts time.Time)
 }
 
+func doInitBrokerTypeOnce(tb testing.TB) {
+	initBrokerOnce.Do(func() {
+		if brokerType == sqliteType {
+			rqliteConfig.Type = brokerType
+			if rqliteConfig.SqliteDbPath == "" {
+				if rqliteConfig.SqliteInMemory {
+					rqliteConfig.SqliteDbPath = rqlite.RandomInMemoryDbPath()
+				} else {
+					sqliteDbTemp = true
+					db, err := os.CreateTemp("", "sqlite")
+					require.NoError(tb, err)
+					rqliteConfig.SqliteDbPath = db.Name()
+				}
+			}
+			fmt.Println("sqlite db path:", rqliteConfig.SqliteDbPath)
+			rqliteConfig.RqliteUrl = ""
+		}
+	})
+}
+
 func getClientConnOpt(tb testing.TB) ClientConnOpt {
 	switch brokerType {
 	case redisType:
@@ -106,19 +130,9 @@ func getClientConnOpt(tb testing.TB) ClientConnOpt {
 }
 
 func setupTestContext(tb testing.TB) TestContext {
+	doInitBrokerTypeOnce(tb)
+
 	var ret TestContext
-
-	if brokerType == sqliteType {
-		if rqliteConfig.SqliteDbPath == "" {
-			db, err := os.CreateTemp("", "sqlite")
-			require.NoError(tb, err)
-			rqliteConfig.SqliteDbPath = db.Name()
-			fmt.Println("sqlite db path:", db.Name())
-			tb.Cleanup(func() { _ = os.Remove(db.Name()) })
-		}
-		rqliteConfig.RqliteUrl = ""
-	}
-
 	switch brokerType {
 	case redisType:
 		opt := getRedisConnOpt(tb)
