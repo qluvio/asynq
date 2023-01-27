@@ -84,7 +84,10 @@ func (s *subscriber) start(wg *sync.WaitGroup) {
 			case msg := <-cancelCh:
 				id, ok := msg.(string)
 				if !ok {
-					s.logger.Warn(fmt.Sprintf("Subscriber: invalid value %v", msg))
+					if msg != nil {
+						// avoid clobbering logs with nil warnings
+						s.logger.Warn(fmt.Sprintf("Subscriber: invalid value %v", msg))
+					}
 					continue
 				}
 				cancel, ok := s.cancelations.Get(id)
