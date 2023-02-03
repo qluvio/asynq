@@ -168,19 +168,13 @@ func (r *RQLite) open() error {
 		return err
 	}
 
-	// PENDING(GIL): use a context with deadline ...
-	ctx := context.Background()
-	var conn *Connection
-	switch r.config.Type {
-	case rqliteType:
-		conn, err = NewRQLiteConnection(ctx, r.config, r.httpClient)
-	case sqliteType:
-		conn, err = NewSQLiteConnection(ctx, r.config)
-	}
+	r.conn, err = newConnection(
+		context.Background(), // PENDING(GIL): use a context with deadline ...
+		r.config,
+		r.httpClient)
 	if err != nil {
 		return err
 	}
-	r.conn = conn
 	return nil
 }
 

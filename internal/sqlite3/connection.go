@@ -51,8 +51,7 @@ func newRequest(stmts []*Statement) *command.Request {
 }
 
 func (c *SQLiteConnection) QueryStmt(ctx context.Context, stmts ...*Statement) ([]QueryResult, error) {
-	// PENDING(GIL): add context to parameters of db.Query
-	qrows, err := c.db.Query(newRequest(stmts), true) // PENDING(GIL): config
+	qrows, err := c.db.QueryContext(ctx, newRequest(stmts), true) // PENDING(GIL): config
 	if err != nil {
 		return nil, err
 	}
@@ -70,8 +69,7 @@ func (c *SQLiteConnection) QueryStmt(ctx context.Context, stmts ...*Statement) (
 }
 
 func (c *SQLiteConnection) WriteStmt(ctx context.Context, stmts ...*Statement) ([]WriteResult, error) {
-	// PENDING(GIL): add context to parameters of db.Execute
-	wrs, err := c.db.Execute(newRequest(stmts), true) // PENDING(GIL): config
+	wrs, err := c.db.ExecuteContext(ctx, newRequest(stmts), true) // PENDING(GIL): config
 	if err != nil {
 		return nil, err
 	}

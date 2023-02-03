@@ -25,21 +25,10 @@ func NewRQLiteConnection(ctx context.Context, config *Config, httpClient *http.C
 		return nil, errors.E(op, errors.Internal, err)
 	}
 
-	conn := newRQLiteConnection(&rqliteConn, config)
-	_, err = conn.CreateTablesIfNotExist()
-	if err != nil {
-		return nil, errors.E(op, errors.Internal, err)
-	}
-	return conn, nil
-}
-
-func newRQLiteConnection(conn *gorqlite.Connection, config *Config) *Connection {
-	ret := &Connection{
-		DbConnection: &RQLiteConnection{conn: conn},
+	return &Connection{
+		DbConnection: &RQLiteConnection{conn: &rqliteConn},
 		config:       config,
-	}
-	ret.buildTables()
-	return ret
+	}, nil
 }
 
 func (c *RQLiteConnection) PingContext(ctx context.Context) error {

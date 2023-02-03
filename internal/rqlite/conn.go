@@ -2,7 +2,9 @@ package rqlite
 
 import (
 	"context"
+	"net/http"
 
+	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/sqlite3"
 )
 
@@ -18,6 +20,32 @@ type Connection struct {
 	config     *Config
 	tableNames map[string]string
 	tables     map[string]string
+}
+
+func newConnection(ctx context.Context, config *Config, httpClient *http.Client) (*Connection, error) {
+	op := errors.Op("newConnection")
+
+	var err error
+	var conn *Connection
+	switch config.Type {
+	case rqliteType:
+		conn, err = NewRQLiteConnection(ctx, config, httpClient)
+	case sqliteType:
+		conn, err = NewSQLiteConnection(ctx, config)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// build internal table names
+	conn.buildTables()
+
+	_, err = conn.CreateTablesIfNotExist()
+	if err != nil {
+		return nil, errors.E(op, errors.Internal, err)
+	}
+
+	return conn, nil
 }
 
 func (conn *Connection) ctx() context.Context {
