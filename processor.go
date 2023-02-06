@@ -222,14 +222,14 @@ func (p *processor) exec() {
 			resCh := make(chan error, 2)
 			rw := &ResultWriter{id: msg.ID, qname: msg.Queue, broker: p.broker, ctx: ctx}
 			ap := &AsyncProcessor{resCh: resCh}
-			// Hold mutex until worker goroutine returns; ensures that AsyncProcessor does not send to resCh first
+			// hold mutex until worker goroutine returns; ensures that AsyncProcessor does not send to resCh first
 			ap.mutex.Lock()
 			go func() {
 				defer ap.mutex.Unlock()
 				task := newTask(msg.Type, msg.Payload, rw, ap)
 				resCh <- p.perform(ctx, task)
 			}()
-			// Finish task processing in p.fini() goroutine to allow this goroutine to end
+			// finish task processing in p.fini() goroutine to allow this goroutine to end
 			t := &processorTask{msg: msg, ctx: ctx, cleanup: cleanup, resCh: resCh}
 			p.wait <- t
 		}()
@@ -347,9 +347,9 @@ func (p *processor) fini() {
 		} else {
 			// remove task from lists
 			i = i - (i % 2)                                       // reduce i to first index of pair
-			tasks = append(tasks[:i/2-1], tasks[i/2:]...)         // Remove (i/2-1)th item
-			selectChs = append(selectChs[:i], selectChs[i+2:]...) // Remove (i)th pair
-			selectFns = append(selectFns[:i], selectFns[i+2:]...) // Remove (i)th pair
+			tasks = append(tasks[:i/2-1], tasks[i/2:]...)         // remove (i/2-1)th item
+			selectChs = append(selectChs[:i], selectChs[i+2:]...) // remove (i)th pair
+			selectFns = append(selectFns[:i], selectFns[i+2:]...) // remove (i)th pair
 			// process in separate goroutine to continue fini() immediately
 			go process(v)
 		}
