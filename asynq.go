@@ -7,6 +7,7 @@ package asynq
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/hibiken/asynq/internal/base"
@@ -30,6 +31,9 @@ type Task struct {
 
 	// w is the ResultWriter for the task.
 	w *ResultWriter
+
+	// p is the AsyncProcessor for the task.
+	p *AsyncProcessor
 }
 
 func (t *Task) Type() string    { return t.typename }
@@ -41,6 +45,12 @@ func (t *Task) Payload() []byte { return t.payload }
 // Only the tasks passed to Handler.ProcessTask have a valid ResultWriter pointer.
 func (t *Task) ResultWriter() *ResultWriter { return t.w }
 
+// AsyncProcessor returns a pointer to the AsyncProcessor associated with the task.
+//
+// Nil pointer is returned if called on a newly created task (i.e. task created by calling NewTask).
+// Only the tasks passed to Handler.ProcessTask have a valid AsyncProcessor pointer.
+func (t *Task) AsyncProcessor() *AsyncProcessor { return t.p }
+
 // NewTask returns a new Task given a type name and payload data.
 // Options can be passed to configure task processing behavior.
 func NewTask(typename string, payload []byte, opts ...Option) *Task {
@@ -51,12 +61,13 @@ func NewTask(typename string, payload []byte, opts ...Option) *Task {
 	}
 }
 
-// newTask creates a task with the given typename, payload and ResultWriter.
-func newTask(typename string, payload []byte, w *ResultWriter) *Task {
+// newTask creates a task with the given typename, payload, ResultWriter, and AsyncProcessor.
+func newTask(typename string, payload []byte, w *ResultWriter, p *AsyncProcessor) *Task {
 	return &Task{
 		typename: typename,
 		payload:  payload,
 		w:        w,
+		p:        p,
 	}
 }
 
@@ -244,4 +255,34 @@ func (w *ResultWriter) Write(data []byte) (n int, err error) {
 // TaskID returns the ID of the task the ResultWriter is associated with.
 func (w *ResultWriter) TaskID() string {
 	return w.id
+}
+
+// AsyncProcessor updates the final state of an asynchronous task.
+// TaskCompleted/TaskFailed will block until the task worker goroutine returns; this means that the worker goroutine
+// should not make these calls, as would normally be the case for asynchronous tasks.
+// Only the first TaskCompleted/TaskFailed call will update the task status; all subsequent calls will have no effect.
+type AsyncProcessor struct {
+	resCh chan error
+	mutex sync.Mutex
+	done  bool
+}
+
+// TaskCompleted indicates that the task has completed successfully.
+func (p *AsyncProcessor) TaskCompleted() {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	if !p.done {
+		p.resCh <- nil
+		p.done = true
+	}
+}
+
+// TaskFailed indicates that the task has failed, with the given error.
+func (p *AsyncProcessor) TaskFailed(err error) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	if !p.done {
+		p.resCh <- err
+		p.done = true
+	}
 }
