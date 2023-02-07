@@ -456,7 +456,12 @@ func newServer(broker base.Broker, cfg Config) *Server {
 // ProcessTask should return nil if the processing of a task
 // is successful.
 //
-// If ProcessTask returns a non-nil error or panics, the task
+// If ProcessTask returns an AsynchronousTask error, the task is indicating that
+// additional processing will happen asynchronously separate from the Handler
+// goroutine. In this case, the task will not be marked as completed or failed
+// until after the task status is updated via AsyncProcessor.
+//
+// If ProcessTask returns any other non-nil error or panics, the task
 // will be retried after delay if retry-count is remaining,
 // otherwise the task will be archived.
 //

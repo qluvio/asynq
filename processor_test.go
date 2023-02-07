@@ -7,6 +7,7 @@ package asynq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -18,7 +19,6 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/utc"
 )
 
@@ -294,7 +294,7 @@ func TestProcessorSuccessWithAsyncTasks(t *testing.T) {
 						task.AsyncProcessor().TaskFailed(errors.New("failed"))
 					}
 				}()
-				return errors.ErrAsynchronousTask
+				return AsynchronousTask
 			}
 			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler))
 			p.queues = (&QueuesConfig{

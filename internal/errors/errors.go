@@ -163,9 +163,6 @@ var (
 
 	// ErrTaskIdConflict indicates that another task with the same task ID already exist
 	ErrTaskIdConflict = errors.New("task id conflicts with another task")
-
-	// ErrAsynchronousTask indicates that the task is processing asynchronously apart from the main goroutine.
-	ErrAsynchronousTask = errors.New("task is processing asynchronously")
 )
 
 // TaskNotFoundError indicates that a task with the given ID does not exist

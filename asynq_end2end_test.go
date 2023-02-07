@@ -8,8 +8,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/hibiken/asynq/internal/errors"
 )
 
 // TestEndToEnd is similar to BenchmarkEndToEnd
@@ -131,7 +129,7 @@ func TestEndToEndAsync(t *testing.T) {
 				task.AsyncProcessor().TaskCompleted()
 				wg.Done()
 			}()
-			return errors.ErrAsynchronousTask
+			return AsynchronousTask
 		} else {
 			// Fail 1% of tasks for the first attempt.
 			if retried == 0 && n%100 == 0 {

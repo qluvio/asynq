@@ -21,6 +21,15 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// SkipRetry is used as a return value from Handler.ProcessTask to indicate that
+// the task should not be retried and should be archived instead.
+var SkipRetry = errors.New("skip retry for the task")
+
+// AsynchronousTask is used as a return value from Handler.ProcessTask to
+// indicate that the task is processing asynchronously separately from the main
+// worker goroutine.
+var AsynchronousTask = errors.New("task is processing asynchronously")
+
 type processor struct {
 	logger   *log.Logger
 	serverID string
@@ -261,7 +270,7 @@ func (p *processor) fini() {
 			case nil:
 				resErr = nil
 			}
-			if resErr == errors.ErrAsynchronousTask {
+			if resErr == AsynchronousTask {
 				// task worker goroutine marked self as asynchronous task
 				// check res again in case task already completed
 				select {
@@ -440,10 +449,6 @@ func (p *processor) markAsDone(ctx context.Context, msg *base.TaskMessage) {
 		}
 	}
 }
-
-// SkipRetry is used as a return value from Handler.ProcessTask to indicate that
-// the task should not be retried and should be archived instead.
-var SkipRetry = errors.New("skip retry for the task")
 
 func (p *processor) handleFailedMessage(ctx context.Context, msg *base.TaskMessage, reason string, err error) {
 	p.logger.Debugf("Retry or archive (%s) task id=%s error:%s", reason, msg.ID, err)
