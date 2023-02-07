@@ -740,8 +740,10 @@ type Broker interface {
 	// ForwardIfReady checks scheduled and retry sets of the given queues
 	// and move any tasks that are ready to be processed to the pending set.
 	ForwardIfReady(qnames ...string) error
-	// ListDeadlineExceeded returns a list of task messages that have exceeded the deadline from the given queues.
+	// DeleteExpiredCompletedTasks checks for any expired tasks in the given queue's completed set,
+	// and delete all expired tasks.
 	DeleteExpiredCompletedTasks(qname string) error
+	// ListDeadlineExceeded returns a list of task messages that have exceeded the deadline from the given queues.
 	ListDeadlineExceeded(deadline time.Time, qnames ...string) ([]*TaskMessage, error)
 	// WriteServerState writes server state data to the store with expiration set to the value ttl.
 	WriteServerState(info *ServerInfo, workers []*WorkerInfo, ttl time.Duration) error
