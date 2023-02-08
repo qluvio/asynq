@@ -307,6 +307,9 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	n := cfg.Concurrency
 	if n < 1 {
 		n = runtime.NumCPU()
+	} else if n > 32767 {
+		// Concurrency currently limited due to processor constraints; see p.fini() in processor.go
+		panic(aserrors.E(aserrors.Op("newServer"), aserrors.FailedPrecondition, fmt.Errorf("asynq: concurrency must not be greater than 32767")))
 	}
 	if len(cfg.ServerID) == 0 {
 		cfg.ServerID = uuid.New().String()
