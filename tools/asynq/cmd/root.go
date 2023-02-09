@@ -86,7 +86,6 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&tlsServerName, "tls_server",
 		"", "server name for TLS validation")
 
-	rqliteConfig.InitDefaults()
 	rootCmd.PersistentFlags().StringVar(&rqliteConfig.SqliteDbPath, "sqlite_db_path", "", "sqlite DB path")
 	rootCmd.PersistentFlags().StringVar(&rqliteConfig.RqliteUrl, "rqlite_url", "http://localhost:4001", "rqlite address to use")
 	rootCmd.PersistentFlags().StringVar(&rqliteConfig.ConsistencyLevel, "rqlite_consistency_level", "strong", "rqlite consistency level")

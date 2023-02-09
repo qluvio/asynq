@@ -13,12 +13,10 @@ type SQLiteConnection struct {
 	db *db.DB
 }
 
-func NewSQLiteConnection(db *db.DB /*, config *Config*/) *SQLiteConnection {
+func NewSQLiteConnection(db *db.DB) *SQLiteConnection {
 	ret := &SQLiteConnection{
 		db: db,
-		/*config:       config,*/
 	}
-	/*ret.buildTables()*/
 	return ret
 }
 

@@ -51,7 +51,6 @@ func init() {
 	flag.BoolVar(&useRedisCluster, "redis_cluster", false, "use redis cluster as a broker in testing")
 	flag.StringVar(&redisClusterAddrs, "redis_cluster_addrs", "localhost:7000,localhost:7001,localhost:7002", "comma separated list of redis server addresses")
 
-	rqliteConfig.InitDefaults()
 	flag.StringVar(&rqliteConfig.SqliteDbPath, "sqlite_db_path", "", "sqlite db path")
 	flag.BoolVar(&rqliteConfig.SqliteInMemory, "sqlite_in_memory", false, "use in memory DB (sqlite)")
 	flag.StringVar(&rqliteConfig.RqliteUrl, "rqlite_url", "http://localhost:4001", "rqlite address to use")

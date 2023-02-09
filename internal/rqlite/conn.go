@@ -53,9 +53,5 @@ func (conn *Connection) ctx() context.Context {
 }
 
 func Statement(sql string, params ...interface{}) *sqlite3.Statement {
-	ret := sqlite3.NewStatement(sql, params...)
-	//if len(ret.Warning) > 0 {
-	//	panic(ret.Warning)
-	//}
-	return ret
+	return sqlite3.NewStatement(sql, params...)
 }
