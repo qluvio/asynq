@@ -8,11 +8,13 @@ RESET='\033[0m'
 tags=""
 flags=""
 debug_flags=""
-short="-short"     # run only short tests per default
+short="-short"       # run only short tests per default
 
-run_reg="true"     # run regular tests per default
-run_redis="false"  # don't run redis tests per default
-run_rqlite="false" # don't run rqlite tests per default
+run_reg="true"       # run regular tests per default
+run_redis="false"    # don't run redis tests per default
+run_rqlite="false"   # don't run rqlite tests per default
+run_sqlite="false"   # don't run sqlite tests per default
+sqlite_memory="true" # run sqlite tests in memory per default
 
 if [ -n "${SET_DEBUG_OUTPUT:-}" ]; then
     debug_flags="-v -x"
@@ -28,9 +30,10 @@ out=$(mktemp "$TMPDIR/run_all_tests.XXXXXX")
 ret_global=0
 
 function usage() {
-    echo "usage: $0 [-tags \"TAGS\"] [-rqlite|-no-rqlite] [-redis|-no-redis] "
+    echo "usage: $0 [-tags \"TAGS\"] [-redis] [-rqlite] [-sqlite]"
     echo
-    echo "Default: run regular tests against redis"
+    echo "Default: run regular tests only"
+    echo "with -sqlite: use -no-sqlite-in-memory to NOT run sqlite tests with in memory DB"
     echo -e "${RESET}"
 }
 
@@ -62,16 +65,16 @@ while [[ $# -gt 0 ]]; do
             run_redis="true"
             shift
             ;;
-        -no-redis | --no-redis)
-            run_redis="false"
-            shift
-            ;;
         -rqlite | --rqlite)
             run_rqlite="true"
             shift
             ;;
-        -no-rqlite | --no-rqlite)
-            run_rqlite="false"
+        -sqlite | --sqlite)
+            run_sqlite="true"
+            shift
+            ;;
+        -no-sqlite-in-memory | --no-sqlite-in-memory)
+            sqlite_memory="false"
             shift
             ;;
         -v | --verbose)
@@ -146,5 +149,27 @@ if [[ "${run_rqlite}" == "true" ]]; then
     handleResult "${ret}"
 fi
 
+if [[ "${run_sqlite}" == "true" ]]; then
+
+    sqlite_in_memory=""
+    if [[ "${sqlite_memory}" == "true" ]]; then
+        sqlite_in_memory="--sqlite_in_memory"
+    fi
+    echo "running sqlite tests"
+    ret=0
+    go test ${debug_flags} $flags -tags "$tags" $short -count=1 ./internal/rqlite --broker_type sqlite ${sqlite_in_memory} 2>&1 |
+        tee "$out" |
+        grep -av "?.*\[no test files\]"
+    if [[ ${PIPESTATUS[0]} != 0 ]]; then
+        ret=1
+    fi
+    go test ${debug_flags} $flags -tags "$tags" $short -count=1 . --broker_type sqlite ${sqlite_in_memory} 2>&1 |
+        tee "$out" |
+        grep -av "?.*\[no test files\]"
+    if [[ ${PIPESTATUS[0]} != 0 ]]; then
+        ret=1
+    fi
+    handleResult "${ret}"
+fi
 
 exit ${ret_global}

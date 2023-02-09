@@ -6,7 +6,10 @@ package asynq
 
 import (
 	"flag"
+	"fmt"
+	"os"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +18,7 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/log"
 	"github.com/hibiken/asynq/internal/rqlite"
+	"github.com/stretchr/testify/require"
 )
 
 //============================================================================
@@ -23,14 +27,16 @@ import (
 
 // variables used for package testing.
 var (
-	brokerType string // redis | rqlite
-	redisAddr  string
-	redisDB    int
+	initBrokerOnce sync.Once
+	sqliteDbTemp   bool
+	brokerType     string // redis | rqlite | sqlite
+	redisAddr      string
+	redisDB        int
 
 	useRedisCluster   bool
 	redisClusterAddrs string // comma-separated list of host:port
 
-	rqliteConfig RqliteConfig
+	rqliteConfig = (&RqliteConfig{}).InitDefaults()
 
 	testLogLevel = FatalLevel
 )
@@ -38,16 +44,17 @@ var (
 var testLogger *log.Logger
 
 func init() {
-	flag.StringVar(&brokerType, "broker_type", "redis", "broker type to use in testing: redis|rqlite")
+	flag.StringVar(&brokerType, "broker_type", "redis", "broker type to use in testing: redis|rqlite|sqlite")
 
 	flag.StringVar(&redisAddr, "redis_addr", "localhost:6379", "redis address to use in testing")
 	flag.IntVar(&redisDB, "redis_db", 14, "redis db number to use in testing")
 	flag.BoolVar(&useRedisCluster, "redis_cluster", false, "use redis cluster as a broker in testing")
 	flag.StringVar(&redisClusterAddrs, "redis_cluster_addrs", "localhost:7000,localhost:7001,localhost:7002", "comma separated list of redis server addresses")
 
-	rqliteConfig.InitDefaults()
-	flag.StringVar(&rqliteConfig.RqliteUrl, "rqlite_addr", "http://localhost:4001", "rqlite address to use")
-	flag.StringVar(&rqliteConfig.ConsistencyLevel, "rqlite_consistency_level", "strong", "rqlite consistency level")
+	flag.StringVar(&rqliteConfig.SqliteDbPath, "sqlite_db_path", "", "sqlite db path")
+	flag.BoolVar(&rqliteConfig.SqliteInMemory, "sqlite_in_memory", false, "use in memory DB (sqlite)")
+	flag.StringVar(&rqliteConfig.RqliteUrl, "rqlite_url", "http://localhost:4001", "rqlite address to use")
+	flag.StringVar(&rqliteConfig.ConsistencyLevel, "rqlite_consistency_level", "strong", "consistency level (rqlite)")
 
 	flag.Var(&testLogLevel, "loglevel", "log level to use in testing")
 	testLogger = log.NewLogger(nil)
@@ -90,11 +97,31 @@ type TestContext interface {
 	SeedFailedQueue(failedCount int, qname string, ts time.Time)
 }
 
+func doInitBrokerTypeOnce(tb testing.TB) {
+	initBrokerOnce.Do(func() {
+		if brokerType == sqliteType {
+			rqliteConfig.Type = brokerType
+			if rqliteConfig.SqliteDbPath == "" {
+				if rqliteConfig.SqliteInMemory {
+					rqliteConfig.SqliteDbPath = rqlite.RandomInMemoryDbPath()
+				} else {
+					sqliteDbTemp = true
+					db, err := os.CreateTemp("", "sqlite")
+					require.NoError(tb, err)
+					rqliteConfig.SqliteDbPath = db.Name()
+				}
+			}
+			fmt.Println("sqlite db path:", rqliteConfig.SqliteDbPath)
+			rqliteConfig.RqliteUrl = ""
+		}
+	})
+}
+
 func getClientConnOpt(tb testing.TB) ClientConnOpt {
 	switch brokerType {
 	case redisType:
 		return getRedisConnOpt(tb)
-	case rqliteType:
+	case rqliteType, sqliteType:
 		return RqliteConnOpt{Config: rqliteConfig}
 	}
 	tb.Fatal("invalid broker type: " + brokerType)
@@ -102,8 +129,9 @@ func getClientConnOpt(tb testing.TB) ClientConnOpt {
 }
 
 func setupTestContext(tb testing.TB) TestContext {
-	var ret TestContext
+	doInitBrokerTypeOnce(tb)
 
+	var ret TestContext
 	switch brokerType {
 	case redisType:
 		opt := getRedisConnOpt(tb)
@@ -111,7 +139,8 @@ func setupTestContext(tb testing.TB) TestContext {
 			tb: tb,
 			r:  opt.MakeClient().(redis.UniversalClient),
 		}
-	case rqliteType:
+	case rqliteType, sqliteType:
+		rqliteConfig.Type = brokerType
 		opt := RqliteConnOpt{Config: rqliteConfig}
 		ret = &rqliteTestContext{
 			tb: tb,

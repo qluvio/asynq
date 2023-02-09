@@ -1,0 +1,1034 @@
+// Package db exposes a lightweight abstraction over the SQLite code.
+// It performs some basic mapping of lower-level types to rqlite types.
+package db
+
+import (
+	"context"
+	"database/sql"
+	"expvar"
+	"fmt"
+	"io"
+	"math/rand"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/hibiken/asynq/internal/sqlite3/command"
+	"github.com/rqlite/go-sqlite3"
+)
+
+const bkDelay = 250
+
+const (
+	onDiskMaxOpenConns = 32
+	onDiskMaxIdleTime  = 120 * time.Second
+
+	numExecutions      = "executions"
+	numExecutionErrors = "execution_errors"
+	numQueries         = "queries"
+	numQueryErrors     = "query_errors"
+	numETx             = "execute_transactions"
+	numQTx             = "query_transactions"
+)
+
+// DBVersion is the SQLite version.
+var DBVersion string
+
+// stats captures stats for the DB layer.
+var stats *expvar.Map
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+	DBVersion, _, _ = sqlite3.Version()
+	stats = expvar.NewMap("db")
+	ResetStats()
+}
+
+// ResetStats resets the expvar stats for this module. Mostly for test purposes.
+func ResetStats() {
+	stats.Init()
+	stats.Add(numExecutions, 0)
+	stats.Add(numExecutionErrors, 0)
+	stats.Add(numQueries, 0)
+	stats.Add(numQueryErrors, 0)
+	stats.Add(numETx, 0)
+	stats.Add(numQTx, 0)
+}
+
+// DB is the SQL database.
+type DB struct {
+	path      string // Path to database file, if running on-disk.
+	memory    bool   // In-memory only.
+	fkEnabled bool   // Foreign key constraints enabled
+
+	rwDB *sql.DB // Database connection for database reads and writes.
+	roDB *sql.DB // Database connection database reads.
+
+	rwDSN string // DSN used for read-write connection
+	roDSN string // DSN used for read-only connections
+}
+
+// PoolStats represents connection pool statistics
+type PoolStats struct {
+	MaxOpenConnections int           `json:"max_open_connections"`
+	OpenConnections    int           `json:"open_connections"`
+	InUse              int           `json:"in_use"`
+	Idle               int           `json:"idle"`
+	WaitCount          int64         `json:"wait_count"`
+	WaitDuration       time.Duration `json:"wait_duration"`
+	MaxIdleClosed      int64         `json:"max_idle_closed"`
+	MaxIdleTimeClosed  int64         `json:"max_idle_time_closed"`
+	MaxLifetimeClosed  int64         `json:"max_lifetime_closed"`
+}
+
+// Open opens a file-based database, creating it if it does not exist.
+func Open(dbPath string, fkEnabled bool) (*DB, error) {
+	return OpenContext(context.Background(), dbPath, fkEnabled)
+}
+
+// OpenContext opens a file-based database, creating it if it does not exist.
+// After this function returns, an actual SQLite file will always exist.
+func OpenContext(ctx context.Context, dbPath string, fkEnabled bool) (*DB, error) {
+	rwDSN := fmt.Sprintf("file:%s?_fk=%s", dbPath, strconv.FormatBool(fkEnabled))
+	rwDB, err := sql.Open("sqlite3", rwDSN)
+	if err != nil {
+		return nil, err
+	}
+
+	roOpts := []string{
+		"mode=ro",
+		fmt.Sprintf("_fk=%s", strconv.FormatBool(fkEnabled)),
+	}
+
+	roDSN := fmt.Sprintf("file:%s?%s", dbPath, strings.Join(roOpts, "&"))
+	roDB, err := sql.Open("sqlite3", roDSN)
+	if err != nil {
+		return nil, err
+	}
+
+	// Force creation of on-disk database file.
+	if err := rwDB.PingContext(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ping on-disk database: %s", err.Error())
+	}
+
+	// Set some reasonable connection pool behaviour.
+	rwDB.SetConnMaxIdleTime(30 * time.Second)
+	rwDB.SetConnMaxLifetime(0)
+	roDB.SetConnMaxIdleTime(30 * time.Second)
+	roDB.SetConnMaxLifetime(0)
+
+	return &DB{
+		path:      dbPath,
+		fkEnabled: fkEnabled,
+		rwDB:      rwDB,
+		roDB:      roDB,
+		rwDSN:     rwDSN,
+		roDSN:     roDSN,
+	}, nil
+}
+
+// OpenInMemory returns a new in-memory database.
+func OpenInMemory(fkEnabled bool) (*DB, error) {
+	return OpenInMemoryPath("", fkEnabled)
+}
+
+// OpenInMemoryPath returns a new in-memory database.
+// Parameter dbPath must not be the empty string if the same in-memory database
+// is to be shared among multiple database connections in the same process.
+func OpenInMemoryPath(dbPath string, fkEnabled bool) (*DB, error) {
+	for strings.HasPrefix(dbPath, "/") {
+		dbPath = dbPath[1:]
+	}
+	if dbPath == "" {
+		dbPath = randomString()
+	}
+	inMemPath := fmt.Sprintf("file:/%s", dbPath)
+
+	rwOpts := []string{
+		"mode=rw",
+		"vfs=memdb",
+		"_txlock=immediate",
+		fmt.Sprintf("_fk=%s", strconv.FormatBool(fkEnabled)),
+	}
+
+	rwDSN := fmt.Sprintf("%s?%s", inMemPath, strings.Join(rwOpts, "&"))
+	rwDB, err := sql.Open("sqlite3", rwDSN)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure there is only one connection and it never closes.
+	// If it closed, in-memory database could be lost.
+	rwDB.SetConnMaxIdleTime(0)
+	rwDB.SetConnMaxLifetime(0)
+	rwDB.SetMaxIdleConns(1)
+	rwDB.SetMaxOpenConns(1)
+
+	roOpts := []string{
+		"mode=ro",
+		"vfs=memdb",
+		"_txlock=deferred",
+		fmt.Sprintf("_fk=%s", strconv.FormatBool(fkEnabled)),
+	}
+
+	roDSN := fmt.Sprintf("%s?%s", inMemPath, strings.Join(roOpts, "&"))
+	roDB, err := sql.Open("sqlite3", roDSN)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure database is basically healthy.
+	if err := rwDB.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to ping in-memory database: %s", err.Error())
+	}
+
+	return &DB{
+		memory:    true,
+		path:      ":memory:",
+		fkEnabled: fkEnabled,
+		rwDB:      rwDB,
+		roDB:      roDB,
+		rwDSN:     rwDSN,
+		roDSN:     roDSN,
+	}, nil
+}
+
+// LoadIntoMemory loads an in-memory database with that at the path.
+// Not safe to call while other operations are happening with the
+// source database.
+func LoadIntoMemory(dbPath string, fkEnabled bool) (*DB, error) {
+	dstDB, err := OpenInMemory(fkEnabled)
+	if err != nil {
+		return nil, err
+	}
+
+	srcDB, err := Open(dbPath, false)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := copyDatabase(dstDB, srcDB); err != nil {
+		return nil, err
+	}
+
+	if err := srcDB.Close(); err != nil {
+		return nil, err
+	}
+
+	return dstDB, nil
+}
+
+// DeserializeIntoMemory loads an in-memory database with that contained
+// in the byte slide. The byte slice must not be changed or garbage-collected
+// until after this function returns.
+func DeserializeIntoMemory(b []byte, fkEnabled bool) (retDB *DB, retErr error) {
+	// Get a plain-ol' in-memory database.
+	tmpDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		return nil, fmt.Errorf("DeserializeIntoMemory: %s", err.Error())
+	}
+	defer ignoreErr(tmpDB.Close)
+
+	tmpConn, err := tmpDB.Conn(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	// tmpDB will still be using memory in Go space, so tmpDB needs to be explicitly
+	// copied to a new database, which we create now.
+	retDB, err = OpenInMemory(fkEnabled)
+	if err != nil {
+		return nil, fmt.Errorf("DeserializeIntoMemory: %s", err.Error())
+	}
+	defer func() {
+		// Don't leak a database if deserialization fails.
+		if retDB != nil && retErr != nil {
+			_ = retDB.Close()
+		}
+	}()
+
+	if err := tmpConn.Raw(func(driverConn interface{}) error {
+		srcConn := driverConn.(*sqlite3.SQLiteConn)
+		err2 := srcConn.Deserialize(b, "")
+		if err2 != nil {
+			return fmt.Errorf("DeserializeIntoMemory: %s", err.Error())
+		}
+		defer ignoreErr(srcConn.Close)
+
+		// Now copy from tmp database to the database this function will return.
+		dbConn, err3 := retDB.rwDB.Conn(context.Background())
+		if err3 != nil {
+			return fmt.Errorf("DeserializeIntoMemory: %s", err.Error())
+		}
+		defer ignoreErr(dbConn.Close)
+
+		return dbConn.Raw(func(driverConn interface{}) error {
+			dstConn := driverConn.(*sqlite3.SQLiteConn)
+			return copyDatabaseConnection(dstConn, srcConn)
+		})
+
+	}); err != nil {
+		return nil, err
+	}
+
+	return retDB, nil
+}
+
+// Close closes the underlying database connection.
+func (db *DB) Close() error {
+	if err := db.rwDB.Close(); err != nil {
+		return err
+	}
+	return db.roDB.Close()
+}
+
+func (db *DB) PingContext(ctx context.Context) error {
+	return db.roDB.PingContext(ctx)
+}
+
+// Stats returns status and diagnostics for the database.
+func (db *DB) Stats() (map[string]interface{}, error) {
+	copts, err := db.CompileOptions()
+	if err != nil {
+		return nil, err
+	}
+	memStats, err := db.memStats()
+	if err != nil {
+		return nil, err
+	}
+	connPoolStats := map[string]interface{}{
+		"ro": db.ConnectionPoolStats(db.roDB),
+		"rw": db.ConnectionPoolStats(db.rwDB),
+	}
+	dbSz, err := db.Size()
+	if err != nil {
+		return nil, err
+	}
+	stats := map[string]interface{}{
+		"version":         DBVersion,
+		"compile_options": copts,
+		"mem_stats":       memStats,
+		"db_size":         dbSz,
+		"rw_dsn":          db.rwDSN,
+		"ro_dsn":          db.roDSN,
+		"conn_pool_stats": connPoolStats,
+	}
+
+	stats["path"] = db.path
+	if !db.memory {
+		if stats["size"], err = db.FileSize(); err != nil {
+			return nil, err
+		}
+	}
+	return stats, nil
+}
+
+// Size returns the size of the database in bytes. "Size" is defined as
+// page_count * schema.page_size.
+func (db *DB) Size() (int64, error) {
+	rows, err := db.QueryStringStmt(`SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()`)
+	if err != nil {
+		return 0, err
+	}
+
+	return rows[0].Values[0].Parameters[0].GetInt64(), nil
+}
+
+// FileSize returns the size of the SQLite file on disk. If running in
+// on-memory mode, this function returns 0.
+func (db *DB) FileSize() (int64, error) {
+	if db.memory {
+		return 0, nil
+	}
+	fi, err := os.Stat(db.path)
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
+}
+
+// InMemory returns whether this database is in-memory.
+func (db *DB) InMemory() bool {
+	return db.memory
+}
+
+// FKEnabled returns whether Foreign Key constraints are enabled.
+func (db *DB) FKEnabled() bool {
+	return db.fkEnabled
+}
+
+// Path returns the path of this database.
+func (db *DB) Path() string {
+	return db.path
+}
+
+// CompileOptions returns the SQLite compilation options.
+func (db *DB) CompileOptions() ([]string, error) {
+	res, err := db.QueryStringStmt("PRAGMA compile_options")
+	if err != nil {
+		return nil, err
+	}
+	if len(res) != 1 {
+		return nil, fmt.Errorf("compile options result wrong size (%d)", len(res))
+	}
+
+	copts := make([]string, len(res[0].Values))
+	for i := range copts {
+		if len(res[0].Values[i].Parameters) != 1 {
+			return nil, fmt.Errorf("compile options values wrong size (%d)", len(res))
+		}
+		copts[i] = res[0].Values[i].Parameters[0].GetString()
+	}
+	return copts, nil
+}
+
+// ConnectionPoolStats returns database pool statistics
+func (db *DB) ConnectionPoolStats(sqlDB *sql.DB) *PoolStats {
+	s := sqlDB.Stats()
+	return &PoolStats{
+		MaxOpenConnections: s.MaxOpenConnections,
+		OpenConnections:    s.OpenConnections,
+		InUse:              s.InUse,
+		Idle:               s.Idle,
+		WaitCount:          s.WaitCount,
+		WaitDuration:       s.WaitDuration,
+		MaxIdleClosed:      s.MaxIdleClosed,
+		MaxIdleTimeClosed:  s.MaxIdleTimeClosed,
+		MaxLifetimeClosed:  s.MaxLifetimeClosed,
+	}
+
+}
+
+// ExecuteStringStmt executes a single query that modifies the database. This is
+// primarily a convenience function.
+func (db *DB) ExecuteStringStmt(query string) ([]*command.ExecuteResult, error) {
+	return db.ExecuteStringStmtContext(context.Background(), query)
+}
+
+// ExecuteStringStmtContext executes a single query that modifies the database.
+// This is primarily a convenience function.
+func (db *DB) ExecuteStringStmtContext(ctx context.Context, query string) ([]*command.ExecuteResult, error) {
+	r := &command.Request{
+		Statements: []*command.Statement{
+			{
+				Sql: query,
+			},
+		},
+	}
+	return db.ExecuteContext(ctx, r, false)
+}
+
+// Execute executes queries that modify the database.
+func (db *DB) Execute(req *command.Request, xTime bool) ([]*command.ExecuteResult, error) {
+	return db.ExecuteContext(context.Background(), req, xTime)
+}
+
+// ExecuteContext executes queries that modify the database.
+func (db *DB) ExecuteContext(ctx context.Context, req *command.Request, xTime bool) ([]*command.ExecuteResult, error) {
+	stats.Add(numExecutions, int64(len(req.Statements)))
+
+	conn, err := db.rwDB.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer ignoreErr(conn.Close)
+
+	type Execer interface {
+		ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	}
+
+	var execer Execer
+	var tx *sql.Tx
+	if req.Transaction {
+		stats.Add(numETx, 1)
+		tx, err = conn.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback() // Will be ignored if tx is committed
+			}
+		}()
+		execer = tx
+	} else {
+		execer = conn
+	}
+
+	var allResults []*command.ExecuteResult
+
+	// handleError sets the error field on the given result. It returns
+	// whether the caller should continue processing or break.
+	handleError := func(result *command.ExecuteResult, err error) bool {
+		stats.Add(numExecutionErrors, 1)
+		result.Error = err.Error()
+		allResults = append(allResults, result)
+		if tx != nil {
+			_ = tx.Rollback()
+			tx = nil
+			return false
+		}
+		return true
+	}
+
+	// Execute each statement.
+	for _, stmt := range req.Statements {
+		ss := stmt.Sql
+		if ss == "" {
+			continue
+		}
+
+		result := &command.ExecuteResult{}
+		start := time.Now()
+
+		parameters, err := parametersToValues(stmt.Parameters)
+		if err != nil {
+			if handleError(result, err) {
+				continue
+			}
+			break
+		}
+
+		r, err := execer.ExecContext(ctx, ss, parameters...)
+		if err != nil {
+			if handleError(result, err) {
+				continue
+			}
+			break
+		}
+
+		if r == nil {
+			continue
+		}
+
+		lid, err := r.LastInsertId()
+		if err != nil {
+			if handleError(result, err) {
+				continue
+			}
+			break
+		}
+		result.LastInsertId = lid
+
+		ra, err := r.RowsAffected()
+		if err != nil {
+			if handleError(result, err) {
+				continue
+			}
+			break
+		}
+		result.RowsAffected = ra
+		if xTime {
+			result.Time = time.Now().Sub(start).Seconds()
+		}
+		allResults = append(allResults, result)
+	}
+
+	if tx != nil {
+		err = tx.Commit()
+	}
+	return allResults, err
+}
+
+// QueryStringStmt executes a single query that return rows, but don't modify database.
+func (db *DB) QueryStringStmt(query string) ([]*command.QueryRows, error) {
+	return db.QueryStringStmtContext(context.Background(), query)
+}
+
+// QueryStringStmtContext executes a single query that return rows, but don't modify database.
+func (db *DB) QueryStringStmtContext(ctx context.Context, query string) ([]*command.QueryRows, error) {
+	r := &command.Request{
+		Statements: []*command.Statement{
+			{
+				Sql: query,
+			},
+		},
+	}
+	return db.QueryContext(ctx, r, false)
+}
+
+// Query executes queries that return rows, but don't modify the database.
+func (db *DB) Query(req *command.Request, xTime bool) ([]*command.QueryRows, error) {
+	return db.QueryContext(context.Background(), req, xTime)
+}
+
+// QueryContext executes queries that return rows, but don't modify the database.
+func (db *DB) QueryContext(ctx context.Context, req *command.Request, xTime bool) ([]*command.QueryRows, error) {
+	stats.Add(numQueries, int64(len(req.Statements)))
+	conn, err := db.roDB.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer ignoreErr(conn.Close)
+	return db.queryWithConn(ctx, req, xTime, conn)
+}
+
+func (db *DB) queryWithConn(ctx context.Context, req *command.Request, xTime bool, conn *sql.Conn) ([]*command.QueryRows, error) {
+	var err error
+	type Queryer interface {
+		QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+	}
+
+	var queryer Queryer
+	var tx *sql.Tx
+	if req.Transaction {
+		stats.Add(numQTx, 1)
+		tx, err = conn.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		defer ignoreErr(tx.Rollback) // Will be ignored if tx is committed
+		queryer = tx
+	} else {
+		queryer = conn
+	}
+
+	var allRows []*command.QueryRows
+	for _, stmt := range req.Statements {
+		ssql := stmt.Sql
+		if ssql == "" {
+			continue
+		}
+
+		rows := &command.QueryRows{}
+		start := time.Now()
+
+		// Do best-effort check that the statement won't try to change
+		// the database. As per the SQLite documentation, this will not
+		// cover 100% of possibilities, but should cover most.
+		var readOnly bool
+		f := func(driverConn interface{}) error {
+			c := driverConn.(*sqlite3.SQLiteConn)
+			drvStmt, err := c.Prepare(ssql)
+			if err != nil {
+				return err
+			}
+			defer ignoreErr(drvStmt.Close)
+			sqliteStmt := drvStmt.(*sqlite3.SQLiteStmt)
+			readOnly = sqliteStmt.Readonly()
+			return nil
+		}
+		if err := conn.Raw(f); err != nil {
+			stats.Add(numQueryErrors, 1)
+			rows.Error = err.Error()
+			allRows = append(allRows, rows)
+			continue
+		}
+		if !readOnly {
+			stats.Add(numQueryErrors, 1)
+			rows.Error = "attempt to change database via query operation"
+			allRows = append(allRows, rows)
+			continue
+		}
+
+		parameters, err := parametersToValues(stmt.Parameters)
+		if err != nil {
+			stats.Add(numQueryErrors, 1)
+			rows.Error = err.Error()
+			allRows = append(allRows, rows)
+			continue
+		}
+
+		rs, err := queryer.QueryContext(ctx, ssql, parameters...)
+		if err != nil {
+			stats.Add(numQueryErrors, 1)
+			rows.Error = err.Error()
+			allRows = append(allRows, rows)
+			continue
+		}
+
+		rows, err = db.readSqlRows(rs, rows)
+		if err != nil {
+			return nil, err
+		}
+		if rows.Error == "" && xTime {
+			rows.Time = time.Now().Sub(start).Seconds()
+		}
+
+		allRows = append(allRows, rows)
+	}
+
+	if tx != nil {
+		err = tx.Commit()
+	}
+	return allRows, err
+}
+
+func (db *DB) readSqlRows(rs *sql.Rows, rows *command.QueryRows) (*command.QueryRows, error) {
+	defer ignoreErr(rs.Close)
+
+	columns, err := rs.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	types, err := rs.ColumnTypes()
+	if err != nil {
+		return nil, err
+	}
+	xTypes := make([]string, len(types))
+	for i := range types {
+		xTypes[i] = strings.ToLower(types[i].DatabaseTypeName())
+	}
+
+	for rs.Next() {
+		dest := make([]interface{}, len(columns))
+		ptrs := make([]interface{}, len(dest))
+		for i := range ptrs {
+			ptrs[i] = &dest[i]
+		}
+		if err := rs.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		params, err := normalizeRowValues(dest, xTypes)
+		if err != nil {
+			return nil, err
+		}
+		rows.Values = append(rows.Values, &command.Values{
+			Parameters: params,
+		})
+	}
+
+	// Check for errors from iterating over rows.
+	if err := rs.Err(); err != nil {
+		stats.Add(numQueryErrors, 1)
+		rows.Error = err.Error()
+	} else {
+		rows.Columns = columns
+		rows.Types = xTypes
+	}
+	return rows, nil
+}
+
+// Backup writes a consistent snapshot of the database to the given file.
+// This function can be called when changes to the database are in flight.
+func (db *DB) Backup(path string) error {
+	dstDB, err := Open(path, false)
+	if err != nil {
+		return err
+	}
+
+	if err := copyDatabase(dstDB, db); err != nil {
+		return fmt.Errorf("backup database: %s", err)
+	}
+	return nil
+}
+
+// Copy copies the contents of the database to the given database. All other
+// attributes of the given database remain untouched e.g. whether it's an
+// on-disk database. This function can be called when changes to the source
+// database are in flight.
+func (db *DB) Copy(dstDB *DB) error {
+	if err := copyDatabase(dstDB, db); err != nil {
+		return fmt.Errorf("copy database: %s", err)
+	}
+	return nil
+}
+
+// Serialize returns a byte slice representation of the SQLite database. For
+// an ordinary on-disk database file, the serialization is just a copy of the
+// disk file. For an in-memory database or a "TEMP" database, the serialization
+// is the same sequence of bytes which would be written to disk if that database
+// were backed up to disk. This function must not be called while any writes
+// are happening to the database.
+func (db *DB) Serialize() ([]byte, error) {
+	if !db.memory {
+		// Simply read and return the SQLite file.
+		return os.ReadFile(db.path)
+	}
+
+	conn, err := db.roDB.Conn(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	defer ignoreErr(conn.Close)
+
+	var b []byte
+	if err := conn.Raw(func(raw interface{}) error {
+		var err error
+		b, err = raw.(*sqlite3.SQLiteConn).Serialize("")
+		return err
+	}); err != nil {
+		return nil, fmt.Errorf("failed to serialize database: %s", err.Error())
+	}
+
+	return b, nil
+}
+
+// Dump writes a consistent snapshot of the database in SQL text format.
+// This function can be called when changes to the database are in flight.
+func (db *DB) Dump(w io.Writer) error {
+	ctx := context.Background()
+	conn, err := db.roDB.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer ignoreErr(conn.Close)
+
+	// Convenience function to convert string query to protobuf.
+	commReq := func(query string) *command.Request {
+		return &command.Request{
+			Statements: []*command.Statement{
+				{
+					Sql: query,
+				},
+			},
+		}
+	}
+
+	if _, err := w.Write([]byte("PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n")); err != nil {
+		return err
+	}
+
+	// Get the schema.
+	query := `SELECT "name", "type", "sql" FROM "sqlite_master"
+              WHERE "sql" NOT NULL AND "type" == 'table' ORDER BY "name"`
+	rows, err := db.queryWithConn(ctx, commReq(query), false, conn)
+	if err != nil {
+		return err
+	}
+	row := rows[0]
+	for _, v := range row.Values {
+		table := v.Parameters[0].GetString()
+		var stmt string
+
+		if table == "sqlite_sequence" {
+			stmt = `DELETE FROM "sqlite_sequence";`
+		} else if table == "sqlite_stat1" {
+			stmt = `ANALYZE "sqlite_master";`
+		} else if strings.HasPrefix(table, "sqlite_") {
+			continue
+		} else {
+			stmt = v.Parameters[2].GetString()
+		}
+
+		if _, err := w.Write([]byte(fmt.Sprintf("%s;\n", stmt))); err != nil {
+			return err
+		}
+
+		tableIndent := strings.Replace(table, `"`, `""`, -1)
+		r, err := db.queryWithConn(ctx,
+			commReq(fmt.Sprintf(`PRAGMA table_info("%s")`, tableIndent)),
+			false,
+			conn)
+		if err != nil {
+			return err
+		}
+		var columnNames []string
+		for _, w := range r[0].Values {
+			columnNames = append(columnNames, fmt.Sprintf(`'||quote("%s")||'`, w.Parameters[1].GetString()))
+		}
+
+		query = fmt.Sprintf(`SELECT 'INSERT INTO "%s" VALUES(%s)' FROM "%s";`,
+			tableIndent,
+			strings.Join(columnNames, ","),
+			tableIndent)
+		r, err = db.queryWithConn(ctx, commReq(query), false, conn)
+
+		if err != nil {
+			return err
+		}
+		for _, x := range r[0].Values {
+			y := fmt.Sprintf("%s;\n", x.Parameters[0].GetString())
+			if _, err := w.Write([]byte(y)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Do indexes, triggers, and views.
+	query = `SELECT "name", "type", "sql" FROM "sqlite_master"
+			  WHERE "sql" NOT NULL AND "type" IN ('index', 'trigger', 'view')`
+	rows, err = db.queryWithConn(ctx, commReq(query), false, conn)
+	if err != nil {
+		return err
+	}
+	row = rows[0]
+	for _, v := range row.Values {
+		if _, err := w.Write([]byte(fmt.Sprintf("%s;\n", v.Parameters[2].GetString()))); err != nil {
+			return err
+		}
+	}
+
+	if _, err := w.Write([]byte("COMMIT;\n")); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (db *DB) memStats() (map[string]int64, error) {
+	ms := make(map[string]int64)
+	for _, p := range []string{
+		"max_page_count",
+		"page_count",
+		"page_size",
+		"hard_heap_limit",
+		"soft_heap_limit",
+		"cache_size",
+		"freelist_count",
+	} {
+		res, err := db.QueryStringStmt(fmt.Sprintf("PRAGMA %s", p))
+		if err != nil {
+			return nil, err
+		}
+		ms[p] = res[0].Values[0].Parameters[0].GetInt64()
+	}
+	return ms, nil
+}
+
+func copyDatabase(dst *DB, src *DB) error {
+	dstConn, err := dst.rwDB.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	defer ignoreErr(dstConn.Close)
+	srcConn, err := src.roDB.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	defer ignoreErr(srcConn.Close)
+
+	var dstSQLiteConn *sqlite3.SQLiteConn
+
+	// Define the backup function.
+	bf := func(driverConn interface{}) error {
+		srcSQLiteConn := driverConn.(*sqlite3.SQLiteConn)
+		return copyDatabaseConnection(dstSQLiteConn, srcSQLiteConn)
+	}
+
+	return dstConn.Raw(
+		func(driverConn interface{}) error {
+			dstSQLiteConn = driverConn.(*sqlite3.SQLiteConn)
+			return srcConn.Raw(bf)
+		})
+}
+
+func copyDatabaseConnection(dst, src *sqlite3.SQLiteConn) error {
+	bk, err := dst.Backup("main", src, "main")
+	if err != nil {
+		return err
+	}
+
+	for {
+		done, err := bk.Step(-1)
+		if err != nil {
+			_ = bk.Finish()
+			return err
+		}
+		if done {
+			break
+		}
+		time.Sleep(bkDelay * time.Millisecond)
+	}
+	return bk.Finish()
+}
+
+// parametersToValues maps values in the proto params to SQL driver values.
+func parametersToValues(parameters []*command.Parameter) ([]interface{}, error) {
+	if parameters == nil {
+		return nil, nil
+	}
+
+	values := make([]interface{}, len(parameters))
+	for i := range parameters {
+		switch w := parameters[i].GetValue().(type) {
+		case int, int64, float64, bool, []byte, string:
+			values[i] = sql.Named(parameters[i].GetName(), parameters[i].GetValue())
+		case nil:
+			values[i] = nil
+		default:
+			return nil, fmt.Errorf("unsupported type: %T", w)
+		}
+	}
+	return values, nil
+}
+
+// normalizeRowValues performs some normalization of values in the returned rows.
+// Text values come over (from sqlite-go) as []byte instead of strings
+// for some reason, so we have explicitly converted (but only when type
+// is "text" so we don't affect BLOB types)
+func normalizeRowValues(row []interface{}, types []string) ([]*command.Parameter, error) {
+	values := make([]*command.Parameter, len(types))
+	for i, v := range row {
+		switch val := v.(type) {
+		case int:
+			values[i] = &command.Parameter{
+				Value: int64(val),
+			}
+		case int64:
+			values[i] = &command.Parameter{
+				Value: val,
+			}
+		case float64:
+			values[i] = &command.Parameter{
+				Value: val,
+			}
+		case bool:
+			values[i] = &command.Parameter{
+				Value: val,
+			}
+		case string:
+			values[i] = &command.Parameter{
+				Value: val,
+			}
+		case []byte:
+			if isTextType(types[i]) {
+				values[i].Value = &command.Parameter{
+					Value: string(val),
+				}
+			} else {
+				values[i] = &command.Parameter{
+					Value: val,
+				}
+			}
+		case time.Time:
+			rfc3339, err := val.MarshalText()
+			if err != nil {
+				return nil, err
+			}
+			values[i] = &command.Parameter{
+				Value: string(rfc3339),
+			}
+		case nil:
+			continue
+		default:
+			return nil, fmt.Errorf("unhandled column type: %T %v", val, val)
+		}
+	}
+	return values, nil
+}
+
+// isTextType returns whether the given type has a SQLite text affinity.
+// http://www.sqlite.org/datatype3.html
+func isTextType(t string) bool {
+	return t == "text" ||
+		t == "json" ||
+		t == "" ||
+		strings.HasPrefix(t, "varchar") ||
+		strings.HasPrefix(t, "varying character") ||
+		strings.HasPrefix(t, "nchar") ||
+		strings.HasPrefix(t, "native character") ||
+		strings.HasPrefix(t, "nvarchar") ||
+		strings.HasPrefix(t, "clob")
+}
+
+func randomString() string {
+	var output strings.Builder
+	chars := "abcdedfghijklmnopqrstABCDEFGHIJKLMNOP"
+
+	for i := 0; i < 20; i++ {
+		random := rand.Intn(len(chars))
+		randomChar := chars[random]
+		output.WriteString(string(randomChar))
+	}
+	return output.String()
+}
+
+func ignoreErr(f func() error) {
+	if f == nil {
+		return
+	}
+	_ = f()
+}

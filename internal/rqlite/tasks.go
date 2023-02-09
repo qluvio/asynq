@@ -9,8 +9,8 @@ import (
 
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/hibiken/asynq/internal/sqlite3"
 	"github.com/hibiken/asynq/internal/utc"
-	"github.com/rqlite/gorqlite"
 )
 
 type taskRow struct {
@@ -40,7 +40,7 @@ type taskRow struct {
 	msg               *base.TaskMessage
 }
 
-func parseTaskRows(qr gorqlite.QueryResult) ([]*taskRow, error) {
+func parseTaskRows(qr sqlite3.QueryResult) ([]*taskRow, error) {
 	op := errors.Op("rqlite.parseTaskRows")
 
 	// no row
@@ -385,7 +385,7 @@ func (conn *Connection) enqueueMessages(msgs ...*base.MessageBatch) error {
 	}
 
 	queues := make(map[string]bool)
-	stmts := make([]*gorqlite.Statement, 0, len(msgs)*2)
+	stmts := make([]*sqlite3.Statement, 0, len(msgs)*2)
 	msgNdx := make([]int, 0, len(msgs))
 
 	for _, bmsg := range msgs {
@@ -465,7 +465,7 @@ func (conn *Connection) enqueueUniqueMessages(msgs ...*base.MessageBatch) error 
 	}
 
 	queues := make(map[string]bool)
-	stmts := make([]*gorqlite.Statement, 0, len(msgs)*2)
+	stmts := make([]*sqlite3.Statement, 0, len(msgs)*2)
 	msgNdx := make([]int, 0, len(msgs))
 	now := utc.Now()
 
@@ -601,7 +601,7 @@ type dequeueResult struct {
 func (conn *Connection) setTaskActive(ndx int64, serverID string, serverAffinity, deadline int64) (bool, error) {
 	op := errors.Op("rqlite.setTaskActive")
 
-	var st *gorqlite.Statement
+	var st *sqlite3.Statement
 	if len(serverID) > 0 {
 		st = Statement(
 			"UPDATE "+conn.table(TasksTable)+" SET state='active', sid=?, affinity_timeout=?, deadline=? WHERE state='pending' AND ndx=?",
@@ -681,7 +681,7 @@ func (conn *Connection) setTaskDone(serverID string, msg *base.TaskMessage) erro
 	now := utc.Now()
 	expireAt := now.Add(statsTTL)
 
-	var st *gorqlite.Statement
+	var st *sqlite3.Statement
 	if len(msg.UniqueKey) > 0 {
 		if len(serverID) > 0 {
 			st = Statement(
@@ -755,7 +755,7 @@ func (conn *Connection) setTaskCompleted(serverID string, msg *base.TaskMessage)
 		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode message: %v", err))
 	}
 
-	var st *gorqlite.Statement
+	var st *sqlite3.Statement
 	if len(msg.UniqueKey) > 0 {
 		if len(serverID) > 0 {
 			st = Statement(
@@ -834,7 +834,7 @@ func (conn *Connection) deleteExpiredCompletedTasks(qname string) error {
 		now.Unix())
 	wrs, err := conn.WriteStmt(conn.ctx(), stmt)
 	if err != nil {
-		return NewRqliteWsError(op, wrs, err, []*gorqlite.Statement{stmt})
+		return NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{stmt})
 	}
 	return nil
 }
@@ -847,7 +847,7 @@ func (conn *Connection) writeTaskResult(qname, taskID string, data []byte, activ
 		andState = ""
 	}
 
-	var st *gorqlite.Statement
+	var st *sqlite3.Statement
 	if len(data) == 0 {
 		st = Statement(
 			"UPDATE "+conn.table(TasksTable)+" SET result=NULL "+
@@ -885,7 +885,7 @@ func (conn *Connection) writeTaskResult(qname, taskID string, data []byte, activ
 func (conn *Connection) requeueTask(serverID string, msg *base.TaskMessage, aborted bool) error {
 	op := errors.Op("rqlite.requeueTask")
 
-	var st *gorqlite.Statement
+	var st *sqlite3.Statement
 	if aborted {
 		// server is stopping: just push back to pending
 		st = Statement(
@@ -998,7 +998,7 @@ func (conn *Connection) scheduleTasks(msgs ...*base.MessageBatch) error {
 	}
 
 	queues := make(map[string]bool)
-	stmts := make([]*gorqlite.Statement, 0, len(msgs)*2)
+	stmts := make([]*sqlite3.Statement, 0, len(msgs)*2)
 	msgNdx := make([]int, 0, len(msgs))
 
 	for _, bmsg := range msgs {
@@ -1083,7 +1083,7 @@ func (conn *Connection) scheduleUniqueTasks(msgs ...*base.MessageBatch) error {
 	}
 
 	queues := make(map[string]bool)
-	stmts := make([]*gorqlite.Statement, 0, len(msgs)*2)
+	stmts := make([]*sqlite3.Statement, 0, len(msgs)*2)
 	msgNdx := make([]int, 0, len(msgs))
 	now := utc.Now()
 
@@ -1211,7 +1211,7 @@ func (conn *Connection) retryTask(msg *base.TaskMessage, processAt time.Time, er
 		msg.ID)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if len(wrs) == 0 {
-		wrs = append(wrs, gorqlite.WriteResult{Err: err})
+		wrs = append(wrs, sqlite3.WriteResult{Err: err})
 	}
 	if err != nil {
 		return NewRqliteWError(op, wrs[0], err, st)
@@ -1246,7 +1246,7 @@ func (conn *Connection) archiveTask(msg *base.TaskMessage, errMsg string) error 
 	}
 	//PENDING(GIL) - TODO: add cleanup to respect max number of tasks in archive
 	_ = conn.config.MaxArchiveSize
-	stmts := []*gorqlite.Statement{
+	stmts := []*sqlite3.Statement{
 		Statement(
 			"DELETE FROM "+conn.table(TasksTable)+
 				" WHERE archived_at<? OR cleanup_at<?",

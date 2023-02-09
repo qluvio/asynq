@@ -7,8 +7,8 @@ import (
 
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/hibiken/asynq/internal/sqlite3"
 	"github.com/hibiken/asynq/internal/utc"
-	"github.com/rqlite/gorqlite"
 )
 
 type queueRow struct {
@@ -16,7 +16,7 @@ type queueRow struct {
 	state     string
 }
 
-func (conn *Connection) ensureQueueStatement(queue string) *gorqlite.Statement {
+func (conn *Connection) ensureQueueStatement(queue string) *sqlite3.Statement {
 	return Statement(
 		"INSERT INTO "+conn.table(QueuesTable)+" (queue_name, state) VALUES(?, 'active') "+
 			" ON CONFLICT(queue_name) DO NOTHING;",
@@ -101,7 +101,7 @@ func (conn *Connection) removeQueue(queue string, force bool) (int64, error) {
 			queue,
 			queue)
 	}
-	stmts := []*gorqlite.Statement{
+	stmts := []*sqlite3.Statement{
 		st,
 		Statement(
 			"DELETE FROM "+conn.table(TasksTable)+
@@ -169,7 +169,7 @@ func (conn *Connection) listQueues(queue ...string) ([]*queueRow, error) {
 
 func (conn *Connection) currentStats(queue string) (*base.Stats, error) {
 	op := errors.Op("currentStats")
-	stmts := []*gorqlite.Statement{
+	stmts := []*sqlite3.Statement{
 		Statement(
 			"SELECT queue_name, state "+
 				" FROM "+conn.table(QueuesTable)+" WHERE queue_name=? ", queue),
@@ -243,7 +243,7 @@ func (conn *Connection) historicalStats(queue string, ndays int) ([]*base.DailyS
 	op := errors.Op("historicalStats")
 	const day = 24 * time.Hour
 
-	stmts := make([]*gorqlite.Statement, 0, ndays*3)
+	stmts := make([]*sqlite3.Statement, 0, ndays*3)
 	now := utc.Now()
 	last := now.Unix()
 

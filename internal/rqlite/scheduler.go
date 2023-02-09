@@ -6,8 +6,8 @@ import (
 
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/hibiken/asynq/internal/sqlite3"
 	"github.com/hibiken/asynq/internal/utc"
-	"github.com/rqlite/gorqlite"
 )
 
 type schedulerRow struct {
@@ -66,7 +66,7 @@ type schedulerEnqueueEventRow struct {
 	event        *base.SchedulerEnqueueEvent
 }
 
-func parseSchedulerEnqueueEvents(qr gorqlite.QueryResult) ([]*schedulerEnqueueEventRow, error) {
+func parseSchedulerEnqueueEvents(qr sqlite3.QueryResult) ([]*schedulerEnqueueEventRow, error) {
 	op := errors.Op("parseSchedulerEnqueueEvents")
 	// no row
 	if qr.NumRows() == 0 {
@@ -145,7 +145,7 @@ func (conn *Connection) writeSchedulerEntries(schedulerID string, entries []*bas
 		args = append(args, bytes)
 	}
 
-	stmts := make([]*gorqlite.Statement, 0, len(args)-1)
+	stmts := make([]*sqlite3.Statement, 0, len(args)-1)
 	for i := 0; i < len(args); i++ {
 		stmts = append(stmts, Statement(
 			"INSERT INTO "+conn.table(SchedulersTable)+"(scheduler_id, expire_at, scheduler_entry) "+
@@ -193,7 +193,7 @@ func (conn *Connection) recordSchedulerEnqueueEvent(entryID string, event *base.
 		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode scheduler enqueue event: %v", err))
 	}
 
-	stmts := []*gorqlite.Statement{
+	stmts := []*sqlite3.Statement{
 		Statement(
 			"INSERT INTO "+conn.table(SchedulerHistoryTable)+"(uuid, task_id, enqueued_at, scheduler_enqueue_event) "+
 				"VALUES(?, ?, ?, ?) ",

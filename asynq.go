@@ -15,6 +15,7 @@ import (
 const (
 	redisType  = "redis"
 	rqliteType = "rqlite"
+	sqliteType = "sqlite"
 )
 
 // Task represents a unit of work to be performed.
