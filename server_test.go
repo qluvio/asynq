@@ -23,11 +23,16 @@ func ignoreTopFunctions() []goleak.Option {
 		goleak.IgnoreTopFunction("net/http.(*persistConn).readLoop"),
 		goleak.IgnoreTopFunction("net/http.(*persistConn).writeLoop"),
 		goleak.IgnoreTopFunction("internal/poll.runtime_pollWait"),
+		goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"),
+		goleak.IgnoreTopFunction("database/sql.(*DB).connectionCleaner"),
 	}
 }
 
 func TestServer(t *testing.T) {
 	defer goleak.VerifyNone(t, ignoreTopFunctions()...)
+
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
 
 	connOpt := getClientConnOpt(t)
 	client := NewClient(connOpt)
@@ -63,6 +68,9 @@ func TestServer(t *testing.T) {
 func TestServerRun(t *testing.T) {
 	defer goleak.VerifyNone(t, ignoreTopFunctions()...)
 
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
 	connOpt := getClientConnOpt(t)
 	srv := NewServer(connOpt, Config{
 		LogLevel: testLogLevel,
@@ -91,6 +99,9 @@ func TestServerRun(t *testing.T) {
 }
 
 func TestServerErrServerClosed(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
 	connOpt := getClientConnOpt(t)
 	srv := NewServer(connOpt, Config{
 		LogLevel: testLogLevel,
@@ -119,6 +130,9 @@ func TestServerErrNilHandler(t *testing.T) {
 }
 
 func TestServerErrServerRunning(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
 	connOpt := getClientConnOpt(t)
 	srv := NewServer(connOpt, Config{
 		LogLevel: testLogLevel,

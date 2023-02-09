@@ -1,6 +1,8 @@
 package asynq
 
 import (
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -21,6 +23,14 @@ func (c *rqliteTestContext) FlushDB() {
 }
 
 func (c *rqliteTestContext) Close() error {
+	if sqliteDbTemp {
+		if c.tb.Failed() {
+			fmt.Println("test failed - leaving sqlite Db at path:", rqliteConfig.SqliteDbPath)
+		} else {
+			//fmt.Println("cleanup sqlite Db Path: ", rqliteConfig.SqliteDbPath)
+			_ = os.Remove(rqliteConfig.SqliteDbPath)
+		}
+	}
 	return c.r.Close()
 }
 

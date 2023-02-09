@@ -383,7 +383,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				tc.qname, got, err, tc.want)
 			continue
 		}
-		if brokerType == rqliteType {
+		if brokerType == rqliteType || brokerType == sqliteType {
 			if diff := cmp.Diff(tc.wantRqlite, got, timeCmpOpt, ignoreMemUsg); diff != "" {
 				t.Errorf("r.GetQueueInfo(%q) = %v, %v, want %v, nil; (-want, +got)\n%s",
 					tc.qname, got, err, tc.want, diff)
@@ -419,13 +419,13 @@ func TestInspectorHistory(t *testing.T) {
 	}
 
 	processedCount := func(i int) int {
-		if brokerType == rqliteType {
+		if brokerType == rqliteType || brokerType == sqliteType {
 			return (i + 1) * 10
 		}
 		return (i + 1) * 1000
 	}
 	failedCount := func(i int) int {
-		if brokerType == rqliteType {
+		if brokerType == rqliteType || brokerType == sqliteType {
 			return i + 1
 		}
 		return i + 10
@@ -3032,7 +3032,10 @@ func TestInspectorArchiveTaskArchivesRetryTask(t *testing.T) {
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "custom")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
-	now := time.Now()
+
+	now := utc.Now()
+	defer utc.MockNow(now)()
+
 	z1 := base.Z{Message: m1, Score: now.Add(5 * time.Minute).Unix()}
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}

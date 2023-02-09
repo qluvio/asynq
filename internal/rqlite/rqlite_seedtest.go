@@ -6,8 +6,8 @@ import (
 
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/hibiken/asynq/internal/sqlite3"
 	"github.com/hibiken/asynq/internal/utc"
-	"github.com/rqlite/gorqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -268,13 +268,13 @@ func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneA
 	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 
-	stmts := make([]*gorqlite.Statement, 0, count)
+	stmts := make([]*sqlite3.Statement, 0, count)
 	for i := 0; i < count; i++ {
 
 		task := h.NewTaskMessage("", nil)
 		em, err := encodeMessage(task)
 		require.NoError(tb, err)
-		var st *gorqlite.Statement
+		var st *sqlite3.Statement
 		if !failed {
 			st = Statement(
 				"INSERT INTO "+r.conn.table(TasksTable)+"(queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, pndx, state, done_at) "+

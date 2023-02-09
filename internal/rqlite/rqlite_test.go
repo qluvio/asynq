@@ -2,8 +2,6 @@ package rqlite
 
 import (
 	"encoding/json"
-	"flag"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -17,42 +15,6 @@ import (
 	"github.com/hibiken/asynq/internal/utc"
 	"github.com/stretchr/testify/require"
 )
-
-// variables used for package testing.
-var (
-	brokerType string // redis | rqlite
-	config     Config
-)
-
-func init() {
-	flag.StringVar(&brokerType, "broker_type", "", "broker type to use in testing: rqlite")
-	config.InitDefaults()
-	flag.StringVar(&config.RqliteUrl, "rqlite_url", "http://localhost:4001", "rqlite url to use in testing")
-	flag.StringVar(&config.ConsistencyLevel, "consistency_level", "strong", "rqlite consistency level")
-}
-
-func skipUnknownBroker(tb testing.TB) {
-	run := false
-	switch brokerType {
-	case "rqlite":
-		run = true
-	}
-	if !run {
-		tb.Skip(fmt.Sprintf("skipping test with broker type: [%s]", brokerType))
-	}
-}
-
-func setup(tb testing.TB) *RQLite {
-	skipUnknownBroker(tb)
-	tb.Helper()
-	ret := NewRQLite(&config, nil, nil)
-	err := ret.Open()
-	if err != nil {
-		tb.Fatal("Unable to connect rqlite", err)
-	}
-	FlushDB(tb, ret.conn)
-	return ret
-}
 
 func TestCreateTables(t *testing.T) {
 	r := setup(t)

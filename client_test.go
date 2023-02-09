@@ -877,8 +877,6 @@ func TestClientWithDefaultOptions(t *testing.T) {
 
 			task := NewTask(tc.tasktype, tc.payload, tc.defaultOpts...)
 			gotInfo, err := client.Enqueue(task, tc.opts...)
-			//client.SetDefaultOptions(tc.task.Type(), tc.defaultOpts...)
-			//gotInfo, err := client.Enqueue(tc.task, tc.opts...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -902,35 +900,6 @@ func TestClientWithDefaultOptions(t *testing.T) {
 					tc.desc, diff)
 			}
 		})
-		/* =======
-				h.FlushDB(t, r)
-				c := NewClient(getRedisConnOpt(t))
-				defer c.Close()
-				task := NewTask(tc.tasktype, tc.payload, tc.defaultOpts...)
-				gotInfo, err := c.Enqueue(task, tc.opts...)
-				if err != nil {
-					t.Fatal(err)
-				}
-				cmpOptions := []cmp.Option{
-					cmpopts.IgnoreFields(TaskInfo{}, "ID"),
-					cmpopts.EquateApproxTime(500 * time.Millisecond),
-				}
-				if diff := cmp.Diff(tc.wantInfo, gotInfo, cmpOptions...); diff != "" {
-					t.Errorf("%s;\nEnqueue(task, opts...) returned %v, want %v; (-want,+got)\n%s",
-						tc.desc, gotInfo, tc.wantInfo, diff)
-				}
-				pending := h.GetPendingMessages(t, r, tc.queue)
-				if len(pending) != 1 {
-					t.Errorf("%s;\nexpected queue %q to have one message; got %d messages in the queue.",
-						tc.desc, tc.queue, len(pending))
-					continue
-				}
-				got := pending[0]
-				if diff := cmp.Diff(tc.want, got, h.IgnoreIDOpt); diff != "" {
-					t.Errorf("%s;\nmismatch found in pending task message; (-want,+got)\n%s",
-						tc.desc, diff)
-				}
-		    >>>>>>> v0_19_0 */
 	}
 }
 

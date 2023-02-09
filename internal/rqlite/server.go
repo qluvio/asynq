@@ -6,8 +6,8 @@ import (
 
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/hibiken/asynq/internal/sqlite3"
 	"github.com/hibiken/asynq/internal/utc"
-	"github.com/rqlite/gorqlite"
 )
 
 type serverRow struct {
@@ -142,7 +142,7 @@ func (conn *Connection) writeServerState(serverInfo *base.ServerInfo, workers []
 		workersMap[w.ID] = wrkInfo
 	}
 
-	stmts := make([]*gorqlite.Statement, 0, len(workersMap)+2)
+	stmts := make([]*sqlite3.Statement, 0, len(workersMap)+2)
 	stmts = append(stmts, Statement(
 		"INSERT INTO "+conn.table(ServersTable)+" (sid, pid, host, server_info, expire_at) "+
 			" VALUES(?, ?, ?, ?, ?) "+
@@ -188,7 +188,7 @@ func (conn *Connection) writeServerState(serverInfo *base.ServerInfo, workers []
 func (conn *Connection) clearServerState(host string, pid int, serverID string) error {
 	op := errors.Op("rqlite.clearServerState")
 
-	stmts := make([]*gorqlite.Statement, 0)
+	stmts := make([]*sqlite3.Statement, 0)
 	stmts = append(stmts, Statement(
 		"DELETE FROM "+conn.table(ServersTable)+" WHERE sid=? AND pid=? AND host=?",
 		serverID,

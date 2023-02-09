@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq/internal/errors"
-	"github.com/rqlite/gorqlite"
+	"github.com/hibiken/asynq/internal/sqlite3"
 )
 
 var AllTables = map[string]string{
@@ -136,7 +136,7 @@ func (conn *Connection) CreateTablesIfNotExist() (bool, error) {
 
 	get := Statement("SELECT COUNT(*) FROM " + conn.table(VersionTable))
 	qrs, err := conn.QueryStmt(conn.ctx(), get)
-	if err != nil && (qrs[0].Err == nil || !strings.Contains(qrs[0].Err.Error(), "no such table:")) {
+	if err != nil && (qrs[0].Err() == nil || !strings.Contains(qrs[0].Err().Error(), "no such table:")) {
 		return false, errors.E(op, errors.Internal, NewRqliteRError(op, qrs[0], err, get))
 	}
 	if qrs[0].NumRows() > 0 {
@@ -150,7 +150,7 @@ func (conn *Connection) CreateTablesIfNotExist() (bool, error) {
 }
 
 func (conn *Connection) CreateTables() error {
-	stmts := make([]*gorqlite.Statement, 0)
+	stmts := make([]*sqlite3.Statement, 0)
 	tables := make([]string, 0)
 	for _, stmt := range conn.AllTables() {
 		tables = append(tables, stmt)
@@ -172,7 +172,7 @@ func (conn *Connection) CreateTables() error {
 
 // DropTables deletes all the tables.
 func (conn *Connection) DropTables() error {
-	stmts := make([]*gorqlite.Statement, 0)
+	stmts := make([]*sqlite3.Statement, 0)
 	for table := range conn.AllTables() {
 		stmts = append(stmts, Statement("DROP TABLE IF EXISTS "+table))
 	}
@@ -185,7 +185,7 @@ func (conn *Connection) DropTables() error {
 
 // PurgeTables purges data from all tables, except the version table.
 func (conn *Connection) PurgeTables() error {
-	stmts := make([]*gorqlite.Statement, 0)
+	stmts := make([]*sqlite3.Statement, 0)
 	verTable := conn.table(VersionTable)
 	for table := range conn.AllTables() {
 		if table == verTable {
@@ -198,12 +198,4 @@ func (conn *Connection) PurgeTables() error {
 		return NewRqliteWsError("PurgeTables", wrs, err, stmts)
 	}
 	return nil
-}
-
-func Statement(sql string, params ...interface{}) *gorqlite.Statement {
-	ret := gorqlite.NewStatement(sql, params...)
-	//if len(ret.Warning) > 0 {
-	//	panic(ret.Warning)
-	//}
-	return ret
 }
