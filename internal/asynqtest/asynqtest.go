@@ -104,7 +104,7 @@ func NewTaskMessage(taskType string, payload []byte) *base.TaskMessage {
 // task type, payload and queue name.
 func NewTaskMessageWithQueue(taskType string, payload []byte, qname string) *base.TaskMessage {
 	return &base.TaskMessage{
-		ID:       uuid.New().String(),
+		ID:       uuid.NewString(),
 		Type:     taskType,
 		Queue:    qname,
 		Retry:    25,

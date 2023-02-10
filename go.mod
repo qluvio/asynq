@@ -8,7 +8,7 @@ require (
 	github.com/google/go-cmp v0.5.6
 	github.com/google/uuid v1.2.0
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/rqlite/go-sqlite3 v1.27.1 // indirect
+	github.com/rqlite/go-sqlite3 v1.27.1
 	github.com/rqlite/gorqlite v0.0.0-20210804113434-b4935d2eab04
 	github.com/spf13/cast v1.3.1
 	github.com/stretchr/testify v1.7.0

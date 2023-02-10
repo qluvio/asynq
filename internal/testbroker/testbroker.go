@@ -6,11 +6,13 @@
 package testbroker
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
 
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/hibiken/asynq/internal/timeutil"
 )
 
 var errRedisDown = errors.New("asynqtest: redis is down")
@@ -36,6 +38,10 @@ func (tb *TestBroker) Inspector() base.Inspector {
 	return tb.real.Inspector()
 }
 
+func (tb *TestBroker) SetClock(c timeutil.Clock) {
+	tb.real.SetClock(c)
+}
+
 func (tb *TestBroker) Sleep() {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
@@ -48,22 +54,22 @@ func (tb *TestBroker) Wakeup() {
 	tb.sleeping = false
 }
 
-func (tb *TestBroker) Enqueue(msg *base.TaskMessage) error {
+func (tb *TestBroker) Enqueue(ctx context.Context, msg *base.TaskMessage) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.Enqueue(msg)
+	return tb.real.Enqueue(ctx, msg)
 }
 
-func (tb *TestBroker) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration, forceUnique ...bool) error {
+func (tb *TestBroker) EnqueueUnique(ctx context.Context, msg *base.TaskMessage, ttl time.Duration, forceUnique ...bool) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.EnqueueUnique(msg, ttl, forceUnique...)
+	return tb.real.EnqueueUnique(ctx, msg, ttl, forceUnique...)
 }
 
 func (tb *TestBroker) Dequeue(serverID string, qnames ...string) (*base.TaskMessage, time.Time, error) {
@@ -102,22 +108,22 @@ func (tb *TestBroker) MarkAsComplete(serverID string, msg *base.TaskMessage) err
 	return tb.real.MarkAsComplete(serverID, msg)
 }
 
-func (tb *TestBroker) Schedule(msg *base.TaskMessage, processAt time.Time) error {
+func (tb *TestBroker) Schedule(ctx context.Context, msg *base.TaskMessage, processAt time.Time) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.Schedule(msg, processAt)
+	return tb.real.Schedule(ctx, msg, processAt)
 }
 
-func (tb *TestBroker) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error {
+func (tb *TestBroker) ScheduleUnique(ctx context.Context, msg *base.TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.ScheduleUnique(msg, processAt, ttl, forceUnique...)
+	return tb.real.ScheduleUnique(ctx, msg, processAt, ttl, forceUnique...)
 }
 
 func (tb *TestBroker) Retry(msg *base.TaskMessage, processAt time.Time, errMsg string, isFailure bool) error {
@@ -237,38 +243,38 @@ func (tb *TestBroker) ListServers() ([]*base.ServerInfo, error) {
 	return tb.real.ListServers()
 }
 
-func (tb *TestBroker) EnqueueBatch(msgs ...*base.MessageBatch) error {
+func (tb *TestBroker) EnqueueBatch(ctx context.Context, msgs ...*base.MessageBatch) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.EnqueueBatch(msgs...)
+	return tb.real.EnqueueBatch(ctx, msgs...)
 }
 
-func (tb *TestBroker) EnqueueUniqueBatch(msgs ...*base.MessageBatch) error {
+func (tb *TestBroker) EnqueueUniqueBatch(ctx context.Context, msgs ...*base.MessageBatch) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.EnqueueUniqueBatch(msgs...)
+	return tb.real.EnqueueUniqueBatch(ctx, msgs...)
 }
 
-func (tb *TestBroker) ScheduleBatch(msgs ...*base.MessageBatch) error {
+func (tb *TestBroker) ScheduleBatch(ctx context.Context, msgs ...*base.MessageBatch) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.ScheduleBatch(msgs...)
+	return tb.real.ScheduleBatch(ctx, msgs...)
 }
 
-func (tb *TestBroker) ScheduleUniqueBatch(msgs ...*base.MessageBatch) error {
+func (tb *TestBroker) ScheduleUniqueBatch(ctx context.Context, msgs ...*base.MessageBatch) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return errRedisDown
 	}
-	return tb.real.ScheduleUniqueBatch(msgs...)
+	return tb.real.ScheduleUniqueBatch(ctx, msgs...)
 }

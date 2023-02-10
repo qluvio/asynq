@@ -63,6 +63,9 @@ type QueueInfo struct {
 	// It is an approximate memory usage value in bytes since the value is computed by sampling.
 	MemoryUsage int64
 
+	// Latency of the queue, measured by the oldest pending task in the queue.
+	Latency time.Duration
+
 	// Size is the total number of tasks in the queue.
 	// The value is the sum of Pending, Active, Scheduled, Retry, and Archived.
 	Size int
@@ -106,6 +109,7 @@ func (i *Inspector) GetQueueInfo(qname string) (*QueueInfo, error) {
 	return &QueueInfo{
 		Queue:       stats.Queue,
 		MemoryUsage: stats.MemoryUsage,
+		Latency:     stats.Latency,
 		Size:        stats.Size,
 		Pending:     stats.Pending,
 		Active:      stats.Active,
@@ -188,8 +192,8 @@ func (i *Inspector) DeleteQueue(qname string, force bool) error {
 
 // GetTaskInfo retrieves task information given a task id and queue name.
 //
-// Returns ErrQueueNotFound if a queue with the given name doesn't exist.
-// Returns ErrTaskNotFound if a task with the given id doesn't exist in the queue.
+// Returns an error wrapping ErrQueueNotFound if a queue with the given name doesn't exist.
+// Returns an error wrapping ErrTaskNotFound if a task with the given id doesn't exist in the queue.
 func (i *Inspector) GetTaskInfo(qname, id string) (*TaskInfo, error) {
 	info, err := i.rdb.GetTaskInfo(qname, id)
 	switch {
@@ -490,8 +494,8 @@ func (i *Inspector) DeleteAllCompletedTasks(qname string) (int, error) {
 // The task needs to be in pending, scheduled, retry, or archived state,
 // otherwise DeleteTask will return an error.
 //
-// If a queue with the given name doesn't exist, it returns ErrQueueNotFound.
-// If a task with the given id doesn't exist in the queue, it returns ErrTaskNotFound.
+// If a queue with the given name doesn't exist, it returns an error wrapping ErrQueueNotFound.
+// If a task with the given id doesn't exist in the queue, it returns an error wrapping ErrTaskNotFound.
 // If the task is in active state, it returns a non-nil error.
 func (i *Inspector) DeleteTask(qname, id string) error {
 	if err := base.ValidateQueueName(qname); err != nil {
@@ -544,8 +548,8 @@ func (i *Inspector) RunAllArchivedTasks(qname string) (int, error) {
 // The task needs to be in scheduled, retry, or archived state, otherwise RunTask
 // will return an error.
 //
-// If a queue with the given name doesn't exist, it returns ErrQueueNotFound.
-// If a task with the given id doesn't exist in the queue, it returns ErrTaskNotFound.
+// If a queue with the given name doesn't exist, it returns an error wrapping ErrQueueNotFound.
+// If a task with the given id doesn't exist in the queue, it returns an error wrapping ErrTaskNotFound.
 // If the task is in pending or active state, it returns a non-nil error.
 func (i *Inspector) RunTask(qname, id string) error {
 	if err := base.ValidateQueueName(qname); err != nil {
@@ -597,8 +601,8 @@ func (i *Inspector) ArchiveAllRetryTasks(qname string) (int, error) {
 // The task needs to be in pending, scheduled, or retry state, otherwise ArchiveTask
 // will return an error.
 //
-// If a queue with the given name doesn't exist, it returns ErrQueueNotFound.
-// If a task with the given id doesn't exist in the queue, it returns ErrTaskNotFound.
+// If a queue with the given name doesn't exist, it returns an error wrapping ErrQueueNotFound.
+// If a task with the given id doesn't exist in the queue, it returns an error wrapping ErrTaskNotFound.
 // If the task is in already archived, it returns a non-nil error.
 func (i *Inspector) ArchiveTask(qname, id string) error {
 	if err := base.ValidateQueueName(qname); err != nil {

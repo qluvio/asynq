@@ -69,7 +69,8 @@ const (
 	sid                    text,
 	affinity_timeout       integer,
 	recurrent              boolean,
-	result                 text 
+	result                 text,
+	pending_since          integer 
 )`
 
 	ServersTable          = "asynq_servers"

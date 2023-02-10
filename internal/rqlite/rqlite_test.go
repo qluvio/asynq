@@ -1,6 +1,7 @@
 package rqlite
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"testing"
@@ -12,9 +13,14 @@ import (
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
-	"github.com/hibiken/asynq/internal/utc"
+	"github.com/hibiken/asynq/internal/timeutil"
 	"github.com/stretchr/testify/require"
 )
+
+func (r *RQLite) MockNow(t time.Time) {
+	// remove monotonic clock to the provided time for more reliable comparisons
+	r.clock = timeutil.NewSimulatedClock(t.Round(0))
+}
 
 func TestCreateTables(t *testing.T) {
 	r := setup(t)
@@ -40,7 +46,7 @@ func TestBasicEnqueueDequeue(t *testing.T) {
 	t3 := h.NewTaskMessageWithQueue("sync", nil, "low")
 
 	for _, tm := range []*base.TaskMessage{t1, t2, t3} {
-		err := r.Enqueue(tm)
+		err := r.Enqueue(context.Background(), tm)
 		require.NoError(t, err)
 	}
 
@@ -89,11 +95,11 @@ func TestEnqueue(t *testing.T) {
 	for _, tc := range tests {
 		FlushDB(t, r.conn)
 
-		err := r.Enqueue(tc.msg)
+		err := r.Enqueue(context.Background(), tc.msg)
 		require.NoError(t, err)
 
 		// Check Pending list has task ID.
-		pending, err := r.conn.getPending("", tc.msg.Queue)
+		pending, err := r.conn.getPending(r.Now(), "", tc.msg.Queue)
 		require.NoError(t, err)
 		require.Equal(t, tc.msg.ID, pending.msg.ID)
 		// Check the value under the task key.
@@ -134,16 +140,18 @@ func TestEnqueueUnique(t *testing.T) {
 		{msg: &m1, ttl: time.Minute, failUnique: true},
 		{msg: &m2, ttl: time.Second, failUnique: false, waitBeforeSecondEnqueue: true},
 	}
+	ctx := context.Background()
+	now := r.clock.Now()
 
 	for _, tc := range tests {
 		FlushDB(t, r.conn)
 
 		// Enqueue the first message, should succeed.
-		err := r.EnqueueUnique(tc.msg, tc.ttl)
+		err := r.EnqueueUnique(ctx, tc.msg, tc.ttl)
 		require.NoError(t, err)
 
 		// Check Pending list has task ID.
-		pending, err := r.conn.getPending("", tc.msg.Queue)
+		pending, err := r.conn.getPending(r.Now(), "", tc.msg.Queue)
 		require.NoError(t, err)
 		require.Equal(t, tc.msg.ID, pending.msg.ID)
 		// Check the value under the task key.
@@ -156,10 +164,11 @@ func TestEnqueueUnique(t *testing.T) {
 		require.True(t, ok, "%s queue not found in table %s", tc.msg.Queue, r.conn.table(QueuesTable))
 
 		if tc.waitBeforeSecondEnqueue {
-			time.Sleep(tc.ttl)
+			//time.Sleep(tc.ttl)
+			r.MockNow(now.Add(tc.ttl))
 		}
 
-		err = r.EnqueueUnique(tc.msg, tc.ttl)
+		err = r.EnqueueUnique(ctx, tc.msg, tc.ttl)
 		if tc.failUnique {
 			// Enqueue the second message, should fail.
 			require.True(t, errors.Is(err, errors.ErrDuplicateTask),
@@ -175,8 +184,7 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := r.Now()
 
 	m1 := base.TaskMessage{
 		ID:             uuid.New().String(),
@@ -206,13 +214,14 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 		{msg: &m1},
 		{msg: &m2},
 	}
+	ctx := context.Background()
 
 	for _, tc := range tests {
 		//fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
 		FlushDB(t, r.conn)
 
 		// initial dequeue
-		err := r.EnqueueUnique(tc.msg, ttl)
+		err := r.EnqueueUnique(ctx, tc.msg, ttl)
 		require.NoError(t, err)
 		_, _, err = r.Dequeue("", tc.msg.Queue)
 		require.NoError(t, err)
@@ -244,7 +253,7 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 		require.Equal(t, tc.msg, m)
 
 		// still cannot enqueue
-		err = r.EnqueueUnique(tc.msg, ttl)
+		err = r.EnqueueUnique(ctx, tc.msg, ttl)
 		require.Error(t, err)
 		require.True(t, errors.Is(err, errors.ErrDuplicateTask))
 
@@ -253,18 +262,18 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 
 		// after the server affinity elapsed, another server can dequeue it
 		now = now.Add(time.Second * time.Duration(tc.msg.ServerAffinity))
-		utc.MockNow(now)
+		r.MockNow(now)
 		m, _, err = r.Dequeue("", tc.msg.Queue)
 		require.NoError(t, err)
 		require.Equal(t, tc.msg, m)
 
 		// still cannot enqueue
-		err = r.EnqueueUnique(tc.msg, ttl)
+		err = r.EnqueueUnique(ctx, tc.msg, ttl)
 		require.Error(t, err)
 		require.True(t, errors.Is(err, errors.ErrDuplicateTask))
 		now = now.Add(ttl)
-		utc.MockNow(now)
-		err = r.EnqueueUnique(tc.msg, ttl)
+		r.MockNow(now)
+		err = r.EnqueueUnique(ctx, tc.msg, ttl)
 		require.NoError(t, err)
 
 	}
@@ -274,8 +283,7 @@ func TestEnqueueWithServerAffinityAfterError(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := r.Now()
 
 	m1 := base.TaskMessage{
 		ID:             uuid.New().String(),
@@ -295,13 +303,14 @@ func TestEnqueueWithServerAffinityAfterError(t *testing.T) {
 	}{
 		{msg: &m1},
 	}
+	ctx := context.Background()
 
 	for _, tc := range tests {
 		//fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
 		FlushDB(t, r.conn)
 
 		// initial dequeue
-		err := r.EnqueueUnique(tc.msg, ttl)
+		err := r.EnqueueUnique(ctx, tc.msg, ttl)
 		require.NoError(t, err)
 		_, _, err = r.Dequeue("", tc.msg.Queue)
 		require.NoError(t, err)
@@ -324,7 +333,7 @@ func TestEnqueueWithServerAffinityAfterError(t *testing.T) {
 		err = r.Archive(tc.msg, "there was an error")
 		require.NoError(t, err)
 		// after an error we can re-enqueue
-		err = r.EnqueueUnique(tc.msg, ttl)
+		err = r.EnqueueUnique(ctx, tc.msg, ttl)
 		require.NoError(t, err)
 
 		// the server cannot take it right away
@@ -338,12 +347,12 @@ func TestEnqueueWithServerAffinityAfterError(t *testing.T) {
 		err = r.Archive(tc.msg, "there was an error")
 		require.NoError(t, err)
 		// after an error we can re-enqueue
-		err = r.EnqueueUnique(tc.msg, ttl)
+		err = r.EnqueueUnique(ctx, tc.msg, ttl)
 		require.NoError(t, err)
 
 		// after server affinity elapsed, the same server can take it again
 		now = now.Add(time.Second * time.Duration(tc.msg.ServerAffinity))
-		utc.MockNow(now)
+		r.MockNow(now)
 		m, _, err = r.Dequeue(serverID2, tc.msg.Queue)
 		require.NoError(t, err)
 
@@ -354,8 +363,7 @@ func TestRequeueScheduled(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := r.Now()
 
 	m1 := base.TaskMessage{
 		ID:             uuid.New().String(),
@@ -397,9 +405,9 @@ func TestRequeueScheduled(t *testing.T) {
 		// initial enqueue/dequeue
 		var err error
 		if len(tc.msg.UniqueKey) > 0 {
-			err = r.EnqueueUnique(tc.msg, ttl)
+			err = r.EnqueueUnique(context.Background(), tc.msg, ttl)
 		} else {
-			err = r.Enqueue(tc.msg)
+			err = r.Enqueue(context.Background(), tc.msg)
 		}
 		require.NoError(t, err)
 		_, _, err = r.Dequeue("", tc.msg.Queue)
@@ -427,8 +435,7 @@ func TestDequeue(t *testing.T) {
 	// use utc.MockNow in order to avoid the one-second approximation of the
 	// deadline that results from the delay between the start of the test
 	// function and the invocation of 'Dequeue'
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := r.Now()
 
 	t1 := &base.TaskMessage{
 		ID:       uuid.NewString(),
@@ -472,7 +479,7 @@ func TestDequeue(t *testing.T) {
 			},
 			args:         []string{"default"},
 			wantMsg:      t1,
-			wantDeadline: utc.Unix(t1Deadline, 0).Time,
+			wantDeadline: time.Unix(t1Deadline, 0),
 			wantPending: map[string][]*base.TaskMessage{
 				"default": {},
 			},
@@ -491,7 +498,7 @@ func TestDequeue(t *testing.T) {
 			},
 			args:         []string{"critical", "default", "low"},
 			wantMsg:      t2,
-			wantDeadline: utc.Unix(t2Deadline, 0).Time,
+			wantDeadline: time.Unix(t2Deadline, 0),
 			wantPending: map[string][]*base.TaskMessage{
 				"default":  {t1},
 				"critical": {},
@@ -516,7 +523,7 @@ func TestDequeue(t *testing.T) {
 			},
 			args:         []string{"critical", "default", "low"},
 			wantMsg:      t1,
-			wantDeadline: utc.Unix(t1Deadline, 0).Time,
+			wantDeadline: time.Unix(t1Deadline, 0),
 			wantPending: map[string][]*base.TaskMessage{
 				"default":  {},
 				"critical": {},
@@ -793,8 +800,7 @@ func TestDone(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := r.Now()
 
 	t1 := &base.TaskMessage{
 		ID:       uuid.NewString(),
@@ -943,8 +949,7 @@ func TestRequeue(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := r.Now()
 
 	t1 := &base.TaskMessage{
 		ID:      uuid.NewString(),
@@ -1107,7 +1112,7 @@ func TestSchedule(t *testing.T) {
 	for _, tc := range tests {
 		FlushDB(t, r.conn)
 
-		err := r.Schedule(tc.msg, tc.processAt)
+		err := r.Schedule(context.Background(), tc.msg, tc.processAt)
 		if err != nil {
 			t.Errorf("(*RQLite).Schedule(%v, %v) = %v, want nil",
 				tc.msg, tc.processAt, err)
@@ -1161,13 +1166,14 @@ func TestScheduleUnique(t *testing.T) {
 	}{
 		{&m1, time.Now().UTC().Add(15 * time.Minute), time.Minute},
 	}
+	ctx := context.Background()
 
 	for _, tc := range tests {
 		FlushDB(t, r.conn)
 
 		desc := "(*RQLite).ScheduleUnique(msg, processAt, ttl)"
 		expectUniqueKeyDeadline := time.Now().UTC().Add(tc.ttl).Unix()
-		err := r.ScheduleUnique(tc.msg, tc.processAt, tc.ttl)
+		err := r.ScheduleUnique(ctx, tc.msg, tc.processAt, tc.ttl)
 		if err != nil {
 			t.Errorf("Frist task: %s = %v, want nil", desc, err)
 			continue
@@ -1206,7 +1212,7 @@ func TestScheduleUnique(t *testing.T) {
 		require.Equal(t, 1, len(queues))
 
 		// Enqueue the second message, should fail.
-		got := r.ScheduleUnique(tc.msg, tc.processAt, tc.ttl)
+		got := r.ScheduleUnique(ctx, tc.msg, tc.processAt, tc.ttl)
 		if !errors.Is(got, errors.ErrDuplicateTask) {
 			t.Errorf("Second task: %s = %v, want %v", desc, got, errors.ErrDuplicateTask)
 			continue
@@ -1245,15 +1251,16 @@ func TestScheduleUniqueTaskIdConflictError(t *testing.T) {
 	}{
 		{firstMsg: &m1, secondMsg: &m2},
 	}
+	ctx := context.Background()
 
 	for _, tc := range tests {
 		FlushDB(t, r.conn) // clean up db before each test case.
 
-		if err := r.ScheduleUnique(tc.firstMsg, processAt, ttl); err != nil {
+		if err := r.ScheduleUnique(ctx, tc.firstMsg, processAt, ttl); err != nil {
 			t.Errorf("First message: ScheduleUnique failed: %v", err)
 			continue
 		}
-		if err := r.ScheduleUnique(tc.secondMsg, processAt, ttl); !errors.Is(err, errors.ErrTaskIdConflict) {
+		if err := r.ScheduleUnique(ctx, tc.secondMsg, processAt, ttl); !errors.Is(err, errors.ErrTaskIdConflict) {
 			t.Errorf("Second message: ScheduleUnique returned %v, want %v", err, errors.ErrTaskIdConflict)
 			continue
 		}
@@ -1264,8 +1271,7 @@ func TestRetry(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := r.Now()
 
 	t1 := &base.TaskMessage{
 		ID:      uuid.NewString(),
@@ -1323,7 +1329,7 @@ func TestRetry(t *testing.T) {
 				"default": {{Message: t3, Score: now.Add(time.Minute).Unix()}},
 			},
 			msg:       t1,
-			processAt: now.Add(5 * time.Minute).Time,
+			processAt: now.Add(5 * time.Minute),
 			errMsg:    errMsg,
 			wantActive: map[string][]*base.TaskMessage{
 				"default": {t2},
@@ -1354,7 +1360,7 @@ func TestRetry(t *testing.T) {
 				"custom":  {},
 			},
 			msg:       t4,
-			processAt: now.Add(5 * time.Minute).Time,
+			processAt: now.Add(5 * time.Minute),
 			errMsg:    errMsg,
 			wantActive: map[string][]*base.TaskMessage{
 				"default": {t1, t2},
@@ -1405,7 +1411,7 @@ func TestRetry(t *testing.T) {
 			SortDeadlineEntryOpt,
 			//cmpopts.EquateApproxTime(5 * time.Second), // for LastFailedAt field
 		}
-		wantRetry := tc.getWantRetry(callTime.Time)
+		wantRetry := tc.getWantRetry(callTime)
 		for queue, want := range wantRetry {
 			gotRetry := GetRetryEntries(t, r, queue)
 			if diff := cmp.Diff(want, gotRetry, cmpOpts...); diff != "" {
@@ -1436,7 +1442,7 @@ func TestRetry(t *testing.T) {
 func TestRetryWithNonFailureError(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
-	now := time.Now()
+	now := r.Now()
 	t1 := &base.TaskMessage{
 		ID:      uuid.NewString(),
 		Type:    "send_email",
@@ -1574,7 +1580,15 @@ func TestRetryWithNonFailureError(t *testing.T) {
 		}
 		cmpOpts := []cmp.Option{
 			h.SortZSetEntryOpt,
-			cmpopts.EquateApproxTime(5 * time.Second), // for LastFailedAt field
+			cmp.Comparer(func(m1, m2 *base.TaskMessage) bool {
+				if cmp.Equal(m1, m2, cmpopts.IgnoreFields(base.TaskMessage{}, "LastFailedAt")) {
+					d := m1.LastFailedAt - m2.LastFailedAt
+					if d >= -1 && d <= 1 {
+						return true
+					}
+				}
+				return false
+			}),
 		}
 		wantRetry := tc.getWantRetry(callTime)
 		for queue, want := range wantRetry {
@@ -1597,8 +1611,7 @@ func TestArchive(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := r.Now()
 
 	t1 := &base.TaskMessage{
 		ID:      uuid.NewString(),
@@ -1777,7 +1790,7 @@ func TestArchive(t *testing.T) {
 				t.Errorf("mismatch found in %q after calling (*RQLite).Archive: (-want, +got):\n%s", base.DeadlinesKey(queue), diff)
 			}
 		}
-		for queue, want := range tc.getWantArchived(callTime.Time) {
+		for queue, want := range tc.getWantArchived(callTime) {
 			gotArchived := GetArchivedEntries(t, r, queue)
 			//if diff := cmp.Diff(want, gotArchived, SortDeadlineEntryOpt, zScoreCmpOpt, timeCmpOpt); diff != "" {
 			if diff := cmp.Diff(want, gotArchived, SortDeadlineEntryOpt); diff != "" {
@@ -1814,8 +1827,7 @@ func TestForwardIfReady(t *testing.T) {
 	t4 := h.NewTaskMessageWithQueue("important_task", nil, "critical")
 	t5 := h.NewTaskMessageWithQueue("minor_task", nil, "low")
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := r.Now()
 
 	secondAgo := now.Add(-time.Second)
 	hourFromNow := now.Add(time.Hour)
@@ -1953,7 +1965,7 @@ func TestForwardIfReady(t *testing.T) {
 	}
 }
 
-func newCompletedTask(qname, typename string, payload []byte, completedAt utc.UTC) *base.TaskMessage {
+func newCompletedTask(qname, typename string, payload []byte, completedAt time.Time) *base.TaskMessage {
 	msg := h.NewTaskMessageWithQueue(typename, payload, qname)
 	msg.CompletedAt = completedAt.Unix()
 	return msg
@@ -1963,8 +1975,8 @@ func TestDeleteExpiredCompletedTasks(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Unix(1674591000, 0)
-	defer utc.MockNow(now)()
+	now := time.Unix(1674591000, 0)
+	r.MockNow(now)
 
 	secondAgo := now.Add(-time.Second)
 	hourFromNow := now.Add(time.Hour)
@@ -2051,8 +2063,9 @@ func TestListDeadlineExceeded(t *testing.T) {
 	t2 := h.NewTaskMessageWithQueue("task2", nil, "default")
 	t3 := h.NewTaskMessageWithQueue("task3", nil, "critical")
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+	now := r.Now()
 
 	oneHourFromNow := now.Add(1 * time.Hour)
 	fiveMinutesFromNow := now.Add(5 * time.Minute)
@@ -2117,9 +2130,6 @@ func TestListDeadlineExceeded(t *testing.T) {
 		},
 	}
 
-	r := setup(t)
-	defer func() { _ = r.Close() }()
-
 	for _, tc := range tests {
 		FlushDB(t, r.conn)
 		SeedAllDeadlines(t, r, tc.deadlines, 0)
@@ -2137,13 +2147,13 @@ func TestListDeadlineExceeded(t *testing.T) {
 	}
 }
 
-func assertServer(t *testing.T, info *base.ServerInfo, srv *serverRow, ttl time.Duration) {
+func assertServer(t *testing.T, now time.Time, info *base.ServerInfo, srv *serverRow, ttl time.Duration) {
 	if diff := cmp.Diff(info, srv.server); diff != "" {
 		t.Errorf("persisted ServerInfo was %v, want %v; (-want,+got)\n%s",
 			srv.server, info, diff)
 	}
 	// Check ServerInfo TTL was set correctly.
-	expectExpireAt := utc.Now().Add(ttl).Unix()
+	expectExpireAt := now.Add(ttl).Unix()
 	if !cmp.Equal(expectExpireAt, srv.expireAt, cmpopts.EquateApprox(0, 1)) {
 		t.Errorf("Expiration of %q was %v, want %v", srv.sid, expectExpireAt, srv.expireAt)
 	}
@@ -2158,12 +2168,8 @@ func TestWriteServerState(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
-
-	var (
-		ttl = 5 * time.Second
-	)
+	now := r.Now()
+	ttl := 5 * time.Second
 
 	info := base.ServerInfo{
 		Host:              "localhost",
@@ -2172,7 +2178,7 @@ func TestWriteServerState(t *testing.T) {
 		Concurrency:       10,
 		Queues:            map[string]int{"default": 2, "email": 5, "low": 1},
 		StrictPriority:    false,
-		Started:           now.Time,
+		Started:           now,
 		Status:            "active",
 		ActiveWorkerCount: 0,
 	}
@@ -2186,15 +2192,14 @@ func TestWriteServerState(t *testing.T) {
 	srvs, err := r.conn.getServer(&info)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(srvs))
-	assertServer(t, &info, srvs[0], ttl)
+	assertServer(t, r.Now(), &info, srvs[0], ttl)
 }
 
 func TestWriteServerStateWithWorkers(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := r.Now()
 
 	var (
 		host = "127.0.0.1"
@@ -2214,7 +2219,7 @@ func TestWriteServerStateWithWorkers(t *testing.T) {
 			Type:    msg1.Type,
 			Queue:   msg1.Queue,
 			Payload: msg1.Payload,
-			Started: now.Add(-10 * time.Second).Time,
+			Started: now.Add(-10 * time.Second),
 		},
 		{
 			Host:    host,
@@ -2223,7 +2228,7 @@ func TestWriteServerStateWithWorkers(t *testing.T) {
 			Type:    msg2.Type,
 			Queue:   msg2.Queue,
 			Payload: msg2.Payload,
-			Started: now.Add(-2 * time.Minute).Time,
+			Started: now.Add(-2 * time.Minute),
 		},
 	}
 
@@ -2234,7 +2239,7 @@ func TestWriteServerStateWithWorkers(t *testing.T) {
 		Concurrency:       10,
 		Queues:            map[string]int{"default": 2, "email": 5, "low": 1},
 		StrictPriority:    false,
-		Started:           now.Add(-10 * time.Minute).Time,
+		Started:           now.Add(-10 * time.Minute),
 		Status:            "active",
 		ActiveWorkerCount: len(workers),
 	}
@@ -2248,7 +2253,7 @@ func TestWriteServerStateWithWorkers(t *testing.T) {
 	srvs, err := r.conn.getServer(&serverInfo)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(srvs))
-	assertServer(t, &serverInfo, srvs[0], ttl)
+	assertServer(t, r.Now(), &serverInfo, srvs[0], ttl)
 
 	// Check WorkersInfo was written correctly.
 	workerRows, err := r.conn.getWorkers(serverInfo.ServerID)
@@ -2277,8 +2282,7 @@ func TestClearServerState(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := r.Now()
 
 	var (
 		host     = "127.0.0.1"
@@ -2303,7 +2307,7 @@ func TestClearServerState(t *testing.T) {
 			Type:    msg1.Type,
 			Queue:   msg1.Queue,
 			Payload: msg1.Payload,
-			Started: now.Add(-10 * time.Second).Time,
+			Started: now.Add(-10 * time.Second),
 		},
 	}
 	serverInfo1 := base.ServerInfo{
@@ -2313,7 +2317,7 @@ func TestClearServerState(t *testing.T) {
 		Concurrency:       10,
 		Queues:            map[string]int{"default": 2, "email": 5, "low": 1},
 		StrictPriority:    false,
-		Started:           now.Add(-10 * time.Minute).Time,
+		Started:           now.Add(-10 * time.Minute),
 		Status:            "active",
 		ActiveWorkerCount: len(workers1),
 	}
@@ -2326,7 +2330,7 @@ func TestClearServerState(t *testing.T) {
 			Type:    msg2.Type,
 			Queue:   msg2.Queue,
 			Payload: msg2.Payload,
-			Started: now.Add(-30 * time.Second).Time,
+			Started: now.Add(-30 * time.Second),
 		},
 	}
 	serverInfo2 := base.ServerInfo{
@@ -2336,7 +2340,7 @@ func TestClearServerState(t *testing.T) {
 		Concurrency:       10,
 		Queues:            map[string]int{"default": 2, "email": 5, "low": 1},
 		StrictPriority:    false,
-		Started:           now.Add(-15 * time.Minute).Time,
+		Started:           now.Add(-15 * time.Minute),
 		Status:            "active",
 		ActiveWorkerCount: len(workers2),
 	}

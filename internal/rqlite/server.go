@@ -7,7 +7,6 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/sqlite3"
-	"github.com/hibiken/asynq/internal/utc"
 )
 
 type serverRow struct {
@@ -125,14 +124,14 @@ func (conn *Connection) listWorkers(where string, whereParams ...interface{}) ([
 	return ret, nil
 }
 
-func (conn *Connection) writeServerState(serverInfo *base.ServerInfo, workers []*base.WorkerInfo, ttl time.Duration) error {
+func (conn *Connection) writeServerState(now time.Time, serverInfo *base.ServerInfo, workers []*base.WorkerInfo, ttl time.Duration) error {
 	op := errors.Op("rqlite.writeServerState")
 
 	srvInfo, err := encodeServerInfo(serverInfo)
 	if err != nil {
 		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode server info: %v", err))
 	}
-	now := utc.Now()
+
 	workersMap := map[string]string{}
 	for _, w := range workers {
 		wrkInfo, err := encodeWorkerInfo(w)

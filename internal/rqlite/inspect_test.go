@@ -1,6 +1,7 @@
 package rqlite
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -12,8 +13,27 @@ import (
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
-	"github.com/hibiken/asynq/internal/utc"
 	"github.com/stretchr/testify/require"
+)
+
+var (
+	timeCmpOpt    = cmpopts.EquateApproxTime(2 * time.Second) // allow for 2 seconds margin in time.Time
+	zScoreCmpOpt  = h.EquateInt64Approx(2)                    // allow for 2 seconds margin in Z.Score
+	latencyCmpOpt = cmp.Comparer(func(d0, d1 time.Duration) bool {
+		if d0 == d1 {
+			return true
+		}
+		var diff time.Duration
+		if d0 > d1 {
+			diff = d0 - d1
+		} else {
+			diff = d1 - d0
+		}
+		if diff.Truncate(time.Microsecond) <= time.Microsecond {
+			return true
+		}
+		return false
+	})
 )
 
 func TestAllQueues(t *testing.T) {
@@ -59,7 +79,7 @@ func TestCurrentStats(t *testing.T) {
 	m4 := h.NewTaskMessage("sync", nil)
 	m5 := h.NewTaskMessageWithQueue("important_notification", nil, "critical")
 	m6 := h.NewTaskMessageWithQueue("minor_notification", nil, "low")
-	now := utc.Now()
+	now := r.Now()
 
 	tests := []struct {
 		pending    map[string][]*base.TaskMessage
@@ -132,7 +152,7 @@ func TestCurrentStats(t *testing.T) {
 				Completed: 0,
 				Processed: 120,
 				Failed:    2,
-				Timestamp: now.Time,
+				Timestamp: now,
 			},
 		},
 		{
@@ -193,7 +213,7 @@ func TestCurrentStats(t *testing.T) {
 				Completed: 0,
 				Processed: 100,
 				Failed:    0,
-				Timestamp: now.Time,
+				Timestamp: now,
 			},
 		},
 	}
@@ -227,7 +247,7 @@ func TestCurrentStats(t *testing.T) {
 		}
 
 		ignoreMemUsg := cmpopts.IgnoreFields(base.Stats{}, "MemoryUsage")
-		if diff := cmp.Diff(tc.want, got, timeCmpOpt, ignoreMemUsg); diff != "" {
+		if diff := cmp.Diff(tc.want, got, timeCmpOpt, latencyCmpOpt, ignoreMemUsg); diff != "" {
 			t.Errorf("r.CurrentStats(%q) = %v, %v, want %v, nil; (-want, +got)\n%s", tc.qname, got, err, tc.want, diff)
 			continue
 		}
@@ -249,7 +269,7 @@ func TestHistoricalStats(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := utc.Now()
+	now := r.Now()
 
 	tests := []struct {
 		qname string // queue of interest
@@ -293,7 +313,7 @@ func TestHistoricalStats(t *testing.T) {
 				Queue:     tc.qname,
 				Processed: processedCount(i),
 				Failed:    failedCount(i),
-				Time:      now.Time.Add(-time.Duration(i) * 24 * time.Hour),
+				Time:      now.Add(-time.Duration(i) * 24 * time.Hour),
 			}
 			// Allow 2 seconds difference in timestamp.
 			cmpOpt := cmpopts.EquateApproxTime(2 * time.Second)
@@ -858,10 +878,11 @@ func TestListScheduledPagination(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
+	ctx := context.Background()
 	// create 100 tasks with an increasing number of wait time.
 	for i := 0; i < 100; i++ {
 		msg := h.NewTaskMessage(fmt.Sprintf("task %d", i), nil)
-		if err := r.Schedule(msg, time.Now().Add(time.Duration(i)*time.Second)); err != nil {
+		if err := r.Schedule(ctx, msg, time.Now().Add(time.Duration(i)*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1404,11 +1425,6 @@ func TestListTasksError(t *testing.T) {
 		}
 	}
 }
-
-var (
-	timeCmpOpt   = cmpopts.EquateApproxTime(2 * time.Second) // allow for 2 seconds margin in time.Time
-	zScoreCmpOpt = h.EquateInt64Approx(2)                    // allow for 2 seconds margin in Z.Score
-)
 
 func TestRunArchivedTask(t *testing.T) {
 	r := setup(t)
@@ -2893,7 +2909,7 @@ func TestArchiveAllScheduledTasks(t *testing.T) {
 	m2 := h.NewTaskMessage("task2", nil)
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
 	m4 := h.NewTaskMessageWithQueue("task4", nil, "custom")
-	now := utc.Now()
+	now := r.Now()
 	t1 := now.Add(time.Minute)
 	t2 := now.Add(time.Hour)
 	t3 := now.Add(time.Hour)
@@ -4394,7 +4410,7 @@ func TestRecordSchedulerEnqueueEventTrimsDataSet(t *testing.T) {
 
 	var (
 		entryID = "entry123"
-		now     = utc.Now().Time
+		now     = r.Now()
 	)
 
 	// Record maximum number of events.

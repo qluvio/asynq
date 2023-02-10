@@ -142,3 +142,10 @@ func (c *rqliteTestContext) SeedProcessedQueue(processedCount int, qname string,
 func (c *rqliteTestContext) SeedFailedQueue(failedCount int, qname string, ts time.Time) {
 	rqlite.SeedFailedQueue(c.tb, c.r, failedCount, qname, ts.Unix())
 }
+
+func (c *rqliteTestContext) SeedLastPendingSince(qname string, enqueueTime time.Time) {
+	if enqueueTime.IsZero() {
+		return
+	}
+	rqlite.SeedLastPendingSince(c.tb, c.r, qname, enqueueTime)
+}

@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/utc"
+	"github.com/hibiken/asynq/internal/timeutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -269,25 +269,44 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 	m5 := h.NewTaskMessageWithQueue("task5", nil, "critical")
 	m6 := h.NewTaskMessageWithQueue("task6", nil, "low")
 
-	now := utc.Now().Time
+	now := time.Now()
 	timeCmpOpt := cmpopts.EquateApproxTime(time.Second)
 	ignoreMemUsg := cmpopts.IgnoreFields(QueueInfo{}, "MemoryUsage")
+	// pending_since is de-serialized as float on the rqlite server leading to
+	// some inaccuracy
+	latencyCmpOpt := cmp.Comparer(func(d0, d1 time.Duration) bool {
+		if d0 == d1 {
+			return true
+		}
+		var diff time.Duration
+		if d0 > d1 {
+			diff = d0 - d1
+		} else {
+			diff = d1 - d0
+		}
+		if diff.Truncate(time.Microsecond) <= time.Microsecond {
+			return true
+		}
+		return false
+	})
 
 	inspector := NewInspector(getClientConnOpt(t))
+	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
 	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
-		pending    map[string][]*base.TaskMessage
-		active     map[string][]*base.TaskMessage
-		scheduled  map[string][]base.Z
-		retry      map[string][]base.Z
-		archived   map[string][]base.Z
-		completed  map[string][]base.Z
-		processed  map[string]int
-		failed     map[string]int
-		qname      string
-		want       *QueueInfo
-		wantRqlite *QueueInfo
+		pending                         map[string][]*base.TaskMessage
+		active                          map[string][]*base.TaskMessage
+		scheduled                       map[string][]base.Z
+		retry                           map[string][]base.Z
+		archived                        map[string][]base.Z
+		completed                       map[string][]base.Z
+		processed                       map[string]int
+		failed                          map[string]int
+		oldestPendingMessageEnqueueTime map[string]time.Time
+		qname                           string
+		want                            *QueueInfo
+		wantRqlite                      *QueueInfo
 	}{
 		{
 			pending: map[string][]*base.TaskMessage{
@@ -333,9 +352,15 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				"critical": 0,
 				"low":      5,
 			},
+			oldestPendingMessageEnqueueTime: map[string]time.Time{
+				"default":  now.Add(-15 * time.Second),
+				"critical": now.Add(-200 * time.Millisecond),
+				"low":      now.Add(-30 * time.Second),
+			},
 			qname: "default",
 			want: &QueueInfo{
 				Queue:     "default",
+				Latency:   15 * time.Second,
 				Size:      4,
 				Pending:   1,
 				Active:    1,
@@ -351,6 +376,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 			// PENDING(GIL): see comment in test TestCurrentStats in rqlite/inspect_test
 			wantRqlite: &QueueInfo{
 				Queue:     "default",
+				Latency:   15 * time.Second,
 				Size:      6,
 				Pending:   1,
 				Active:    1,
@@ -372,10 +398,13 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 		ctx.SeedAllScheduledQueues(tc.scheduled)
 		ctx.SeedAllRetryQueues(tc.retry)
 		ctx.SeedAllArchivedQueues(tc.archived)
-
 		ctx.SeedAllCompletedQueues(tc.completed)
 		ctx.SeedAllProcessedQueues(tc.processed, now)
 		ctx.SeedAllFailedQueues(tc.failed, now)
+		for qname, enqueueTime := range tc.oldestPendingMessageEnqueueTime {
+			// nothing done if enqueueTime is zero
+			ctx.SeedLastPendingSince(qname, enqueueTime)
+		}
 
 		got, err := inspector.GetQueueInfo(tc.qname)
 		if err != nil {
@@ -384,7 +413,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 			continue
 		}
 		if brokerType == rqliteType || brokerType == sqliteType {
-			if diff := cmp.Diff(tc.wantRqlite, got, timeCmpOpt, ignoreMemUsg); diff != "" {
+			if diff := cmp.Diff(tc.wantRqlite, got, timeCmpOpt, ignoreMemUsg, latencyCmpOpt); diff != "" {
 				t.Errorf("r.GetQueueInfo(%q) = %v, %v, want %v, nil; (-want, +got)\n%s",
 					tc.qname, got, err, tc.want, diff)
 				continue
@@ -406,8 +435,8 @@ func TestInspectorHistory(t *testing.T) {
 	inspector := NewInspector(getClientConnOpt(t))
 	defer func() { _ = inspector.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := time.Now()
+	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
 
 	tests := []struct {
 		qname string // queue of interest
@@ -438,8 +467,8 @@ func TestInspectorHistory(t *testing.T) {
 		// populate last n days data
 		for i := 0; i < tc.n; i++ {
 			ts := now.Add(-time.Duration(i) * 24 * time.Hour)
-			ctx.SeedProcessedQueue(processedCount(i), tc.qname, ts.Time)
-			ctx.SeedFailedQueue(failedCount(i), tc.qname, ts.Time)
+			ctx.SeedProcessedQueue(processedCount(i), tc.qname, ts)
+			ctx.SeedFailedQueue(failedCount(i), tc.qname, ts)
 		}
 
 		got, err := inspector.History(tc.qname, tc.n)
@@ -457,7 +486,7 @@ func TestInspectorHistory(t *testing.T) {
 				Queue:     tc.qname,
 				Processed: processedCount(i),
 				Failed:    failedCount(i),
-				Date:      now.Add(-time.Duration(i) * 24 * time.Hour).Time,
+				Date:      now.Add(-time.Duration(i) * 24 * time.Hour),
 			}
 			// Allow 2 seconds difference in timestamp.
 			timeCmpOpt := cmpopts.EquateApproxTime(2 * time.Second)
@@ -1014,7 +1043,7 @@ func TestInspectorListArchivedTasks(t *testing.T) {
 	}
 }
 
-func newCompletedTaskMessage(typename, qname string, retention time.Duration, completedAt utc.UTC) *base.TaskMessage {
+func newCompletedTaskMessage(typename, qname string, retention time.Duration, completedAt time.Time) *base.TaskMessage {
 	msg := h.NewTaskMessageWithQueue(typename, nil, qname)
 	msg.Retention = int64(retention.Seconds())
 	msg.CompletedAt = completedAt.Unix()
@@ -1033,8 +1062,7 @@ func createCompletedTask(z base.Z) *TaskInfo {
 func TestInspectorListCompletedTasks(t *testing.T) {
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := time.Now()
 
 	//      completed   now     retention
 	//      m3  m2  m1   |      m2  m1    m3
@@ -1050,6 +1078,7 @@ func TestInspectorListCompletedTasks(t *testing.T) {
 	z4 := base.Z{Message: m4, Score: m4.CompletedAt + m4.Retention}
 
 	inspector := NewInspector(getClientConnOpt(t))
+	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
 	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
@@ -1473,9 +1502,7 @@ func TestInspectorDeleteAllArchivedTasks(t *testing.T) {
 func TestInspectorDeleteAllCompletedTasks(t *testing.T) {
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
-
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := time.Now()
 
 	m1 := newCompletedTaskMessage("task1", "default", 30*time.Minute, now.Add(-2*time.Minute))
 	m2 := newCompletedTaskMessage("task2", "default", 30*time.Minute, now.Add(-5*time.Minute))
@@ -1487,6 +1514,7 @@ func TestInspectorDeleteAllCompletedTasks(t *testing.T) {
 	z4 := base.Z{Message: m4, Score: m4.CompletedAt + m4.Retention}
 
 	inspector := NewInspector(getClientConnOpt(t))
+	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
 	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
@@ -2858,11 +2886,12 @@ func TestInspectorArchiveTaskArchivesPendingTask(t *testing.T) {
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "custom")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
+
 	inspector := NewInspector(getClientConnOpt(t))
 	defer func() { _ = inspector.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := time.Now()
+	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
 
 	tests := []struct {
 		pending      map[string][]*base.TaskMessage
@@ -2949,8 +2978,7 @@ func TestInspectorArchiveTaskArchivesScheduledTask(t *testing.T) {
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := time.Now()
 
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "custom")
@@ -2960,6 +2988,7 @@ func TestInspectorArchiveTaskArchivesScheduledTask(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
 	inspector := NewInspector(getClientConnOpt(t))
+	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
 	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
@@ -3033,14 +3062,14 @@ func TestInspectorArchiveTaskArchivesRetryTask(t *testing.T) {
 	m2 := h.NewTaskMessageWithQueue("task2", nil, "custom")
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := time.Now()
 
 	z1 := base.Z{Message: m1, Score: now.Add(5 * time.Minute).Unix()}
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
 	inspector := NewInspector(getClientConnOpt(t))
+	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
 	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
