@@ -18,6 +18,7 @@ type subscriber struct {
 	broker base.Broker
 
 	// channel to communicate back to the long running "subscriber" goroutine.
+	once sync.Once
 	done chan struct{}
 
 	// cancelations hold cancel functions for all active tasks.
@@ -45,10 +46,12 @@ func newSubscriber(params subscriberParams) *subscriber {
 }
 
 func (s *subscriber) shutdown() {
-	s.logger.Debug("Subscriber shutting down...")
+	s.once.Do(func() {
+		s.logger.Debug("Subscriber shutting down...")
 
-	// Signal the subscriber goroutine to stop.
-	s.done <- struct{}{}
+		// Signal the subscriber goroutine to stop.
+		s.done <- struct{}{}
+	})
 }
 
 func (s *subscriber) start(wg *sync.WaitGroup) {
