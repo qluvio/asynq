@@ -582,6 +582,4 @@ func (srv *Server) Stop() {
 	srv.processor.stop()
 	srv.state.Set(base.StateStopped)
 	srv.logger.Info("Processor stopped")
-	// stop the subscriber as well
-	srv.subscriber.shutdown()
 }

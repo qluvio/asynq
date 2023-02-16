@@ -39,7 +39,7 @@ func newSubscriber(params subscriberParams) *subscriber {
 	return &subscriber{
 		logger:       params.logger,
 		broker:       params.broker,
-		done:         make(chan struct{}),
+		done:         make(chan struct{}, 1),
 		cancelations: params.cancelations,
 		retryTimeout: params.retryTimeout,
 	}
@@ -84,7 +84,12 @@ func (s *subscriber) start(wg *sync.WaitGroup) {
 				_ = pubsub.Close()
 				s.logger.Debug("Subscriber done")
 				return
-			case msg := <-cancelCh:
+			case msg, alive := <-cancelCh:
+				if !alive {
+					s.logger.Debug("Subscriber channel closed: shutting down")
+					s.shutdown()
+					continue
+				}
 				id, ok := msg.(string)
 				if !ok {
 					if msg != nil {
