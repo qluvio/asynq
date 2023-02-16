@@ -113,7 +113,7 @@ func BenchmarkDequeueSingleQueue(b *testing.B) {
 		}
 		b.StartTimer()
 
-		if _, _, err := r.Dequeue(base.DefaultQueueName); err != nil {
+		if _, _, err := r.Dequeue("", base.DefaultQueueName); err != nil {
 			b.Fatalf("Dequeue failed: %v", err)
 		}
 	}
