@@ -5,6 +5,7 @@
 package asynq
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -183,6 +184,7 @@ func (t deadlineOption) Value() interface{} { return time.Time(t) }
 // Task enqueued with this option is guaranteed to be unique within the given ttl.
 // Once the task gets processed successfully or once the TTL has expired, another task with the same uniqueness may be enqueued.
 // ErrDuplicateTask error is returned when enqueueing a duplicate task.
+// TTL duration must be greater than or equal to 1 second.
 //
 // Uniqueness of a task is based on the following properties:
 //   - Task Type
@@ -335,7 +337,11 @@ func composeOptions(opts ...Option) (option, error) {
 		case deadlineOption:
 			res.deadline = time.Time(opt)
 		case uniqueOption:
-			res.uniqueTTL = time.Duration(opt)
+			ttl := time.Duration(opt)
+			if ttl < 1*time.Second {
+				return option{}, errors.New("Unique TTL cannot be less than 1s")
+			}
+			res.uniqueTTL = ttl
 		case processAtOption:
 			res.processAt = time.Time(opt)
 		case processInOption:
@@ -384,7 +390,7 @@ func (c *Client) Close() error {
 	return c.rdb.Close()
 }
 
-// Enqueue enqueues the given task to be processed asynchronously.
+// Enqueue enqueues the given task to a queue.
 //
 // Enqueue returns TaskInfo and nil error if the task is enqueued successfully, otherwise returns a non-nil error.
 //
@@ -394,7 +400,25 @@ func (c *Client) Close() error {
 // By default, max retry is set to 25 and timeout is set to 30 minutes.
 //
 // If no ProcessAt or ProcessIn options are provided, the task will be pending immediately.
+//
+// Enqueue uses context.Background internally; to specify the context, use EnqueueContext.
 func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
+	return c.EnqueueContext(context.Background(), task, opts...)
+}
+
+// EnqueueContext enqueues the given task to a queue.
+//
+// EnqueueContext returns TaskInfo and nil error if the task is enqueued successfully, otherwise returns a non-nil error.
+//
+// The argument opts specifies the behavior of task processing.
+// If there are conflicting Option values the last one overrides others.
+// Any options provided to NewTask can be overridden by options passed to Enqueue.
+// By deafult, max retry is set to 25 and timeout is set to 30 minutes.
+//
+// If no ProcessAt or ProcessIn options are provided, the task will be pending immediately.
+//
+// The first argument context applies to the enqueue operation. To specify task timeout and deadline, use Timeout and Deadline option instead.
+func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option) (*TaskInfo, error) {
 	if strings.TrimSpace(task.Type()) == "" {
 		return nil, fmt.Errorf("task typename cannot be empty")
 	}
@@ -448,10 +472,10 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 		if c.loc != nil {
 			opt.processAt = now.In(c.loc)
 		}
-		err = c.enqueue(msg, opt.uniqueTTL, opt.forceUnique)
+		err = c.enqueue(ctx, msg, opt.uniqueTTL, opt.forceUnique)
 		state = base.TaskStatePending
 	} else {
-		err = c.schedule(msg, opt.processAt, opt.uniqueTTL, opt.forceUnique)
+		err = c.schedule(ctx, msg, opt.processAt, opt.uniqueTTL, opt.forceUnique)
 		state = base.TaskStateScheduled
 	}
 
@@ -469,22 +493,26 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 	return newTaskInfo(msg, state, opt.processAt, nil), nil
 }
 
-func (c *Client) enqueue(msg *base.TaskMessage, uniqueTTL time.Duration, forceUnique bool) error {
+func (c *Client) enqueue(ctx context.Context, msg *base.TaskMessage, uniqueTTL time.Duration, forceUnique bool) error {
 	if uniqueTTL > 0 {
-		return c.rdb.EnqueueUnique(msg, uniqueTTL, forceUnique)
+		return c.rdb.EnqueueUnique(ctx, msg, uniqueTTL, forceUnique)
 	}
-	return c.rdb.Enqueue(msg)
+	return c.rdb.Enqueue(ctx, msg)
 }
 
-func (c *Client) schedule(msg *base.TaskMessage, t time.Time, uniqueTTL time.Duration, forceUnique bool) error {
+func (c *Client) schedule(ctx context.Context, msg *base.TaskMessage, t time.Time, uniqueTTL time.Duration, forceUnique bool) error {
 	if uniqueTTL > 0 {
 		ttl := t.Add(uniqueTTL).Sub(time.Now())
-		return c.rdb.ScheduleUnique(msg, t, ttl, forceUnique)
+		return c.rdb.ScheduleUnique(ctx, msg, t, ttl, forceUnique)
 	}
-	return c.rdb.Schedule(msg, t)
+	return c.rdb.Schedule(ctx, msg, t)
 }
 
-// EnqueueBatch enqueues the given tasks to be processed asynchronously.
+func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error) {
+	return c.EnqueueBatchContext(context.Background(), tasks, opts...)
+}
+
+// EnqueueBatchContext enqueues the given tasks to be processed asynchronously.
 //
 // EnqueueBatch returns a slice of TaskInfo and an error.
 // If all tasks are enqueued successfully the returned error is nil, otherwise returns a non-nil error.
@@ -496,7 +524,7 @@ func (c *Client) schedule(msg *base.TaskMessage, t time.Time, uniqueTTL time.Dur
 // By default, max retry is set to 25 and timeout is set to 30 minutes.
 //
 // If no ProcessAt or ProcessIn options are provided, the task will be pending immediately.
-func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error) {
+func (c *Client) EnqueueBatchContext(ctx context.Context, tasks []*Task, opts ...Option) ([]*TaskInfo, error) {
 	for _, task := range tasks {
 		if strings.TrimSpace(task.Type()) == "" {
 			return nil, fmt.Errorf("task typename cannot be empty")
@@ -620,18 +648,18 @@ func (c *Client) EnqueueBatch(tasks []*Task, opts ...Option) ([]*TaskInfo, error
 	}
 
 	if len(enqueue) > 0 {
-		err = c.rdb.EnqueueBatch(enqueue...)
+		err = c.rdb.EnqueueBatch(ctx, enqueue...)
 	}
 	if len(enqueueUnique) > 0 {
-		ex := c.rdb.EnqueueUniqueBatch(enqueueUnique...)
+		ex := c.rdb.EnqueueUniqueBatch(ctx, enqueueUnique...)
 		err = multierr.Append(err, ex)
 	}
 	if len(schedule) > 0 {
-		ex := c.rdb.ScheduleBatch(schedule...)
+		ex := c.rdb.ScheduleBatch(ctx, schedule...)
 		err = multierr.Append(err, ex)
 	}
 	if len(scheduleUnique) > 0 {
-		ex := c.rdb.ScheduleUniqueBatch(scheduleUnique...)
+		ex := c.rdb.ScheduleUniqueBatch(ctx, scheduleUnique...)
 		err = multierr.Append(err, ex)
 	}
 

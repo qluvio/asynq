@@ -1,13 +1,13 @@
 package rqlite
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/sqlite3"
-	"github.com/hibiken/asynq/internal/utc"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,7 +26,7 @@ func SeedPendingQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname 
 	require.NoError(tb, err)
 	for _, msg := range msgs {
 		require.Equal(tb, qname, msg.Queue)
-		err := r.Enqueue(msg)
+		err := r.Enqueue(context.Background(), msg)
 		require.NoError(tb, err)
 	}
 }
@@ -41,7 +41,7 @@ func SeedCompletedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 
-	now := utc.Now()
+	now := r.Now()
 	state := completed
 
 	for _, mz := range msgs {
@@ -96,9 +96,9 @@ func seedDeadlines(tb testing.TB, r *RQLite, deadlines []base.Z, qname string, u
 
 		if count == 0 {
 			if len(msg.Message.UniqueKey) > 0 {
-				err = r.EnqueueUnique(msg.Message, uniqueKeyTTL)
+				err = r.EnqueueUnique(context.Background(), msg.Message, uniqueKeyTTL)
 			} else {
-				err = r.Enqueue(msg.Message)
+				err = r.Enqueue(context.Background(), msg.Message)
 			}
 			require.NoError(tb, err)
 		}
@@ -170,9 +170,9 @@ func SeedRetryQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 		// use enqueue, just to fill the row
 		var err error
 		if len(m.UniqueKey) != 0 {
-			err = r.EnqueueUnique(m, 0)
+			err = r.EnqueueUnique(context.Background(), m, 0)
 		} else {
-			err = r.Enqueue(m)
+			err = r.Enqueue(context.Background(), m)
 		}
 		require.NoError(tb, err)
 
@@ -205,9 +205,9 @@ func SeedArchivedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 		// use enqueue, just to fill the row
 		var err error
 		if len(m.UniqueKey) != 0 {
-			err = r.EnqueueUnique(m, 0)
+			err = r.EnqueueUnique(context.Background(), m, 0)
 		} else {
-			err = r.Enqueue(m)
+			err = r.Enqueue(context.Background(), m)
 		}
 		require.NoError(tb, err)
 
@@ -243,9 +243,9 @@ func SeedScheduledQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 
 		var err error
 		if len(m.UniqueKey) != 0 {
-			err = r.ScheduleUnique(m, processAt, 0)
+			err = r.ScheduleUnique(context.Background(), m, processAt, 0)
 		} else {
-			err = r.Schedule(m, processAt)
+			err = r.Schedule(context.Background(), m, processAt)
 		}
 		require.NoError(tb, err)
 
@@ -320,4 +320,36 @@ func SeedAllFailedQueues(tb testing.TB, r *RQLite, failed map[string]int, doneAt
 	for q, count := range failed {
 		SeedFailedQueue(tb, r, count, q, doneAt)
 	}
+}
+
+func SeedLastPendingSince(tb testing.TB, r *RQLite, qname string, enqueueTime time.Time) {
+	err := r.conn.EnsureQueue(qname)
+	require.NoError(tb, err)
+	ctx := r.conn.ctx()
+
+	st := Statement(
+		selectTaskRow+
+			" FROM "+r.conn.table(TasksTable)+
+			" WHERE queue_name=? "+
+			"   AND state=? "+
+			" ORDER BY ndx DESC LIMIT 1",
+		qname,
+		pending)
+
+	qrs, err := r.conn.QueryStmt(ctx, st)
+	require.NoError(tb, err)
+
+	rows, err := parseTaskRows(qrs[0])
+	require.NoError(tb, err)
+	require.Equal(tb, 1, len(rows))
+
+	st = Statement("UPDATE "+r.conn.table(TasksTable)+" SET pending_since=? "+
+		" WHERE queue_name=? AND task_uuid=? ",
+		enqueueTime.UnixNano(),
+		qname,
+		rows[0].taskUuid)
+	wrs, err := r.conn.WriteStmt(ctx, st)
+	require.NoError(tb, err)
+	require.Equal(tb, 1, len(wrs))
+	require.Equal(tb, int64(1), wrs[0].RowsAffected)
 }

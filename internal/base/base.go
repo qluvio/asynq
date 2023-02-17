@@ -17,11 +17,12 @@ import (
 	"github.com/golang/protobuf/ptypes"
 	"github.com/hibiken/asynq/internal/errors"
 	pb "github.com/hibiken/asynq/internal/proto"
+	"github.com/hibiken/asynq/internal/timeutil"
 	"google.golang.org/protobuf/proto"
 )
 
 // Version of asynq library and CLI.
-const Version = "0.19.0"
+const Version = "0.19.1"
 
 // DefaultQueueName is the queue name used if none are specified by user.
 const DefaultQueueName = "default"
@@ -702,11 +703,16 @@ type Broker interface {
 	// Ping checks the connection with store server.
 	Ping() error
 
+	// SetClock sets the clock used by RDB to the given clock.
+	//
+	// Use this function to set the clock to SimulatedClock in tests.
+	SetClock(c timeutil.Clock)
+
 	// Enqueue adds the given task to the pending list of the queue.
-	Enqueue(msg *TaskMessage) error
+	Enqueue(ctx context.Context, msg *TaskMessage) error
 	// EnqueueUnique inserts the given task if the task's uniqueness lock can be acquired.
 	// It returns ErrDuplicateTask if the lock cannot be acquired.
-	EnqueueUnique(msg *TaskMessage, ttl time.Duration, forceUnique ...bool) error
+	EnqueueUnique(ctx context.Context, msg *TaskMessage, ttl time.Duration, forceUnique ...bool) error
 	// Dequeue queries given queues in order and pops a task message
 	// off a queue if one exists and returns the message and deadline.
 	// Dequeue skips a queue if the queue is paused.
@@ -726,10 +732,10 @@ type Broker interface {
 	// aborted is true when re-queuing occurs because the server stops and false for recurrent tasks
 	Requeue(serverID string, msg *TaskMessage, aborted bool) error
 	// Schedule adds the task to the scheduled set to be processed in the future.
-	Schedule(msg *TaskMessage, processAt time.Time) error
+	Schedule(ctx context.Context, msg *TaskMessage, processAt time.Time) error
 	// ScheduleUnique adds the task to the backlog queue to be processed in the future if the uniqueness lock can be acquired.
 	// It returns ErrDuplicateTask if the lock cannot be acquired.
-	ScheduleUnique(msg *TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error
+	ScheduleUnique(ctx context.Context, msg *TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error
 	// Retry moves the task from active to retry queue.
 	// It also annotates the message with the given error message and
 	// if isFailure is true increments the retried counter.
@@ -764,19 +770,19 @@ type Broker interface {
 	Inspector() Inspector
 
 	// EnqueueBatch adds the given tasks to the pending list of the queue.
-	EnqueueBatch(msgs ...*MessageBatch) error
+	EnqueueBatch(ctx context.Context, msgs ...*MessageBatch) error
 
 	// EnqueueUniqueBatch inserts the given tasks if the task's uniqueness lock can be acquired.
 	// It returns ErrDuplicateTask if the lock cannot be acquired.
-	EnqueueUniqueBatch(msgs ...*MessageBatch) error
+	EnqueueUniqueBatch(ctx context.Context, msgs ...*MessageBatch) error
 
 	// ScheduleBatch adds the tasks to the scheduled set to be processed in the future.
-	ScheduleBatch(msgs ...*MessageBatch) error
+	ScheduleBatch(ctx context.Context, msgs ...*MessageBatch) error
 
 	// ScheduleUniqueBatch adds the tasks to the backlog queue to be processed in the future
 	// if the uniqueness lock can be acquired.
 	// It returns ErrDuplicateTask if the lock cannot be acquired.
-	ScheduleUniqueBatch(msgs ...*MessageBatch) error
+	ScheduleUniqueBatch(ctx context.Context, msgs ...*MessageBatch) error
 }
 
 type Scheduler interface {

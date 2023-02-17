@@ -104,7 +104,7 @@ func (r *RQLite) CurrentStats(qname string) (*base.Stats, error) {
 	if err != nil {
 		return nil, err
 	}
-	ret, err := conn.currentStats(qname)
+	ret, err := conn.currentStats(r.Now(), qname)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (r *RQLite) HistoricalStats(qname string, n int) ([]*base.DailyStats, error
 	}
 	conn, _ := r.Client()
 
-	return conn.historicalStats(qname, n)
+	return conn.historicalStats(r.Now(), qname, n)
 }
 
 func (r *RQLite) GetTaskInfo(qname string, taskid string) (*base.TaskInfo, error) {
@@ -149,7 +149,7 @@ func (r *RQLite) GetTaskInfo(qname string, taskid string) (*base.TaskInfo, error
 	}
 	conn, _ := r.Client()
 
-	return conn.getTaskInfo(qname, taskid)
+	return conn.getTaskInfo(r.Now(), qname, taskid)
 }
 
 func (r *RQLite) listMessages(qname string, state string, pgn base.Pagination) ([]*base.TaskInfo, error) {
@@ -166,9 +166,10 @@ func (r *RQLite) listMessages(qname string, state string, pgn base.Pagination) (
 	if len(tasks) == 0 {
 		return nil, nil
 	}
+	now := r.Now()
 	ret := make([]*base.TaskInfo, 0, len(tasks))
 	for _, task := range tasks {
-		ti, err := getTaskInfo(op, task)
+		ti, err := getTaskInfo(op, now, task)
 		if err != nil {
 			return nil, errors.E(op, errors.Internal, err)
 		}
@@ -198,9 +199,10 @@ func (r *RQLite) listEntries(qname string, state string, pgn base.Pagination, or
 	if len(tasks) == 0 {
 		return nil, nil
 	}
+	now := r.Now()
 	ret := make([]*base.TaskInfo, 0, len(tasks))
 	for _, task := range tasks {
-		ti, err := getTaskInfo(op, task)
+		ti, err := getTaskInfo(op, now, task)
 		if err != nil {
 			return nil, errors.E(op, errors.Internal, err)
 		}
@@ -339,7 +341,7 @@ func (r *RQLite) archiveAllTasks(qname string, state string) (int64, error) {
 	}
 	conn, _ := r.Client()
 
-	count, err := conn.setArchived(qname, state)
+	count, err := conn.setArchived(r.Now(), qname, state)
 	if err != nil {
 		return 0, errors.E(op, errors.Unknown, err)
 	}
@@ -365,7 +367,7 @@ func (r *RQLite) ArchiveTask(qname string, taskid string) error {
 	}
 	conn, _ := r.Client()
 
-	count, err := conn.setTaskArchived(qname, taskid)
+	count, err := conn.setTaskArchived(r.Now(), qname, taskid)
 	if err != nil {
 		return errors.E(op, errors.Unknown, err)
 	}

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1] - 2021-12-12
+
+### Added
+
+- `Latency` field is added to `QueueInfo`.
+- `EnqueueContext` method is added to `Client`.
+
+### Fixed
+
+- Fixed an error when user pass a duration less than 1s to `Unique` option
+
 ## [0.19.0] - 2021-11-06
 
 ### Changed
