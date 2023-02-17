@@ -7,7 +7,6 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/sqlite3"
-	"github.com/hibiken/asynq/internal/utc"
 )
 
 type schedulerRow struct {
@@ -128,13 +127,13 @@ func (conn *Connection) listAllSchedulerEnqueueEvents(entryID string) ([]*schedu
 	return parseSchedulerEnqueueEvents(qrs[0])
 }
 
-func (conn *Connection) writeSchedulerEntries(schedulerID string, entries []*base.SchedulerEntry, ttl time.Duration) error {
+func (conn *Connection) writeSchedulerEntries(now time.Time, schedulerID string, entries []*base.SchedulerEntry, ttl time.Duration) error {
 	op := errors.Op("rqlite.writeSchedulerEntries")
 	if len(entries) == 0 {
 		return nil
 	}
 
-	exp := utc.Now().Add(ttl)
+	exp := now.Add(ttl)
 	args := make([]string, 0, len(entries))
 
 	for _, e := range entries {

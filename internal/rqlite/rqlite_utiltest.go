@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/utc"
 	"github.com/stretchr/testify/require"
 )
 
@@ -167,7 +166,7 @@ func GetUniqueKeyTTL(tb testing.TB, r *RQLite, queue string, taskType string, ta
 	uniqueKey := base.UniqueKey(queue, taskType, taskPayload)
 
 	st := Statement(
-		"SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, retain_until, sid, affinity_timeout, recurrent, result "+
+		selectTaskRow+
 			" FROM "+r.conn.table(TasksTable)+
 			" WHERE queue_name=? "+
 			" AND unique_key=?",
@@ -180,5 +179,5 @@ func GetUniqueKeyTTL(tb testing.TB, r *RQLite, queue string, taskType string, ta
 	require.NoError(tb, err)
 	require.Equal(tb, 1, len(rows))
 
-	return time.Second * time.Duration(rows[0].uniqueKeyDeadline-utc.Now().Unix())
+	return time.Second * time.Duration(rows[0].uniqueKeyDeadline-r.Now().Unix())
 }

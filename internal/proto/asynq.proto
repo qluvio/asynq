@@ -75,7 +75,7 @@ message TaskMessage {
   // which the task can be handled by a server other than the one that handled
   // it the first time.
   int64 server_affinity = 17;
-  
+
 };
 
 // ServerInfo holds information about a running server.

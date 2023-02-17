@@ -15,7 +15,7 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
-	"github.com/hibiken/asynq/internal/utc"
+	"github.com/hibiken/asynq/internal/timeutil"
 )
 
 const (
@@ -114,6 +114,7 @@ type RQLite struct {
 	httpClient *http.Client
 	mu         sync.Mutex
 	conn       *Connection
+	clock      timeutil.Clock
 	logger     log.Base
 }
 
@@ -134,6 +135,7 @@ func NewRQLite(config *Config, client *http.Client, logger log.Base) *RQLite {
 		config:     config,
 		httpClient: client,
 		logger:     logger,
+		clock:      timeutil.NewRealClock(),
 	}
 }
 
@@ -150,6 +152,14 @@ func (r *RQLite) Close() error {
 func (r *RQLite) Open() error {
 	_, err := r.Client()
 	return err
+}
+
+func (r *RQLite) SetClock(c timeutil.Clock) {
+	r.clock = c
+}
+
+func (r *RQLite) Now() time.Time {
+	return r.clock.Now().UTC()
 }
 
 func (r *RQLite) context() context.Context {
@@ -212,29 +222,29 @@ func (r *RQLite) Ping() error {
 }
 
 // Enqueue adds the given task to the pending list of the queue.
-func (r *RQLite) Enqueue(msg *base.TaskMessage) error {
+func (r *RQLite) Enqueue(ctx context.Context, msg *base.TaskMessage) error {
 	var op errors.Op = "rqlite.Enqueue"
 	conn, err := r.client(op)
 	if err != nil {
 		return err
 	}
 
-	return conn.enqueueMessages(&base.MessageBatch{Msg: msg})
+	return conn.enqueueMessages(ctx, r.Now(), &base.MessageBatch{Msg: msg})
 }
 
 // EnqueueBatch adds the given tasks to the pending list of the queue.
-func (r *RQLite) EnqueueBatch(msgs ...*base.MessageBatch) error {
+func (r *RQLite) EnqueueBatch(ctx context.Context, msgs ...*base.MessageBatch) error {
 	var op errors.Op = "rqlite.EnqueueBatch"
 	conn, err := r.client(op)
 	if err != nil {
 		return err
 	}
-	return conn.enqueueMessages(msgs...)
+	return conn.enqueueMessages(ctx, r.Now(), msgs...)
 }
 
 // EnqueueUnique inserts the given task if the task's uniqueness lock can be acquired.
 // It returns ErrDuplicateTask if the lock cannot be acquired.
-func (r *RQLite) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration, forceUnique ...bool) error {
+func (r *RQLite) EnqueueUnique(ctx context.Context, msg *base.TaskMessage, ttl time.Duration, forceUnique ...bool) error {
 	var op errors.Op = "rqlite.EnqueueUnique"
 	conn, err := r.client(op)
 	if err != nil {
@@ -244,7 +254,7 @@ func (r *RQLite) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration, forceUn
 	if len(forceUnique) > 0 {
 		funique = forceUnique[0]
 	}
-	return conn.enqueueUniqueMessages(&base.MessageBatch{
+	return conn.enqueueUniqueMessages(ctx, r.Now(), &base.MessageBatch{
 		Msg:         msg,
 		UniqueTTL:   ttl,
 		ForceUnique: funique,
@@ -253,13 +263,13 @@ func (r *RQLite) EnqueueUnique(msg *base.TaskMessage, ttl time.Duration, forceUn
 
 // EnqueueUniqueBatch inserts the given tasks if the task's uniqueness lock can be acquired.
 // It returns ErrDuplicateTask if the lock cannot be acquired.
-func (r *RQLite) EnqueueUniqueBatch(msg ...*base.MessageBatch) error {
+func (r *RQLite) EnqueueUniqueBatch(ctx context.Context, msg ...*base.MessageBatch) error {
 	var op errors.Op = "rqlite.EnqueueUniqueBatch"
 	conn, err := r.client(op)
 	if err != nil {
 		return err
 	}
-	return conn.enqueueUniqueMessages(msg...)
+	return conn.enqueueUniqueMessages(ctx, r.Now(), msg...)
 }
 
 // Dequeue queries given queues in order and pops a task message
@@ -283,14 +293,14 @@ func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessa
 			continue
 		}
 
-		data, err := conn.dequeueMessage(serverID, qname)
+		data, err := conn.dequeueMessage(r.Now(), serverID, qname)
 		if err != nil {
 			return nil, time.Time{}, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
 		}
 		if data == nil {
 			continue
 		}
-		return data.msg, utc.Unix(data.deadline, 0).Time, nil
+		return data.msg, time.Unix(data.deadline, 0), nil
 	}
 	return nil, time.Time{}, errors.E(op, errors.NotFound, errors.ErrNoProcessableTask)
 }
@@ -303,7 +313,7 @@ func (r *RQLite) Done(serverID string, msg *base.TaskMessage) error {
 	if err != nil {
 		return err
 	}
-	return conn.setTaskDone(serverID, msg)
+	return conn.setTaskDone(r.Now(), serverID, msg)
 }
 
 // Requeue moves the task from active to pending in the specified queue.
@@ -312,38 +322,38 @@ func (r *RQLite) Requeue(serverID string, msg *base.TaskMessage, aborted bool) e
 	if err != nil {
 		return err
 	}
-	return conn.requeueTask(serverID, msg, aborted)
+	return conn.requeueTask(r.Now(), serverID, msg, aborted)
 }
 
 // Schedule adds the task to the scheduled set to be processed in the future.
-func (r *RQLite) Schedule(msg *base.TaskMessage, processAt time.Time) error {
+func (r *RQLite) Schedule(ctx context.Context, msg *base.TaskMessage, processAt time.Time) error {
 	var op errors.Op = "rqlite.Schedule"
 	conn, err := r.client(op)
 	if err != nil {
 		return err
 	}
 
-	return conn.scheduleTasks(&base.MessageBatch{
+	return conn.scheduleTasks(ctx, &base.MessageBatch{
 		Msg:       msg,
 		ProcessAt: processAt,
 	})
 }
 
 // ScheduleBatch adds the tasks to the scheduled set to be processed in the future.
-func (r *RQLite) ScheduleBatch(msg ...*base.MessageBatch) error {
+func (r *RQLite) ScheduleBatch(ctx context.Context, msg ...*base.MessageBatch) error {
 	var op errors.Op = "rqlite.ScheduleBatch"
 	conn, err := r.client(op)
 	if err != nil {
 		return err
 	}
 
-	return conn.scheduleTasks(msg...)
+	return conn.scheduleTasks(ctx, msg...)
 }
 
 // ScheduleUnique adds the task to the backlog queue to be processed in the future
 // if the uniqueness lock can be acquired.
 // It returns ErrDuplicateTask if the lock cannot be acquired.
-func (r *RQLite) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error {
+func (r *RQLite) ScheduleUnique(ctx context.Context, msg *base.TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error {
 	var op errors.Op = "rqlite.ScheduleUnique"
 	conn, err := r.client(op)
 	if err != nil {
@@ -355,7 +365,7 @@ func (r *RQLite) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl 
 		funique = forceUnique[0]
 	}
 
-	return conn.scheduleUniqueTasks(&base.MessageBatch{
+	return conn.scheduleUniqueTasks(ctx, r.Now(), &base.MessageBatch{
 		Msg:         msg,
 		UniqueTTL:   ttl,
 		ProcessAt:   processAt,
@@ -366,14 +376,14 @@ func (r *RQLite) ScheduleUnique(msg *base.TaskMessage, processAt time.Time, ttl 
 // ScheduleUniqueBatch adds the tasks to the backlog queue to be processed in the future
 // if the uniqueness lock can be acquired.
 // It returns ErrDuplicateTask if the lock cannot be acquired.
-func (r *RQLite) ScheduleUniqueBatch(msg ...*base.MessageBatch) error {
+func (r *RQLite) ScheduleUniqueBatch(ctx context.Context, msg ...*base.MessageBatch) error {
 	var op errors.Op = "rqlite.ScheduleUniqueBatch"
 	conn, err := r.client(op)
 	if err != nil {
 		return err
 	}
 
-	return conn.scheduleUniqueTasks(msg...)
+	return conn.scheduleUniqueTasks(ctx, r.Now(), msg...)
 }
 
 // Retry moves the task from active to retry queue, incrementing retry count
@@ -383,7 +393,7 @@ func (r *RQLite) Retry(msg *base.TaskMessage, processAt time.Time, errMsg string
 	if err != nil {
 		return err
 	}
-	return conn.retryTask(msg, processAt, errMsg, isFailure)
+	return conn.retryTask(r.Now(), msg, processAt, errMsg, isFailure)
 }
 
 // Archive sends the given task to archive, attaching the error message to the task.
@@ -393,7 +403,7 @@ func (r *RQLite) Archive(msg *base.TaskMessage, errMsg string) error {
 	if err != nil {
 		return err
 	}
-	return conn.archiveTask(msg, errMsg)
+	return conn.archiveTask(r.Now(), msg, errMsg)
 }
 
 func (r *RQLite) MarkAsComplete(serverID string, msg *base.TaskMessage) error {
@@ -401,7 +411,7 @@ func (r *RQLite) MarkAsComplete(serverID string, msg *base.TaskMessage) error {
 	if err != nil {
 		return err
 	}
-	return conn.setTaskCompleted(serverID, msg)
+	return conn.setTaskCompleted(r.Now(), serverID, msg)
 }
 
 func (r *RQLite) DeleteExpiredCompletedTasks(qname string) error {
@@ -409,7 +419,7 @@ func (r *RQLite) DeleteExpiredCompletedTasks(qname string) error {
 	if err != nil {
 		return err
 	}
-	return conn.deleteExpiredCompletedTasks(qname)
+	return conn.deleteExpiredCompletedTasks(r.Now(), qname)
 }
 
 func (r *RQLite) WriteResult(qname, id string, data []byte) (int, error) {
@@ -440,7 +450,7 @@ func (r *RQLite) forward(qname, src string) (int, error) {
 		return 0, err
 	}
 
-	return conn.forwardTasks(qname, src)
+	return conn.forwardTasks(r.Now(), qname, src)
 }
 
 // forwardAll checks for tasks in scheduled/retry state that are ready to be run,
@@ -492,7 +502,7 @@ func (r *RQLite) WriteServerState(serverInfo *base.ServerInfo, workers []*base.W
 	if err != nil {
 		return err
 	}
-	return conn.writeServerState(serverInfo, workers, ttl)
+	return conn.writeServerState(r.Now(), serverInfo, workers, ttl)
 }
 
 // ClearServerState deletes server state data from rqlite.
@@ -510,7 +520,7 @@ func (r *RQLite) WriteSchedulerEntries(schedulerID string, entries []*base.Sched
 	if err != nil {
 		return err
 	}
-	return conn.writeSchedulerEntries(schedulerID, entries, ttl)
+	return conn.writeSchedulerEntries(r.Now(), schedulerID, entries, ttl)
 }
 
 // ClearSchedulerEntries deletes scheduler entries data from rqlite.
@@ -618,7 +628,7 @@ func (r *RQLite) PublishCancelation(id string) error {
 	st := Statement(
 		"INSERT INTO "+conn.table(CancellationTable)+"(uuid, cancelled_at) VALUES(?, ?) ",
 		id,
-		utc.Now().Unix())
+		r.Now().Unix())
 	wrs, err := conn.WriteStmt(r.context(), st)
 	if err != nil {
 		return NewRqliteWError(op, wrs[0], err, st)

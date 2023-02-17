@@ -13,7 +13,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/utc"
+	"github.com/hibiken/asynq/internal/timeutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -149,15 +149,13 @@ func TestClientEnqueueWithProcessAtOption(t *testing.T) {
 func TestClientEnqueue(t *testing.T) {
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
+	now := time.Now()
 
 	client := NewClient(getClientConnOpt(t), time.UTC)
+	client.rdb.SetClock(timeutil.NewSimulatedClock(now))
 	defer func() { _ = client.Close() }()
 
 	task := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant@example.com"}))
-	nowUtc := utc.Now()
-	defer utc.MockNow(nowUtc)()
-	now := nowUtc.Time
-
 	tests := []struct {
 		desc        string
 		task        *Task
@@ -587,14 +585,13 @@ func TestClientEnqueueWithConflictingTaskID(t *testing.T) {
 func TestClientEnqueueWithProcessInOption(t *testing.T) {
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
+	now := time.Now()
 
 	client := NewClient(getClientConnOpt(t))
+	client.rdb.SetClock(timeutil.NewSimulatedClock(now))
 	defer func() { _ = client.Close() }()
 
 	task := NewTask("send_email", h.JSON(map[string]interface{}{"to": "customer@gmail.com", "from": "merchant@example.com"}))
-	now := utc.Now()
-	defer utc.MockNow(now)()
-
 	tests := []struct {
 		desc          string
 		task          *Task
@@ -657,7 +654,7 @@ func TestClientEnqueueWithProcessInOption(t *testing.T) {
 				LastFailedAt:  time.Time{},
 				Timeout:       defaultTimeout,
 				Deadline:      time.Time{},
-				NextProcessAt: now.Time,
+				NextProcessAt: now,
 			},
 			wantPending: map[string][]*base.TaskMessage{
 				"default": {
@@ -751,6 +748,11 @@ func TestClientEnqueueError(t *testing.T) {
 			task: NewTask("foo", nil),
 			opts: []Option{TaskID("  ")},
 		},
+		{
+			desc: "With unique option less than 1s",
+			task: NewTask("foo", nil),
+			opts: []Option{Unique(300 * time.Millisecond)},
+		},
 	}
 
 	for _, tc := range tests {
@@ -766,9 +768,7 @@ func TestClientEnqueueError(t *testing.T) {
 func TestClientWithDefaultOptions(t *testing.T) {
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
-
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := time.Now()
 
 	tests := []struct {
 		desc        string
@@ -797,7 +797,7 @@ func TestClientWithDefaultOptions(t *testing.T) {
 				LastFailedAt:  time.Time{},
 				Timeout:       defaultTimeout,
 				Deadline:      time.Time{},
-				NextProcessAt: now.Time,
+				NextProcessAt: now,
 			},
 			queue: "feed",
 			want: &base.TaskMessage{
@@ -826,7 +826,7 @@ func TestClientWithDefaultOptions(t *testing.T) {
 				LastFailedAt:  time.Time{},
 				Timeout:       defaultTimeout,
 				Deadline:      time.Time{},
-				NextProcessAt: now.Time,
+				NextProcessAt: now,
 			},
 			queue: "feed",
 			want: &base.TaskMessage{
@@ -854,7 +854,7 @@ func TestClientWithDefaultOptions(t *testing.T) {
 				LastFailedAt:  time.Time{},
 				Timeout:       defaultTimeout,
 				Deadline:      time.Time{},
-				NextProcessAt: now.Time,
+				NextProcessAt: now,
 			},
 			queue: "critical",
 			want: &base.TaskMessage{
@@ -873,6 +873,7 @@ func TestClientWithDefaultOptions(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			ctx.FlushDB()
 			client := NewClient(getClientConnOpt(t))
+			client.rdb.SetClock(timeutil.NewSimulatedClock(now))
 			defer func() { _ = client.Close() }()
 
 			task := NewTask(tc.tasktype, tc.payload, tc.defaultOpts...)

@@ -169,6 +169,8 @@ type Stats struct {
 	Processed int
 	// Total number of tasks failed during the current date.
 	Failed int
+	// Latency of the queue, measured by the oldest pending task in the queue.
+	Latency time.Duration
 	// Time this stats was taken.
 	Timestamp time.Time
 }

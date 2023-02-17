@@ -17,7 +17,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/utc"
+	"github.com/hibiken/asynq/internal/timeutil"
 )
 
 var taskCmpOpts = []cmp.Option{
@@ -128,7 +128,7 @@ func TestProcessorSuccessWithSingleQueue(t *testing.T) {
 
 			p.start(&sync.WaitGroup{})
 			for _, msg := range tc.incoming {
-				err := client.rdb.Enqueue(msg)
+				err := client.rdb.Enqueue(context.Background(), msg)
 				if err != nil {
 					p.shutdown()
 					t.Fatal(err)
@@ -475,8 +475,8 @@ func TestProcessorMarkAsComplete(t *testing.T) {
 		},
 	}
 
-	now := utc.Now()
-	defer utc.MockNow(now)()
+	now := time.Now()
+	client.rdb.SetClock(timeutil.NewSimulatedClock(now))
 
 	for _, tc := range tests {
 		ctx.FlushDB() // clean up db before each test case.
@@ -487,7 +487,7 @@ func TestProcessorMarkAsComplete(t *testing.T) {
 		p.queues = tc.queueCfg.configure()
 
 		p.start(&sync.WaitGroup{})
-		runTime := now.Time // time when processor is running
+		runTime := now // time when processor is running
 		time.Sleep(2 * time.Second)
 		p.shutdown()
 
@@ -690,12 +690,9 @@ func TestProcessorPerform(t *testing.T) {
 			wantErr: true,
 		},
 	}
-	// Note: We don't need to fully initialize the processor since we are only testing
+	// Note: We don't need to fully initialized the processor since we are only testing
 	// perform method.
-	p := newProcessor(processorParams{
-		logger: testLogger,
-		queues: defaultQueuesConfig,
-	})
+	p := newProcessorForTest(t, nil, nil)
 
 	for _, tc := range tests {
 		p.handler = tc.handler

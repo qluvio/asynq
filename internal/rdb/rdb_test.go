@@ -21,6 +21,7 @@ import (
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/hibiken/asynq/internal/timeutil"
 )
 
 // variables used for package testing.
@@ -67,6 +68,9 @@ func TestEnqueue(t *testing.T) {
 	t2 := h.NewTaskMessageWithQueue("generate_csv", h.JSON(map[string]interface{}{}), "csv")
 	t3 := h.NewTaskMessageWithQueue("sync", nil, "low")
 
+	enqueueTime := time.Now()
+	r.SetClock(timeutil.NewSimulatedClock(enqueueTime))
+
 	tests := []struct {
 		msg *base.TaskMessage
 	}{
@@ -78,7 +82,7 @@ func TestEnqueue(t *testing.T) {
 	for _, tc := range tests {
 		h.FlushDB(t, r.client) // clean up db before each test case.
 
-		err := r.Enqueue(tc.msg)
+		err := r.Enqueue(context.Background(), tc.msg)
 		if err != nil {
 			t.Errorf("(*RDB).Enqueue(msg) = %v, want nil", err)
 			continue
@@ -115,6 +119,10 @@ func TestEnqueue(t *testing.T) {
 		if want := strconv.Itoa(int(tc.msg.Deadline)); deadline != want {
 			t.Errorf("deadline field under task-key is set to %v, want %v", deadline, want)
 		}
+		pendingSince := r.client.HGet(context.Background(), taskKey, "pending_since").Val() // "pending_since" field
+		if want := strconv.Itoa(int(enqueueTime.UnixNano())); pendingSince != want {
+			t.Errorf("pending_since field under task-key is set to %v, want %v", pendingSince, want)
+		}
 
 		// Check queue is in the AllQueues set.
 		if !r.client.SIsMember(context.Background(), base.AllQueues, tc.msg.Queue).Val() {
@@ -148,11 +156,11 @@ func TestEnqueueTaskIdConflictError(t *testing.T) {
 	for _, tc := range tests {
 		h.FlushDB(t, r.client) // clean up db before each test case.
 
-		if err := r.Enqueue(tc.firstMsg); err != nil {
+		if err := r.Enqueue(context.Background(), tc.firstMsg); err != nil {
 			t.Errorf("First message: Enqueue failed: %v", err)
 			continue
 		}
-		if err := r.Enqueue(tc.secondMsg); !errors.Is(err, errors.ErrTaskIdConflict) {
+		if err := r.Enqueue(context.Background(), tc.secondMsg); !errors.Is(err, errors.ErrTaskIdConflict) {
 			t.Errorf("Second message: Enqueue returned %v, want %v", err, errors.ErrTaskIdConflict)
 			continue
 		}
@@ -170,6 +178,9 @@ func TestEnqueueUnique(t *testing.T) {
 		UniqueKey: base.UniqueKey(base.DefaultQueueName, "email", h.JSON(map[string]interface{}{"user_id": 123})),
 	}
 
+	enqueueTime := time.Now()
+	r.SetClock(timeutil.NewSimulatedClock(enqueueTime))
+
 	tests := []struct {
 		msg *base.TaskMessage
 		ttl time.Duration // uniqueness ttl
@@ -181,7 +192,7 @@ func TestEnqueueUnique(t *testing.T) {
 		h.FlushDB(t, r.client) // clean up db before each test case.
 
 		// Enqueue the first message, should succeed.
-		err := r.EnqueueUnique(tc.msg, tc.ttl)
+		err := r.EnqueueUnique(context.Background(), tc.msg, tc.ttl)
 		if err != nil {
 			t.Errorf("First message: (*RDB).EnqueueUnique(%v, %v) = %v, want nil",
 				tc.msg, tc.ttl, err)
@@ -230,6 +241,10 @@ func TestEnqueueUnique(t *testing.T) {
 		if want := strconv.Itoa(int(tc.msg.Deadline)); deadline != want {
 			t.Errorf("deadline field under task-key is set to %v, want %v", deadline, want)
 		}
+		pendingSince := r.client.HGet(context.Background(), taskKey, "pending_since").Val() // "pending_since" field
+		if want := strconv.Itoa(int(enqueueTime.UnixNano())); pendingSince != want {
+			t.Errorf("pending_since field under task-key is set to %v, want %v", pendingSince, want)
+		}
 		uniqueKey := r.client.HGet(context.Background(), taskKey, "unique_key").Val() // "unique_key" field
 		if uniqueKey != tc.msg.UniqueKey {
 			t.Errorf("uniqueue_key field under task key is set to %q, want %q", uniqueKey, tc.msg.UniqueKey)
@@ -241,7 +256,7 @@ func TestEnqueueUnique(t *testing.T) {
 		}
 
 		// Enqueue the second message, should fail.
-		got := r.EnqueueUnique(tc.msg, tc.ttl)
+		got := r.EnqueueUnique(context.Background(), tc.msg, tc.ttl)
 		if !errors.Is(got, errors.ErrDuplicateTask) {
 			t.Errorf("Second message: (*RDB).EnqueueUnique(msg, ttl) = %v, want %v", got, errors.ErrDuplicateTask)
 			continue
@@ -282,11 +297,11 @@ func TestEnqueueUniqueTaskIdConflictError(t *testing.T) {
 	for _, tc := range tests {
 		h.FlushDB(t, r.client) // clean up db before each test case.
 
-		if err := r.EnqueueUnique(tc.firstMsg, ttl); err != nil {
+		if err := r.EnqueueUnique(context.Background(), tc.firstMsg, ttl); err != nil {
 			t.Errorf("First message: EnqueueUnique failed: %v", err)
 			continue
 		}
-		if err := r.EnqueueUnique(tc.secondMsg, ttl); !errors.Is(err, errors.ErrTaskIdConflict) {
+		if err := r.EnqueueUnique(context.Background(), tc.secondMsg, ttl); !errors.Is(err, errors.ErrTaskIdConflict) {
 			t.Errorf("Second message: EnqueueUnique returned %v, want %v", err, errors.ErrTaskIdConflict)
 			continue
 		}
@@ -1162,7 +1177,7 @@ func TestSchedule(t *testing.T) {
 	for _, tc := range tests {
 		h.FlushDB(t, r.client) // clean up db before each test case
 
-		err := r.Schedule(tc.msg, tc.processAt)
+		err := r.Schedule(context.Background(), tc.msg, tc.processAt)
 		if err != nil {
 			t.Errorf("(*RDB).Schedule(%v, %v) = %v, want nil",
 				tc.msg, tc.processAt, err)
@@ -1245,11 +1260,11 @@ func TestScheduleTaskIdConflictError(t *testing.T) {
 	for _, tc := range tests {
 		h.FlushDB(t, r.client) // clean up db before each test case.
 
-		if err := r.Schedule(tc.firstMsg, processAt); err != nil {
+		if err := r.Schedule(context.Background(), tc.firstMsg, processAt); err != nil {
 			t.Errorf("First message: Schedule failed: %v", err)
 			continue
 		}
-		if err := r.Schedule(tc.secondMsg, processAt); !errors.Is(err, errors.ErrTaskIdConflict) {
+		if err := r.Schedule(context.Background(), tc.secondMsg, processAt); !errors.Is(err, errors.ErrTaskIdConflict) {
 			t.Errorf("Second message: Schedule returned %v, want %v", err, errors.ErrTaskIdConflict)
 			continue
 		}
@@ -1279,7 +1294,7 @@ func TestScheduleUnique(t *testing.T) {
 		h.FlushDB(t, r.client) // clean up db before each test case
 
 		desc := "(*RDB).ScheduleUnique(msg, processAt, ttl)"
-		err := r.ScheduleUnique(tc.msg, tc.processAt, tc.ttl)
+		err := r.ScheduleUnique(context.Background(), tc.msg, tc.processAt, tc.ttl)
 		if err != nil {
 			t.Errorf("Frist task: %s = %v, want nil", desc, err)
 			continue
@@ -1336,7 +1351,7 @@ func TestScheduleUnique(t *testing.T) {
 		}
 
 		// Enqueue the second message, should fail.
-		got := r.ScheduleUnique(tc.msg, tc.processAt, tc.ttl)
+		got := r.ScheduleUnique(context.Background(), tc.msg, tc.processAt, tc.ttl)
 		if !errors.Is(got, errors.ErrDuplicateTask) {
 			t.Errorf("Second task: %s = %v, want %v", desc, got, errors.ErrDuplicateTask)
 			continue
@@ -1379,11 +1394,11 @@ func TestScheduleUniqueTaskIdConflictError(t *testing.T) {
 	for _, tc := range tests {
 		h.FlushDB(t, r.client) // clean up db before each test case.
 
-		if err := r.ScheduleUnique(tc.firstMsg, processAt, ttl); err != nil {
+		if err := r.ScheduleUnique(context.Background(), tc.firstMsg, processAt, ttl); err != nil {
 			t.Errorf("First message: ScheduleUnique failed: %v", err)
 			continue
 		}
-		if err := r.ScheduleUnique(tc.secondMsg, processAt, ttl); !errors.Is(err, errors.ErrTaskIdConflict) {
+		if err := r.ScheduleUnique(context.Background(), tc.secondMsg, processAt, ttl); !errors.Is(err, errors.ErrTaskIdConflict) {
 			t.Errorf("Second message: ScheduleUnique returned %v, want %v", err, errors.ErrTaskIdConflict)
 			continue
 		}
@@ -2055,6 +2070,9 @@ func TestForwardIfReady(t *testing.T) {
 		h.SeedAllScheduledQueues(t, r.client, tc.scheduled)
 		h.SeedAllRetryQueues(t, r.client, tc.retry)
 
+		now := time.Now()
+		r.SetClock(timeutil.NewSimulatedClock(now))
+
 		err := r.ForwardIfReady(tc.qnames...)
 		if err != nil {
 			t.Errorf("(*RDB).CheckScheduled(%v) = %v, want nil", tc.qnames, err)
@@ -2065,6 +2083,13 @@ func TestForwardIfReady(t *testing.T) {
 			gotPending := h.GetPendingMessages(t, r.client, qname)
 			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q; (-want, +got)\n%s", base.PendingKey(qname), diff)
+			}
+			// Make sure "pending_since" field is set
+			for _, msg := range gotPending {
+				pendingSince := r.client.HGet(context.Background(), base.TaskKey(msg.Queue, msg.ID), "pending_since").Val()
+				if want := strconv.Itoa(int(now.UnixNano())); pendingSince != want {
+					t.Error("pending_since field is not set for newly pending message")
+				}
 			}
 		}
 		for qname, want := range tc.wantScheduled {

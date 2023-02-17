@@ -95,6 +95,7 @@ type TestContext interface {
 	SeedProcessedQueue(processedCount int, qname string, ts time.Time)
 	SeedAllFailedQueues(failed map[string]int, doneAt time.Time)
 	SeedFailedQueue(failedCount int, qname string, ts time.Time)
+	SeedLastPendingSince(qname string, enqueueTime time.Time)
 }
 
 func doInitBrokerTypeOnce(tb testing.TB) {

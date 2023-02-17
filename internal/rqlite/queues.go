@@ -8,7 +8,6 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/sqlite3"
-	"github.com/hibiken/asynq/internal/utc"
 )
 
 type queueRow struct {
@@ -167,14 +166,14 @@ func (conn *Connection) listQueues(queue ...string) ([]*queueRow, error) {
 	return ret, nil
 }
 
-func (conn *Connection) currentStats(queue string) (*base.Stats, error) {
+func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, error) {
 	op := errors.Op("currentStats")
 	stmts := []*sqlite3.Statement{
 		Statement(
 			"SELECT queue_name, state "+
 				" FROM "+conn.table(QueuesTable)+" WHERE queue_name=? ", queue),
 		Statement(
-			"SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, retain_until, sid, affinity_timeout, recurrent, result "+
+			selectTaskRow+
 				" FROM "+conn.table(TasksTable)+
 				" WHERE queue_name=? ", queue),
 	}
@@ -190,7 +189,7 @@ func (conn *Connection) currentStats(queue string) (*base.Stats, error) {
 	var ret *base.Stats
 	if qrs[0].Next() {
 		ret = &base.Stats{
-			Timestamp: time.Now().UTC(),
+			Timestamp: now.UTC(),
 		}
 		state := ""
 		err = qrs[0].Scan(
@@ -201,6 +200,7 @@ func (conn *Connection) currentStats(queue string) (*base.Stats, error) {
 		}
 		ret.Paused = state == paused
 
+		oldestPending := now.UnixNano()
 		tasks, err := parseTaskRows(qrs[1])
 		if err != nil {
 			return nil, err
@@ -209,6 +209,9 @@ func (conn *Connection) currentStats(queue string) (*base.Stats, error) {
 			switch task.state {
 			case pending:
 				ret.Pending++
+				if task.pendingSince < oldestPending {
+					oldestPending = task.pendingSince
+				}
 			case active:
 				ret.Active++
 			case scheduled:
@@ -227,6 +230,7 @@ func (conn *Connection) currentStats(queue string) (*base.Stats, error) {
 				ret.Processed++
 			}
 		}
+		ret.Latency = now.Sub(time.Unix(0, oldestPending))
 		// processed are not included
 		ret.Size = ret.Pending + ret.Active + ret.Scheduled + ret.Retry + ret.Archived
 
@@ -239,12 +243,11 @@ func (conn *Connection) currentStats(queue string) (*base.Stats, error) {
 	return ret, nil
 }
 
-func (conn *Connection) historicalStats(queue string, ndays int) ([]*base.DailyStats, error) {
+func (conn *Connection) historicalStats(now time.Time, queue string, ndays int) ([]*base.DailyStats, error) {
 	op := errors.Op("historicalStats")
 	const day = 24 * time.Hour
 
 	stmts := make([]*sqlite3.Statement, 0, ndays*3)
-	now := utc.Now()
 	last := now.Unix()
 
 	for i := 0; i < ndays; i++ {
@@ -284,7 +287,7 @@ func (conn *Connection) historicalStats(queue string, ndays int) ([]*base.DailyS
 	}
 	ret := make([]*base.DailyStats, 0, ndays)
 	for i := 0; i < ndays; i++ {
-		ts := now.Add(-time.Duration(i) * 24 * time.Hour).Time
+		ts := now.Add(-time.Duration(i) * 24 * time.Hour)
 		ndx := i * 3
 
 		nbProcessed := 0
@@ -318,17 +321,17 @@ func (conn *Connection) historicalStats(queue string, ndays int) ([]*base.DailyS
 	return ret, nil
 }
 
-func (conn *Connection) getTaskInfo(qname string, taskid string) (*base.TaskInfo, error) {
+func (conn *Connection) getTaskInfo(now time.Time, qname string, taskid string) (*base.TaskInfo, error) {
 	var op errors.Op = "getTaskInfo"
 
 	tr, err := conn.getTask(qname, taskid)
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}
-	return getTaskInfo(op, tr)
+	return getTaskInfo(op, now, tr)
 }
 
-func getTaskInfo(op errors.Op, tr *taskRow) (*base.TaskInfo, error) {
+func getTaskInfo(op errors.Op, now time.Time, tr *taskRow) (*base.TaskInfo, error) {
 	var state base.TaskState
 	if tr.state != processed {
 		// PENDING(GIL): 'processed' is not in base.TaskState
@@ -342,12 +345,14 @@ func getTaskInfo(op errors.Op, tr *taskRow) (*base.TaskInfo, error) {
 	nextProcessAt := time.Time{}
 	switch tr.state {
 	case pending:
-		nextProcessAt = utc.Now().Time
+		nextProcessAt = now
 	case scheduled:
 		nextProcessAt = time.Unix(tr.scheduledAt, 0).UTC()
 	case retry:
 		nextProcessAt = time.Unix(tr.retryAt, 0).UTC()
 	}
+	nextProcessAt = nextProcessAt.UTC()
+
 	var result []byte
 	if tr.result != "" {
 		var err error

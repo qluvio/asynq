@@ -156,6 +156,15 @@ func (c *redisTestContext) SeedFailedQueue(failedCount int, qname string, ts tim
 	c.r.Set(context.Background(), failedKey, failedCount, 0)
 }
 
+func (c *redisTestContext) SeedLastPendingSince(qname string, enqueueTime time.Time) {
+	if enqueueTime.IsZero() {
+		return
+	}
+	ctx := context.Background()
+	oldestPendingMessageID := c.r.LRange(ctx, base.PendingKey(qname), -1, -1).Val()[0] // get the right most msg in the list
+	c.r.HSet(ctx, base.TaskKey(qname, oldestPendingMessageID), "pending_since", enqueueTime.UnixNano())
+}
+
 func TestParseRedisURI(t *testing.T) {
 	tests := []struct {
 		uri  string

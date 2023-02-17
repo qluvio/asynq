@@ -1,6 +1,7 @@
 package rqlite
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -16,10 +17,11 @@ func BenchmarkEnqueue(b *testing.B) {
 	FlushDB(b, r.conn)
 	msg := asynqtest.NewTaskMessage("task1", nil)
 	b.ResetTimer()
+	ctx := context.Background()
 
 	for i := 0; i < b.N; i++ {
 		msg.ID = uuid.New().String()
-		if err := r.Enqueue(msg); err != nil {
+		if err := r.Enqueue(ctx, msg); err != nil {
 			b.Fatalf("Enqueue failed: %v", err)
 		}
 	}
@@ -30,12 +32,13 @@ func TestOneSecEnqueue(t *testing.T) {
 	FlushDB(t, r.conn)
 	msg := asynqtest.NewTaskMessage("task1", nil)
 	now := time.Now()
+	ctx := context.Background()
 
 	count := 0
 	d := time.Since(now)
 	for d < time.Second {
 		msg.ID = uuid.New().String()
-		if err := r.Enqueue(msg); err != nil {
+		if err := r.Enqueue(ctx, msg); err != nil {
 			require.NoError(t, err)
 		}
 		count++
@@ -54,6 +57,7 @@ func TestEnqueueBatch(t *testing.T) {
 func doTestEnqueueBatch(t *testing.T, batchSize int) {
 	r := setup(t)
 	FlushDB(t, r.conn)
+	ctx := context.Background()
 
 	msgs := make([]*base.MessageBatch, 0, batchSize)
 	for i := 0; i < batchSize; i++ {
@@ -72,8 +76,7 @@ func doTestEnqueueBatch(t *testing.T, batchSize int) {
 	d := time.Duration(0)
 
 	for d < time.Second*2 {
-
-		err := r.EnqueueBatch(msgs...)
+		err := r.EnqueueBatch(ctx, msgs...)
 		require.NoError(t, err)
 
 		count += batchSize
