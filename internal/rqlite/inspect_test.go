@@ -17,23 +17,8 @@ import (
 )
 
 var (
-	timeCmpOpt    = cmpopts.EquateApproxTime(2 * time.Second) // allow for 2 seconds margin in time.Time
-	zScoreCmpOpt  = h.EquateInt64Approx(2)                    // allow for 2 seconds margin in Z.Score
-	latencyCmpOpt = cmp.Comparer(func(d0, d1 time.Duration) bool {
-		if d0 == d1 {
-			return true
-		}
-		var diff time.Duration
-		if d0 > d1 {
-			diff = d0 - d1
-		} else {
-			diff = d1 - d0
-		}
-		if diff.Truncate(time.Microsecond) <= time.Microsecond {
-			return true
-		}
-		return false
-	})
+	timeCmpOpt   = cmpopts.EquateApproxTime(2 * time.Second) // allow for 2 seconds margin in time.Time
+	zScoreCmpOpt = h.EquateInt64Approx(2)                    // allow for 2 seconds margin in Z.Score
 )
 
 func TestAllQueues(t *testing.T) {
@@ -247,7 +232,7 @@ func TestCurrentStats(t *testing.T) {
 		}
 
 		ignoreMemUsg := cmpopts.IgnoreFields(base.Stats{}, "MemoryUsage")
-		if diff := cmp.Diff(tc.want, got, timeCmpOpt, latencyCmpOpt, ignoreMemUsg); diff != "" {
+		if diff := cmp.Diff(tc.want, got, timeCmpOpt, ignoreMemUsg); diff != "" {
 			t.Errorf("r.CurrentStats(%q) = %v, %v, want %v, nil; (-want, +got)\n%s", tc.qname, got, err, tc.want, diff)
 			continue
 		}

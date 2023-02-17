@@ -272,23 +272,6 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 	now := time.Now()
 	timeCmpOpt := cmpopts.EquateApproxTime(time.Second)
 	ignoreMemUsg := cmpopts.IgnoreFields(QueueInfo{}, "MemoryUsage")
-	// pending_since is de-serialized as float on the rqlite server leading to
-	// some inaccuracy
-	latencyCmpOpt := cmp.Comparer(func(d0, d1 time.Duration) bool {
-		if d0 == d1 {
-			return true
-		}
-		var diff time.Duration
-		if d0 > d1 {
-			diff = d0 - d1
-		} else {
-			diff = d1 - d0
-		}
-		if diff.Truncate(time.Microsecond) <= time.Microsecond {
-			return true
-		}
-		return false
-	})
 
 	inspector := NewInspector(getClientConnOpt(t))
 	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
@@ -413,7 +396,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 			continue
 		}
 		if brokerType == rqliteType || brokerType == sqliteType {
-			if diff := cmp.Diff(tc.wantRqlite, got, timeCmpOpt, ignoreMemUsg, latencyCmpOpt); diff != "" {
+			if diff := cmp.Diff(tc.wantRqlite, got, timeCmpOpt, ignoreMemUsg); diff != "" {
 				t.Errorf("r.GetQueueInfo(%q) = %v, %v, want %v, nil; (-want, +got)\n%s",
 					tc.qname, got, err, tc.want, diff)
 				continue
