@@ -336,7 +336,7 @@ func (p *processor) fini() {
 	var quit bool
 	for {
 		// Note: reflect.Select() is limited to 65536 cases at any one time; see https://pkg.go.dev/reflect#Select
-		// As such, this implementation can support a concurrency of up to 32767 (=65536/2-1) tasks
+		// As such, this implementation can support a concurrency of up to 32767 (=[65536-2]/2) tasks
 		// PENDING: replace reflect.Select() with more efficient solution; consider https://stackoverflow.com/a/66125252
 		i, v, ok := reflect.Select(selectChs)
 		process := selectFns[i]
