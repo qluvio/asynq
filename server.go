@@ -307,6 +307,9 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	n := cfg.Concurrency
 	if n < 1 {
 		n = runtime.NumCPU()
+	} else if n > 32767 {
+		// Concurrency currently limited due to processor constraints; see p.fini() in processor.go
+		panic(aserrors.E(aserrors.Op("newServer"), aserrors.FailedPrecondition, fmt.Errorf("asynq: concurrency must not be greater than 32767")))
 	}
 	if len(cfg.ServerID) == 0 {
 		cfg.ServerID = uuid.New().String()
@@ -456,7 +459,12 @@ func newServer(broker base.Broker, cfg Config) *Server {
 // ProcessTask should return nil if the processing of a task
 // is successful.
 //
-// If ProcessTask returns a non-nil error or panics, the task
+// If ProcessTask returns an AsynchronousTask error, the task is indicating that
+// additional processing will happen asynchronously separate from the Handler
+// goroutine. In this case, the task will not be marked as completed or failed
+// until after the task status is updated via AsyncProcessor.
+//
+// If ProcessTask returns any other non-nil error or panics, the task
 // will be retried after delay if retry-count is remaining,
 // otherwise the task will be archived.
 //

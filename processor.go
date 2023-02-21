@@ -7,6 +7,7 @@ package asynq
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -19,6 +20,15 @@ import (
 	"github.com/hibiken/asynq/internal/log"
 	"golang.org/x/time/rate"
 )
+
+// SkipRetry is used as a return value from Handler.ProcessTask to indicate that
+// the task should not be retried and should be archived instead.
+var SkipRetry = errors.New("skip retry for the task")
+
+// AsynchronousTask is used as a return value from Handler.ProcessTask to
+// indicate that the task is processing asynchronously separately from the main
+// worker goroutine.
+var AsynchronousTask = errors.New("task is processing asynchronously")
 
 type processor struct {
 	logger   *log.Logger
@@ -51,6 +61,9 @@ type processor struct {
 	done chan struct{}
 	once sync.Once
 
+	// wait channel used to feed tasks to fini()
+	wait chan *processorTask
+
 	// quit channel is closed when the shutdown of the "processor" goroutine starts.
 	quit chan struct{}
 
@@ -74,13 +87,20 @@ type processorParams struct {
 	isFailureFunc   func(error) bool
 	syncCh          chan<- *syncRequest
 	cancelations    *base.Cancelations
-	concurrency     int
+	concurrency     int // currently limited to 32767; see processor.fini()
 	queues          Queues
 	errHandler      ErrorHandler
 	shutdownTimeout time.Duration
 	starting        chan<- *workerInfo
 	finished        chan<- *base.TaskMessage
 	emptyQSleep     time.Duration
+}
+
+type processorTask struct {
+	msg     *base.TaskMessage
+	ctx     context.Context
+	cleanup func()
+	resCh   chan error
 }
 
 // newProcessor constructs a new processor.
@@ -98,6 +118,7 @@ func newProcessor(params processorParams) *processor {
 		errLogLimiter:   rate.NewLimiter(rate.Every(3*time.Second), 1),
 		sema:            make(chan struct{}, params.concurrency),
 		done:            make(chan struct{}),
+		wait:            make(chan *processorTask, params.concurrency),
 		quit:            make(chan struct{}),
 		abort:           make(chan struct{}),
 		errHandler:      params.errHandler,
@@ -133,11 +154,12 @@ func (p *processor) shutdown() {
 	for i := 0; i < cap(p.sema); i++ {
 		p.sema <- struct{}{}
 	}
+	close(p.wait)
 	p.logger.Info("All workers have finished")
 }
 
 func (p *processor) start(wg *sync.WaitGroup) {
-	wg.Add(1)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		for {
@@ -149,6 +171,10 @@ func (p *processor) start(wg *sync.WaitGroup) {
 				p.exec()
 			}
 		}
+	}()
+	go func() {
+		defer wg.Done()
+		p.fini()
 	}()
 }
 
@@ -184,17 +210,14 @@ func (p *processor) exec() {
 
 		p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
 		go func() {
-			defer func() {
-				p.finished <- msg
-				<-p.sema // release token
-			}()
-
 			ctx, cancel := asynqcontext.New(msg, deadline)
 			p.cancelations.Add(msg.ID, cancel)
-			defer func() {
+			cleanup := func() {
 				cancel()
 				p.cancelations.Delete(msg.ID)
-			}()
+				p.finished <- msg
+				<-p.sema // release token
+			}
 
 			// check context before starting a worker goroutine.
 			select {
@@ -205,42 +228,144 @@ func (p *processor) exec() {
 			default:
 			}
 
-			resCh := make(chan error, 1)
+			resCh := make(chan error, 2)
+			rw := &ResultWriter{id: msg.ID, qname: msg.Queue, broker: p.broker, ctx: ctx}
+			ap := &AsyncProcessor{resCh: resCh}
+			// hold mutex until worker goroutine returns; ensures that AsyncProcessor does not send to resCh first
+			ap.mutex.Lock()
 			go func() {
-				task := newTask(
-					msg.Type,
-					msg.Payload,
-					&ResultWriter{
-						id:     msg.ID,
-						qname:  msg.Queue,
-						broker: p.broker,
-						ctx:    ctx,
-					},
-				)
+				defer ap.mutex.Unlock()
+				task := newTask(msg.Type, msg.Payload, rw, ap)
 				resCh <- p.perform(ctx, task)
 			}()
+			// finish task processing in p.fini() goroutine to allow this goroutine to end
+			t := &processorTask{msg: msg, ctx: ctx, cleanup: cleanup, resCh: resCh}
+			p.wait <- t
+		}()
+	}
+}
 
-			select {
-			case <-p.abort:
-				// time is up, push the message back to queue and quit this worker goroutine.
-				p.logger.Warnf("Quitting worker. task id=%s", msg.ID)
-				p.requeueAborting(msg)
-				return
-			case <-ctx.Done():
-				p.handleFailedMessage(ctx, msg, "done", ctx.Err())
-				return
-			case resErr := <-resCh:
-				if resErr != nil {
-					p.handleFailedMessage(ctx, msg, "errored", resErr)
+// fini waits for tasks to complete and finishes processing each task.
+func (p *processor) fini() {
+	ctxDoneCh := func(t *processorTask) reflect.SelectCase {
+		return reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(t.ctx.Done())}
+	}
+	ctxDoneFn := func(t *processorTask) func(reflect.Value) {
+		return func(_ reflect.Value) {
+			p.handleFailedMessage(t.ctx, t.msg, "done", t.ctx.Err())
+			t.cleanup()
+			return
+		}
+	}
+
+	resCh := func(t *processorTask) reflect.SelectCase {
+		return reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(t.resCh)}
+	}
+	resFn := func(t *processorTask) func(reflect.Value) {
+		return func(v reflect.Value) {
+			var resErr error
+			switch err := v.Interface().(type) {
+			case error:
+				resErr = err
+			case nil:
+				resErr = nil
+			}
+			if resErr == AsynchronousTask {
+				// task worker goroutine marked self as asynchronous task
+				// check res again in case task already completed
+				select {
+				case err := <-t.resCh:
+					resErr = err
+				default:
+					// wait again for async task to complete; do not cleanup
+					p.wait <- t
 					return
 				}
-				if !msg.Recurrent {
-					p.handleSucceededMessage(ctx, msg)
-				} else {
-					p.requeue(ctx, msg)
-				}
 			}
-		}()
+			if resErr != nil {
+				p.handleFailedMessage(t.ctx, t.msg, "errored", resErr)
+				t.cleanup()
+				return
+			}
+			if !t.msg.Recurrent {
+				p.handleSucceededMessage(t.ctx, t.msg)
+			} else {
+				p.requeue(t.ctx, t.msg)
+			}
+			t.cleanup()
+			return
+		}
+	}
+
+	// these should only be modified by the main fini() goroutine, to prevent races
+	var tasks []*processorTask                  // list of waiting tasks
+	selectChs := make([]reflect.SelectCase, 2)  // list of select case channel receives
+	selectFns := make([]func(reflect.Value), 2) // list of corresponding select case operations
+
+	// select index 0 reserved for p.abort
+	abortIdx := 0
+	selectChs[abortIdx] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.abort)}
+	selectFns[abortIdx] = func(_ reflect.Value) {
+		// time is up, push all messages back to queue and quit this goroutine
+		abort := func(t *processorTask) {
+			p.logger.Warnf("Quitting worker. task id=%s", t.msg.ID)
+			p.requeueAborting(t.msg)
+			t.cleanup()
+		}
+		for _, t := range tasks {
+			abort(t)
+		}
+		for t := range p.wait { // closed by p.shutdown() after all tasks have completed and been cleaned up
+			abort(t)
+		}
+		return
+	}
+
+	// select index 1 reserved for p.wait
+	waitIdx := 1
+	selectChs[waitIdx] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.wait)}
+	selectFns[waitIdx] = func(v reflect.Value) {
+		// add task to waitlist
+		t := v.Interface().(*processorTask)
+		tasks = append(tasks, t)
+		selectChs = append(selectChs, ctxDoneCh(t), resCh(t))
+		selectFns = append(selectFns, ctxDoneFn(t), resFn(t))
+		return
+	}
+
+	var quit bool
+	for {
+		// Note: reflect.Select() is limited to 65536 cases at any one time; see https://pkg.go.dev/reflect#Select
+		// As such, this implementation can support a concurrency of up to 32767 (=[65536-2]/2) tasks
+		// PENDING: replace reflect.Select() with more efficient solution; consider https://stackoverflow.com/a/66125252
+		i, v, ok := reflect.Select(selectChs)
+		process := selectFns[i]
+		if i == abortIdx {
+			// need to abort lists, so process in current goroutine
+			process(v)
+			return
+		} else if i == waitIdx {
+			if ok {
+				// need to update lists, so process in current goroutine
+				process(v)
+			} else {
+				// p.wait closed; need to quit after finishing remaining tasks
+				selectChs[waitIdx].Chan = reflect.Value{} // stop watching p.wait
+				quit = true
+			}
+		} else {
+			// remove task from lists
+			i = i - (i % 2)                                       // reduce i to first index of pair
+			tasks = append(tasks[:i/2-1], tasks[i/2:]...)         // remove (i/2-1)th item
+			selectChs = append(selectChs[:i], selectChs[i+2:]...) // remove (i)th pair
+			selectFns = append(selectFns[:i], selectFns[i+2:]...) // remove (i)th pair
+			// process in separate goroutine to continue fini() immediately
+			go process(v)
+		}
+		if quit && len(tasks) == 0 {
+			// shutdown
+			return
+		}
 	}
 }
 
@@ -324,10 +449,6 @@ func (p *processor) markAsDone(ctx context.Context, msg *base.TaskMessage) {
 		}
 	}
 }
-
-// SkipRetry is used as a return value from Handler.ProcessTask to indicate that
-// the task should not be retried and should be archived instead.
-var SkipRetry = errors.New("skip retry for the task")
 
 func (p *processor) handleFailedMessage(ctx context.Context, msg *base.TaskMessage, reason string, err error) {
 	p.logger.Debugf("Retry or archive (%s) task id=%s error:%s", reason, msg.ID, err)

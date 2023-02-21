@@ -7,7 +7,9 @@ package asynq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math/rand"
 	"sort"
 	"sync"
 	"testing"
@@ -21,9 +23,9 @@ import (
 )
 
 var taskCmpOpts = []cmp.Option{
-	sortTaskOpt,                               // sort the tasks
-	cmp.AllowUnexported(Task{}),               // allow typename, payload fields to be compared
-	cmpopts.IgnoreFields(Task{}, "opts", "w"), // ignore opts, w fields
+	sortTaskOpt,                 // sort the tasks
+	cmp.AllowUnexported(Task{}), // allow typename, payload fields to be compared
+	cmpopts.IgnoreFields(Task{}, "opts", "w", "p"), // ignore opts, w, p fields
 }
 
 // fakeHeartbeater receives from starting and finished channels and do nothing.
@@ -198,6 +200,101 @@ func TestProcessorSuccessWithMultipleQueues(t *testing.T) {
 				defer mu.Unlock()
 				processed = append(processed, task)
 				return nil
+			}
+			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler))
+			p.queues = (&QueuesConfig{
+				Priority: Lenient,
+				Queues: map[string]int{
+					"default": 2,
+					"high":    3,
+					"low":     1,
+				},
+			}).configure()
+			p.start(&sync.WaitGroup{})
+			// Wait for two second to allow all pending tasks to be processed.
+			time.Sleep(2 * time.Second)
+			// Make sure no messages are stuck in active list.
+			for _, qname := range tc.queues {
+				active := ctx.GetActiveMessages(qname)
+				if len(active) != 0 {
+					t.Errorf("%q has %d tasks, want 0", base.ActiveKey(qname), len(active))
+				}
+			}
+			p.shutdown()
+
+			mu.Lock()
+			if diff := cmp.Diff(tc.wantProcessed, processed, taskCmpOpts...); diff != "" {
+				t.Errorf("mismatch found in processed tasks; (-want, +got)\n%s", diff)
+			}
+			mu.Unlock()
+		})
+	}
+}
+
+func TestProcessorSuccessWithAsyncTasks(t *testing.T) {
+	rand.Seed(time.Now().UnixNano())
+	var (
+		ctx    = setupTestContext(t)
+		client = NewClient(getClientConnOpt(t))
+
+		m1 = h.NewTaskMessage("task1", nil)
+		m2 = h.NewTaskMessage("task2", nil)
+		m3 = h.NewTaskMessageWithQueue("task3", nil, "high")
+		m4 = h.NewTaskMessageWithQueue("task4", nil, "low")
+		m5 = h.NewTaskMessage("task5", nil)
+		m6 = h.NewTaskMessage("task6", nil)
+		m7 = h.NewTaskMessageWithQueue("task7", nil, "high")
+		m8 = h.NewTaskMessageWithQueue("task8", nil, "low")
+
+		t1 = NewTask(m1.Type, m1.Payload)
+		t2 = NewTask(m2.Type, m2.Payload)
+		t3 = NewTask(m3.Type, m3.Payload)
+		t4 = NewTask(m4.Type, m4.Payload)
+		t5 = NewTask(m5.Type, m5.Payload)
+		t6 = NewTask(m6.Type, m6.Payload)
+		t7 = NewTask(m7.Type, m7.Payload)
+		t8 = NewTask(m8.Type, m8.Payload)
+	)
+	defer func() { _ = ctx.Close() }()
+	defer func() { _ = client.Close() }()
+
+	tests := []struct {
+		pending       map[string][]*base.TaskMessage
+		queues        []string // list of queues to consume the tasks from
+		wantProcessed []*Task  // tasks to be processed at the end
+	}{
+		{
+			pending: map[string][]*base.TaskMessage{
+				"default": {m1, m2, m5, m6},
+				"high":    {m3, m7},
+				"low":     {m4, m8},
+			},
+			queues:        []string{"default", "high", "low"},
+			wantProcessed: []*Task{t1, t2, t3, t4, t5, t6, t7, t8},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(fmt.Sprintf("test-%d", i), func(t *testing.T) {
+			// Set up test case.
+			ctx.FlushDB()
+			ctx.SeedAllPendingQueues(tc.pending)
+
+			// Instantiate a new processor.
+			var mu sync.Mutex
+			var processed []*Task
+			handler := func(ctx context.Context, task *Task) error {
+				go func() {
+					mu.Lock()
+					defer mu.Unlock()
+					processed = append(processed, task)
+					if rand.Intn(100)%2 == 0 {
+						task.AsyncProcessor().TaskCompleted()
+					} else {
+						task.AsyncProcessor().TaskFailed(errors.New("failed"))
+					}
+				}()
+				return AsynchronousTask
 			}
 			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler))
 			p.queues = (&QueuesConfig{

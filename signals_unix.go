@@ -1,3 +1,4 @@
+//go:build linux || bsd || darwin
 // +build linux bsd darwin
 
 package asynq
