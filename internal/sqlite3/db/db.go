@@ -41,7 +41,7 @@ var stats *expvar.Map
 func init() {
 	rand.Seed(time.Now().UnixNano())
 	DBVersion, _, _ = sqlite3.Version()
-	stats = expvar.NewMap("db")
+	stats = expvar.NewMap("asynq_db")
 	ResetStats()
 }
 
