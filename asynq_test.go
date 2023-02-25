@@ -100,7 +100,7 @@ type TestContext interface {
 
 func doInitBrokerTypeOnce(tb testing.TB) {
 	initBrokerOnce.Do(func() {
-		if brokerType == sqliteType {
+		if brokerType == SqliteType {
 			rqliteConfig.Type = brokerType
 			if rqliteConfig.SqliteDbPath == "" {
 				if rqliteConfig.SqliteInMemory {
@@ -120,9 +120,9 @@ func doInitBrokerTypeOnce(tb testing.TB) {
 
 func getClientConnOpt(tb testing.TB) ClientConnOpt {
 	switch brokerType {
-	case redisType:
+	case RedisType:
 		return getRedisConnOpt(tb)
-	case rqliteType, sqliteType:
+	case RqliteType, SqliteType:
 		return RqliteConnOpt{Config: rqliteConfig}
 	}
 	tb.Fatal("invalid broker type: " + brokerType)
@@ -134,13 +134,13 @@ func setupTestContext(tb testing.TB) TestContext {
 
 	var ret TestContext
 	switch brokerType {
-	case redisType:
+	case RedisType:
 		opt := getRedisConnOpt(tb)
 		ret = &redisTestContext{
 			tb: tb,
 			r:  opt.MakeClient().(redis.UniversalClient),
 		}
-	case rqliteType, sqliteType:
+	case RqliteType, SqliteType:
 		rqliteConfig.Type = brokerType
 		opt := RqliteConnOpt{Config: rqliteConfig}
 		ret = &rqliteTestContext{

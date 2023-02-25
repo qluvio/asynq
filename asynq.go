@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	redisType  = "redis"
-	rqliteType = "rqlite"
-	sqliteType = "sqlite"
+	RedisType  = "redis"
+	RqliteType = "rqlite"
+	SqliteType = "sqlite"
 )
 
 // Task represents a unit of work to be performed.
@@ -204,7 +204,7 @@ const (
 	// TaskStateArchived indicates that the task is archived and stored for inspection purposes.
 	TaskStateArchived
 
-	// Indicates that the task is processed successfully and retained until the retention TTL expires.
+	// TaskStateCompleted indicates that the task is processed successfully and retained until the retention TTL expires.
 	TaskStateCompleted
 )
 
