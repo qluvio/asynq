@@ -36,7 +36,7 @@ func (conn *Connection) listServers(where string, whereParams ...interface{}) ([
 
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qrs[0], err, st)
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 
 	qr := qrs[0]
@@ -94,7 +94,7 @@ func (conn *Connection) listWorkers(where string, whereParams ...interface{}) ([
 
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qrs[0], err, st)
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 
 	qr := qrs[0]

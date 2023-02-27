@@ -26,7 +26,7 @@ func (conn *Connection) EnsureQueue(queue string) error {
 	st := conn.ensureQueueStatement(queue)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return NewRqliteWError("EnsureQueue", wrs[0], err, st)
+		return NewRqliteWsError("EnsureQueue", wrs, err, []*sqlite3.Statement{st})
 	}
 	return nil
 }
@@ -39,7 +39,7 @@ func (conn *Connection) GetQueue(qname string) (*queueRow, error) {
 		qname)
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, NewRqliteRError("getQueue", qrs[0], err, st)
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 	if len(qrs) == 0 || qrs[0].NumRows() == 0 {
 		return nil, nil
@@ -71,7 +71,7 @@ func (conn *Connection) pauseQueue(queue string, b bool) error {
 		val)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return NewRqliteWError(op, wrs[0], err, st)
+		return NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 	switch wrs[0].RowsAffected {
 	case 1:
@@ -143,7 +143,7 @@ func (conn *Connection) listQueues(queue ...string) ([]*queueRow, error) {
 
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qrs[0], err, st)
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 
 	qr := qrs[0]

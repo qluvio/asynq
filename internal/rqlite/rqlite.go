@@ -15,6 +15,7 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
+	"github.com/hibiken/asynq/internal/sqlite3"
 	"github.com/hibiken/asynq/internal/timeutil"
 )
 
@@ -607,7 +608,8 @@ func (r *RQLite) CancelationPubSub() (base.PubSub, error) {
 					uuid)
 				wrs, err := conn.WriteStmt(r.context(), st)
 				if err != nil {
-					r.logger.Error(fmt.Sprintf("cancellation channel delete failed: %v", NewRqliteWError(op, wrs[0], err, st)))
+					r.logger.Error(fmt.Sprintf("cancellation channel delete failed: %v",
+						NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})))
 				}
 
 			}
@@ -631,7 +633,7 @@ func (r *RQLite) PublishCancelation(id string) error {
 		r.Now().Unix())
 	wrs, err := conn.WriteStmt(r.context(), st)
 	if err != nil {
-		return NewRqliteWError(op, wrs[0], err, st)
+		return NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 	return nil
 }

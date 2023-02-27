@@ -137,8 +137,13 @@ func (conn *Connection) CreateTablesIfNotExist() (bool, error) {
 
 	get := Statement("SELECT COUNT(*) FROM " + conn.table(VersionTable))
 	qrs, err := conn.QueryStmt(conn.ctx(), get)
-	if err != nil && (qrs[0].Err() == nil || !strings.Contains(qrs[0].Err().Error(), "no such table:")) {
-		return false, errors.E(op, errors.Internal, NewRqliteRError(op, qrs[0], err, get))
+	if err != nil {
+		if len(qrs) == 0 {
+			return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
+		}
+		if qrs[0].Err() == nil || !strings.Contains(qrs[0].Err().Error(), "no such table:") {
+			return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
+		}
 	}
 	if qrs[0].NumRows() > 0 {
 		return false, nil
