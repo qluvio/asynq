@@ -43,14 +43,6 @@ func (e *RqliteError) Error() string {
 
 func (e *RqliteError) Unwrap() error { return e.Err }
 
-func NewRqliteWError(op errors.Op, wr sqlite3.WriteResult, err error, stmt interface{}) error {
-	return &RqliteError{
-		Op:         op,
-		Err:        err,
-		Statements: []StatementError{{Error: wr.Err, Statement: stmt}},
-	}
-}
-
 func NewRqliteWsError(op errors.Op, wrs []sqlite3.WriteResult, err error, stmts []*sqlite3.Statement) error {
 	statements := make([]StatementError, 0)
 	for ndx, wr := range wrs {
@@ -62,14 +54,6 @@ func NewRqliteWsError(op errors.Op, wrs []sqlite3.WriteResult, err error, stmts 
 		Op:         op,
 		Err:        err,
 		Statements: statements,
-	}
-}
-
-func NewRqliteRError(op errors.Op, qr sqlite3.QueryResult, err error, stmt interface{}) error {
-	return &RqliteError{
-		Op:         op,
-		Err:        err,
-		Statements: []StatementError{{Error: qr.Err(), Statement: stmt}},
 	}
 }
 

@@ -113,7 +113,7 @@ func (conn *Connection) listTasksPaged(queue string, state string, page *base.Pa
 	}
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qrs[0], err, st)
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 	return parseTaskRows(qrs[0])
 }
@@ -129,7 +129,7 @@ func (conn *Connection) getTask(queue string, id string) (*taskRow, error) {
 		id)
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qrs[0], err, st)
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 	rows, err := parseTaskRows(qrs[0])
 	if err != nil {
@@ -159,7 +159,7 @@ func (conn *Connection) getTaskCount(queue string, andWhere, whereValue string) 
 
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return 0, NewRqliteRError(op, qrs[0], err, st)
+		return 0, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 	count := int64(0)
 	qrs[0].Next()
@@ -211,7 +211,7 @@ func (conn *Connection) getPending(now time.Time, serverID string, queue string)
 
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qrs[0], err, st)
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 
 	if len(qrs) == 0 || qrs[0].NumRows() == 0 {
@@ -254,7 +254,7 @@ func (conn *Connection) deleteTasks(queue string, state string) (int64, error) {
 		state)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wrs[0], err, st)
+		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 
 	return wrs[0].RowsAffected, nil
@@ -270,7 +270,7 @@ func (conn *Connection) deleteTask(queue string, taskid string) (int64, error) {
 		taskid)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wrs[0], err, st)
+		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 	ret := wrs[0].RowsAffected
 
@@ -294,7 +294,7 @@ func (conn *Connection) setTaskPending(queue string, taskid string) (int64, erro
 		taskid)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wrs[0], err, st)
+		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 
 	ret := wrs[0].RowsAffected
@@ -322,7 +322,7 @@ func (conn *Connection) setPending(queue string, state string) (int64, error) {
 		state)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wrs[0], err, st)
+		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 	return wrs[0].RowsAffected, nil
 }
@@ -341,7 +341,7 @@ func (conn *Connection) setArchived(now time.Time, queue string, state string) (
 		state)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wrs[0], err, st)
+		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 	return wrs[0].RowsAffected, nil
 }
@@ -359,7 +359,7 @@ func (conn *Connection) setTaskArchived(now time.Time, queue string, taskid stri
 		taskid)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wrs[0], err, st)
+		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 
 	ret := wrs[0].RowsAffected
@@ -626,7 +626,7 @@ func (conn *Connection) setTaskActive(ndx int64, serverID string, serverAffinity
 	}
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return false, NewRqliteWError(op, wrs[0], err, st)
+		return false, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 	// if the row was changed (by another rqlite) no row is affected
 	return wrs[0].RowsAffected == 1, nil
@@ -732,7 +732,7 @@ func (conn *Connection) setTaskDone(now time.Time, serverID string, msg *base.Ta
 
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return NewRqliteWError(op, wrs[0], err, st)
+		return NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 	// with uniqueKey the unique lock may have been forced to put the task
 	// again in state 'pending' - see enqueueUniqueMessages
@@ -813,7 +813,7 @@ func (conn *Connection) setTaskCompleted(now time.Time, serverID string, msg *ba
 
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return NewRqliteWError(op, wrs[0], err, st)
+		return NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 	// with uniqueKey the unique lock may have been forced to put the task
 	// again in state 'pending' - see enqueueUniqueMessages
@@ -868,7 +868,7 @@ func (conn *Connection) writeTaskResult(qname, taskID string, data []byte, activ
 	}
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wrs[0], err, st)
+		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 
 	err = expectOneRowUpdated(op, wrs[0], st, true)
@@ -981,7 +981,7 @@ func (conn *Connection) requeueTask(now time.Time, serverID string, msg *base.Ta
 	}
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return NewRqliteWError(op, wrs[0], err, st)
+		return NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 
 	// with uniqueKey the unique lock may have been forced to put the task
@@ -1215,7 +1215,7 @@ func (conn *Connection) retryTask(now time.Time, msg *base.TaskMessage, processA
 		wrs = append(wrs, sqlite3.WriteResult{Err: err})
 	}
 	if err != nil {
-		return NewRqliteWError(op, wrs[0], err, st)
+		return NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 
 	// with uniqueKey the unique lock may have been forced to put the task
@@ -1291,7 +1291,7 @@ func (conn *Connection) forwardTasks(now time.Time, qname, src string) (int, err
 		now.Unix())
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
-		return 0, NewRqliteWError(op, wrs[0], err, st)
+		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 
 	if len(wrs) == 0 {
@@ -1312,7 +1312,7 @@ func (conn *Connection) listDeadlineExceededTasks(qname string, deadline time.Ti
 		deadline.Unix())
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qrs[0], err, st)
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 
 	if len(qrs) == 0 || qrs[0].NumRows() == 0 {

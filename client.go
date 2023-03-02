@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,8 +26,6 @@ import (
 // Clients are safe for concurrent use by multiple goroutines.
 type Client struct {
 	logger *log.Logger
-	mu     sync.Mutex
-	opts   map[string][]Option
 	rdb    base.Broker
 	loc    *time.Location
 }
@@ -42,8 +39,7 @@ type BatchError interface {
 
 func NewClientWithBroker(broker base.Broker) *Client {
 	return &Client{
-		opts: make(map[string][]Option),
-		rdb:  broker,
+		rdb: broker,
 	}
 }
 
@@ -62,7 +58,6 @@ func NewClient(r ClientConnOpt, loc ...*time.Location) *Client {
 	}
 	return &Client{
 		logger: log.NewLogger(r.Logger()),
-		opts:   make(map[string][]Option),
 		rdb:    broker,
 		loc:    l,
 	}
@@ -534,16 +529,14 @@ func (c *Client) EnqueueBatchContext(ctx context.Context, tasks []*Task, opts ..
 	var err error
 	{
 		var opt option
-		c.mu.Lock()
 		for _, task := range tasks {
-			taskOpts := append([]Option{}, opts...)
-			if defaults, ok := c.opts[task.Type()]; ok {
-				taskOpts = append(defaults, taskOpts...)
-			}
-			opt, err = composeOptions(taskOpts...)
+			// merge task options with the options provided at enqueue time.
+			opts = append(task.opts, opts...)
+			opt, err = composeOptions(opts...)
 			if err != nil {
 				break
 			}
+
 			if opt.serverAffinity > 0 {
 				if _, ok := c.rdb.(*rdb.RDB); ok {
 					return nil, fmt.Errorf("server affinity not supported with redis")
@@ -551,7 +544,6 @@ func (c *Client) EnqueueBatchContext(ctx context.Context, tasks []*Task, opts ..
 			}
 			tasksOpts = append(tasksOpts, opt)
 		}
-		c.mu.Unlock()
 	}
 	if err != nil {
 		return nil, err

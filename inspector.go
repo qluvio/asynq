@@ -38,6 +38,15 @@ func NewInspectorFrom(s *Server) (*Inspector, error) {
 	return newInspector(s.broker), nil
 }
 
+// NewInspectorClient returns a new instance of Inspector built with the broker of
+// the given Client.
+func NewInspectorClient(c *Client) (*Inspector, error) {
+	if c == nil {
+		return nil, errors.E(errors.Op("NewInspectorFrom"), errors.Internal, "client is nil")
+	}
+	return newInspector(c.rdb), nil
+}
+
 func newInspector(c base.Broker) *Inspector {
 	return &Inspector{
 		rdb: c.Inspector(),

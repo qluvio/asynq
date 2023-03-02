@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq/internal/sqlite3/command"
-	"github.com/rqlite/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 const bkDelay = 250
@@ -41,7 +41,7 @@ var stats *expvar.Map
 func init() {
 	rand.Seed(time.Now().UnixNano())
 	DBVersion, _, _ = sqlite3.Version()
-	stats = expvar.NewMap("db")
+	stats = expvar.NewMap("asynq_db")
 	ResetStats()
 }
 

@@ -88,7 +88,7 @@ func TestSchedulerRegister(t *testing.T) {
 }
 
 func TestSchedulerWhenRedisDown(t *testing.T) {
-	if brokerType == rqliteType || brokerType == sqliteType {
+	if brokerType == RqliteType || brokerType == SqliteType {
 		t.Skip("redis specific test")
 	}
 

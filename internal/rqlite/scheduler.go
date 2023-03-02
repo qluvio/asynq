@@ -27,7 +27,7 @@ func (conn *Connection) listSchedulerEntries(where string, whereParams ...interf
 
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qrs[0], err, st)
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 
 	qr := qrs[0]
@@ -107,7 +107,7 @@ func (conn *Connection) listSchedulerEnqueueEvents(entryID string, page base.Pag
 
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qrs[0], err, st)
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 	return parseSchedulerEnqueueEvents(qrs[0])
 }
@@ -122,7 +122,7 @@ func (conn *Connection) listAllSchedulerEnqueueEvents(entryID string) ([]*schedu
 
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, NewRqliteRError(op, qrs[0], err, st)
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 	return parseSchedulerEnqueueEvents(qrs[0])
 }
@@ -169,7 +169,7 @@ func (conn *Connection) clearSchedulerEntries(schedulerID string) error {
 		schedulerID)
 	wrs, err := conn.WriteStmt(conn.ctx(), stmt)
 	if err != nil {
-		return NewRqliteWError(op, wrs[0], err, stmt)
+		return NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{stmt})
 	}
 	return nil
 }
@@ -179,7 +179,7 @@ func (conn *Connection) clearSchedulerHistory(entryID string) error {
 		entryID)
 	wrs, err := conn.WriteStmt(conn.ctx(), stmt)
 	if err != nil {
-		return NewRqliteWError("rqlite.clearSchedulerHistory", wrs[0], err, stmt)
+		return NewRqliteWsError("rqlite.clearSchedulerHistory", wrs, err, []*sqlite3.Statement{stmt})
 	}
 	return nil
 }
