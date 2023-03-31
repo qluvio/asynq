@@ -33,8 +33,8 @@ const (
 
 	QueuesTable          = "asynq_queues"
 	CreateQueuesTableFmt = `CREATE TABLE IF NOT EXISTS %s (
-	queue_name text not null primary key, 
-	state      text not null	
+	queue_name      text not null primary key, 
+	state           text not null
 )`
 	active    = "active"
 	paused    = "paused"

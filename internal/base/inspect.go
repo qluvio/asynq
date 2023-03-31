@@ -55,6 +55,9 @@ type Inspector interface {
 	// DeleteAllCompletedTasks deletes all completed tasks from the given queue
 	// and returns the number of tasks deleted.
 	DeleteAllCompletedTasks(qname string) (int64, error)
+	// DeleteAllProcessedTasks deletes all processed tasks from the given queue
+	// and returns the number of tasks deleted.
+	DeleteAllProcessedTasks(qname string) (int64, error)
 
 	// DeleteTask finds a task that matches the id from the given queue and deletes it.
 	// It returns nil if it successfully archived the task.

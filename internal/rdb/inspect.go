@@ -1225,6 +1225,11 @@ func (r *RDB) DeleteAllCompletedTasks(qname string) (int64, error) {
 	return n, nil
 }
 
+// DeleteAllProcessedTasks returns 0 since processed tasks are not kept in redis
+func (r *RDB) DeleteAllProcessedTasks(qname string) (int64, error) {
+	return 0, nil
+}
+
 // deleteAllCmd deletes tasks from the given zset.
 //
 // Input:

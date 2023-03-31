@@ -255,6 +255,9 @@ func (r *RQLite) DeleteAllArchivedTasks(qname string) (int64, error) {
 func (r *RQLite) DeleteAllCompletedTasks(qname string) (int64, error) {
 	return r.deleteTasks(qname, completed)
 }
+func (r *RQLite) DeleteAllProcessedTasks(qname string) (int64, error) {
+	return r.deleteTasks(qname, processed)
+}
 
 func (r *RQLite) DeleteTask(qname string, taskid string) error {
 	var op errors.Op = "rqlite.deleteTasks"

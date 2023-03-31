@@ -179,6 +179,8 @@ func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time
 		info.State = TaskStateArchived
 	case base.TaskStateCompleted:
 		info.State = TaskStateCompleted
+	case base.TaskStateProcessed:
+		info.State = TaskStateProcessed
 	default:
 		panic(fmt.Sprintf("internal error: unknown state: %d", state))
 	}
@@ -206,6 +208,9 @@ const (
 
 	// TaskStateCompleted indicates that the task is processed successfully and retained until the retention TTL expires.
 	TaskStateCompleted
+
+	// TaskStateProcessed indicates that the task is processed.
+	TaskStateProcessed
 )
 
 func (s TaskState) String() string {

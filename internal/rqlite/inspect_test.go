@@ -135,7 +135,7 @@ func TestCurrentStats(t *testing.T) {
 				Retry:     2,
 				Archived:  0,
 				Completed: 0,
-				Processed: 120,
+				Processed: 122, // the redis test says 120 (but due to the way the test is inited) the doc says processed include failed!
 				Failed:    2,
 				Timestamp: now,
 			},

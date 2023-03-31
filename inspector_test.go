@@ -356,7 +356,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				Paused:    false,
 				Timestamp: now,
 			},
-			// PENDING(GIL): see comment in test TestCurrentStats in rqlite/inspect_test
+			// PENDING(GIL): see comment(s) in test TestCurrentStats in rqlite/inspect_test
 			wantRqlite: &QueueInfo{
 				Queue:     "default",
 				Latency:   15 * time.Second,
@@ -366,7 +366,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				Scheduled: 2,
 				Retry:     2,
 				Archived:  0,
-				Processed: 120,
+				Processed: 122,
 				Failed:    2,
 				Paused:    false,
 				Timestamp: now,

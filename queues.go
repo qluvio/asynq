@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math/rand"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/hibiken/asynq/internal/base"
@@ -56,15 +57,16 @@ type QueuesConfig struct {
 	// the time respectively.
 	//
 	// If a queue has a zero or negative priority value, the queue will be ignored.
-	Queues map[string]int
+	Queues map[string]int `json:"queues"`
 
 	// Priority indicates whether the queue priority should be treated strictly.
 	//
 	// If set to Strict, tasks in the queue with the highest priority is processed first.
 	// The tasks in lower priority queues are processed only when those queues with
 	// higher priorities are empty.
-	Priority Priority
+	Priority Priority `json:"priority"`
 
+	mu          sync.Mutex
 	queueConfig map[string]int
 
 	// orderedQueues is set only in strict-priority mode.
@@ -77,6 +79,8 @@ func (p *QueuesConfig) String() string {
 }
 
 func (p *QueuesConfig) Configure() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.configure()
 	return nil
 }
@@ -85,6 +89,7 @@ func (p *QueuesConfig) configure() *QueuesConfig {
 	if p == nil {
 		return p
 	}
+
 	queues := map[string]int{}
 	for qname, p := range p.Queues {
 		if err := base.ValidateQueueName(qname); err != nil {
@@ -98,6 +103,7 @@ func (p *QueuesConfig) configure() *QueuesConfig {
 		queues = defaultQueues
 	}
 
+	p.orderedQueues = nil
 	p.queueConfig = normalizeQueues(queues)
 	if p.Priority == Strict {
 		p.orderedQueues = sortByPriority(p.queueConfig)
@@ -110,6 +116,8 @@ func (p *QueuesConfig) StrictPriority() bool {
 }
 
 func (p *QueuesConfig) Priorities() map[string]int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.queueConfig
 }
 
@@ -119,6 +127,9 @@ func (p *QueuesConfig) Priorities() map[string]int {
 // If strict-priority is false, then the order of queue names are roughly based on
 // the priority level but randomized in order to avoid starving low priority queues.
 func (p *QueuesConfig) Names() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.queueConfig == nil {
 		p.configure()
 	}
@@ -141,6 +152,14 @@ func (p *QueuesConfig) Names() []string {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	r.Shuffle(len(names), func(i, j int) { names[i], names[j] = names[j], names[i] })
 	return uniq(names, len(p.queueConfig))
+}
+
+func (p *QueuesConfig) UpdateQueues(queues map[string]int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Queues = queues
+	p.configure()
+	return nil
 }
 
 // uniq dedupes elements and returns a slice of unique names of length l.
