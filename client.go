@@ -25,9 +25,10 @@ import (
 //
 // Clients are safe for concurrent use by multiple goroutines.
 type Client struct {
-	logger *log.Logger
-	rdb    base.Broker
-	loc    *time.Location
+	logger *log.Logger    // logger
+	rdb    base.Broker    // connection to the broker
+	shared bool           // shared is true when rdb is shared with server
+	loc    *time.Location // time location
 }
 
 // BatchError is the error returned when doing batch processing
@@ -39,7 +40,26 @@ type BatchError interface {
 
 func NewClientWithBroker(broker base.Broker) *Client {
 	return &Client{
-		rdb: broker,
+		rdb:    broker,
+		shared: true,
+	}
+}
+
+// NewClientFrom returns a Client that shares the broker of the given server
+// The connexion will not be closed when calling *Client.Close.
+func NewClientFrom(server *Server, loc ...*time.Location) *Client {
+	if server == nil {
+		panic("server is nil")
+	}
+	var l *time.Location
+	if len(loc) > 0 {
+		l = loc[0]
+	}
+	return &Client{
+		logger: server.processor.logger,
+		rdb:    server.broker,
+		shared: true,
+		loc:    l,
 	}
 }
 
@@ -382,6 +402,10 @@ var (
 
 // Close closes the connection with redis.
 func (c *Client) Close() error {
+	if c.shared {
+		// when shared, rdb needs to be closed by the actual 'owner'
+		return nil
+	}
 	return c.rdb.Close()
 }
 
