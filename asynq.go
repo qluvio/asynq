@@ -227,6 +227,8 @@ func (s TaskState) String() string {
 		return "archived"
 	case TaskStateCompleted:
 		return "completed"
+	case TaskStateProcessed:
+		return "processed"
 	}
 	panic("asynq: unknown task state")
 }

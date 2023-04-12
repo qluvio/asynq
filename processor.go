@@ -224,6 +224,7 @@ func (p *processor) exec() {
 			case <-ctx.Done():
 				// already canceled (e.g. deadline exceeded).
 				p.handleFailedMessage(ctx, msg, "already done", ctx.Err())
+				cleanup()
 				return
 			default:
 			}

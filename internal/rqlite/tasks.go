@@ -110,6 +110,11 @@ func (conn *Connection) listTasksPaged(queue string, state string, page *base.Pa
 			orderBy = "ndx"
 		}
 		st = st.Append(fmt.Sprintf(" ORDER BY %s LIMIT %d OFFSET %d", orderBy, page.Size, page.Start()))
+	} else {
+		if len(orderBy) == 0 {
+			orderBy = "ndx"
+		}
+		st = st.Append(fmt.Sprintf(" ORDER BY %s", orderBy))
 	}
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
