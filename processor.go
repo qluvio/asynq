@@ -68,7 +68,8 @@ type processor struct {
 	quit chan struct{}
 
 	// abort channel communicates to the in-flight worker goroutines to stop.
-	abort chan struct{}
+	abort    chan struct{}
+	abortNow chan struct{}
 
 	// cancelations is a set of cancel functions for all active tasks.
 	cancelations *base.Cancelations
@@ -121,6 +122,7 @@ func newProcessor(params processorParams) *processor {
 		wait:            make(chan *processorTask, params.concurrency),
 		quit:            make(chan struct{}),
 		abort:           make(chan struct{}),
+		abortNow:        make(chan struct{}),
 		errHandler:      params.errHandler,
 		handler:         HandlerFunc(func(ctx context.Context, t *Task) error { return fmt.Errorf("handler not set") }),
 		shutdownTimeout: params.shutdownTimeout,
@@ -145,17 +147,30 @@ func (p *processor) stop() {
 
 // NOTE: once shutdown, processor cannot be re-started.
 func (p *processor) shutdown() {
+	p.shutdownNow(false)
+}
+func (p *processor) shutdownNow(immediately bool) {
 	p.stop()
 
-	time.AfterFunc(p.shutdownTimeout, func() { close(p.abort) })
+	if immediately {
+		close(p.abortNow)
+		close(p.abort)
+	} else {
+		time.AfterFunc(p.shutdownTimeout, func() { close(p.abort) })
 
-	p.logger.Info("Waiting for all workers to finish...")
-	// block until all workers have released the token
-	for i := 0; i < cap(p.sema); i++ {
-		p.sema <- struct{}{}
+		p.logger.Info("processor: waiting for all workers to finish...")
+		// block until all workers have released the token
+		for i := 0; i < cap(p.sema); i++ {
+			p.sema <- struct{}{}
+		}
 	}
+
 	close(p.wait)
-	p.logger.Info("All workers have finished")
+	if !immediately {
+		p.logger.Info("processor: all workers have finished")
+	} else {
+		p.logger.Info("processor: finished")
+	}
 }
 
 func (p *processor) start(wg *sync.WaitGroup) {
@@ -206,7 +221,7 @@ func (p *processor) exec() {
 			<-p.sema // release token
 			return
 		}
-		p.logger.Debug("dequeued %s -> %v", msg.ID, deadline)
+		p.logger.Debugf("dequeued %s -> %v", msg.ID, deadline)
 
 		p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
 		go func() {
@@ -309,6 +324,11 @@ func (p *processor) fini() {
 	selectFns[abortIdx] = func(_ reflect.Value) {
 		// time is up, push all messages back to queue and quit this goroutine
 		abort := func(t *processorTask) {
+			select {
+			case <-p.abortNow:
+				return
+			default:
+			}
 			p.logger.Warnf("Quitting worker. task id=%s", t.msg.ID)
 			p.requeueAborting(t.msg)
 			t.cleanup()
@@ -326,6 +346,11 @@ func (p *processor) fini() {
 	waitIdx := 1
 	selectChs[waitIdx] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.wait)}
 	selectFns[waitIdx] = func(v reflect.Value) {
+		select {
+		case <-p.abortNow:
+			return
+		default:
+		}
 		// add task to waitlist
 		t := v.Interface().(*processorTask)
 		tasks = append(tasks, t)
@@ -336,36 +361,41 @@ func (p *processor) fini() {
 
 	var quit bool
 	for {
-		// Note: reflect.Select() is limited to 65536 cases at any one time; see https://pkg.go.dev/reflect#Select
-		// As such, this implementation can support a concurrency of up to 32767 (=[65536-2]/2) tasks
-		// PENDING: replace reflect.Select() with more efficient solution; consider https://stackoverflow.com/a/66125252
-		i, v, ok := reflect.Select(selectChs)
-		process := selectFns[i]
-		if i == abortIdx {
-			// need to abort lists, so process in current goroutine
-			process(v)
+		select {
+		case <-p.abortNow:
 			return
-		} else if i == waitIdx {
-			if ok {
-				// need to update lists, so process in current goroutine
+		default:
+			// Note: reflect.Select() is limited to 65536 cases at any one time; see https://pkg.go.dev/reflect#Select
+			// As such, this implementation can support a concurrency of up to 32767 (=[65536-2]/2) tasks
+			// PENDING: replace reflect.Select() with more efficient solution; consider https://stackoverflow.com/a/66125252
+			i, v, ok := reflect.Select(selectChs)
+			process := selectFns[i]
+			if i == abortIdx {
+				// need to abort lists, so process in current goroutine
 				process(v)
+				return
+			} else if i == waitIdx {
+				if ok {
+					// need to update lists, so process in current goroutine
+					process(v)
+				} else {
+					// p.wait closed; need to quit after finishing remaining tasks
+					selectChs[waitIdx].Chan = reflect.Value{} // stop watching p.wait
+					quit = true
+				}
 			} else {
-				// p.wait closed; need to quit after finishing remaining tasks
-				selectChs[waitIdx].Chan = reflect.Value{} // stop watching p.wait
-				quit = true
+				// remove task from lists
+				i = i - (i % 2)                                       // reduce i to first index of pair
+				tasks = append(tasks[:i/2-1], tasks[i/2:]...)         // remove (i/2-1)th item
+				selectChs = append(selectChs[:i], selectChs[i+2:]...) // remove (i)th pair
+				selectFns = append(selectFns[:i], selectFns[i+2:]...) // remove (i)th pair
+				// process in separate goroutine to continue fini() immediately
+				go process(v)
 			}
-		} else {
-			// remove task from lists
-			i = i - (i % 2)                                       // reduce i to first index of pair
-			tasks = append(tasks[:i/2-1], tasks[i/2:]...)         // remove (i/2-1)th item
-			selectChs = append(selectChs[:i], selectChs[i+2:]...) // remove (i)th pair
-			selectFns = append(selectFns[:i], selectFns[i+2:]...) // remove (i)th pair
-			// process in separate goroutine to continue fini() immediately
-			go process(v)
-		}
-		if quit && len(tasks) == 0 {
-			// shutdown
-			return
+			if quit && len(tasks) == 0 {
+				// shutdown
+				return
+			}
 		}
 	}
 }
@@ -478,7 +508,7 @@ func (p *processor) retry(ctx context.Context, msg *base.TaskMessage, e error, i
 	retryAt := time.Now().Add(d)
 	err := p.broker.Retry(msg, retryAt, e.Error(), isFailure)
 	if err != nil {
-		errMsg := fmt.Sprintf("Could not move task id=%s from %q to %q", msg.ID, base.ActiveKey(msg.Queue), base.RetryKey(msg.Queue))
+		errMsg := fmt.Sprintf("Could not move task id=%s from %q to %q: %+v", msg.ID, base.ActiveKey(msg.Queue), base.RetryKey(msg.Queue), err)
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			panic("asynq: internal error: missing deadline in context")
@@ -497,7 +527,7 @@ func (p *processor) retry(ctx context.Context, msg *base.TaskMessage, e error, i
 func (p *processor) archive(ctx context.Context, msg *base.TaskMessage, e error) {
 	err := p.broker.Archive(msg, e.Error())
 	if err != nil {
-		errMsg := fmt.Sprintf("Could not move task id=%s from %q to %q", msg.ID, base.ActiveKey(msg.Queue), base.ArchivedKey(msg.Queue))
+		errMsg := fmt.Sprintf("Could not move task id=%s from %q to %q: %+v", msg.ID, base.ActiveKey(msg.Queue), base.ArchivedKey(msg.Queue), err)
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			panic("asynq: internal error: missing deadline in context")

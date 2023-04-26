@@ -26,22 +26,36 @@ type forwarder struct {
 
 	// poll interval on average
 	avgInterval time.Duration
+
+	// health provider (the healthchecker)
+	healthStarted chan struct{}
+	healthy       chan struct{}
 }
 
 type forwarderParams struct {
-	logger   *log.Logger
-	broker   base.Broker
-	queues   Queues
-	interval time.Duration
+	logger      *log.Logger
+	broker      base.Broker
+	queues      Queues
+	interval    time.Duration
+	healthCheck healthChecker
 }
 
 func newForwarder(params forwarderParams) *forwarder {
+	var health chan struct{}
+	var healthy chan struct{}
+	if params.healthCheck != nil {
+		healthy = make(chan struct{})
+		params.healthCheck.subscribeHealth(healthy)
+		health = params.healthCheck.startedChan()
+	}
 	return &forwarder{
-		logger:      params.logger,
-		broker:      params.broker,
-		done:        make(chan struct{}),
-		queues:      params.queues,
-		avgInterval: params.interval,
+		logger:        params.logger,
+		broker:        params.broker,
+		done:          make(chan struct{}),
+		queues:        params.queues,
+		avgInterval:   params.interval,
+		healthStarted: health,
+		healthy:       healthy,
 	}
 }
 
@@ -56,6 +70,18 @@ func (f *forwarder) start(wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+
+		// perform an initial run
+		if !onceHealthy(
+			f.healthStarted,
+			f.healthy,
+			f.done,
+			"Forwarder",
+			f.logger,
+			f.exec) {
+			return
+		}
+
 		for {
 			select {
 			case <-f.done:

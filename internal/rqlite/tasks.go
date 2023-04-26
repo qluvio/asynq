@@ -908,12 +908,28 @@ func (conn *Connection) requeueTask(now time.Time, serverID string, msg *base.Ta
 	var st *sqlite3.Statement
 	if aborted {
 		// server is stopping: just push back to pending
-		st = Statement(
-			"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=NULL,"+
-				" pndx=(SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1 "+ // changed pndx=
-				" WHERE queue_name=? AND state='active' AND task_uuid=?",
-			msg.Queue,
-			msg.ID)
+		if len(serverID) > 0 {
+			st = Statement(
+				"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=NULL, pending_since=?, "+
+					" pndx=(SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, "+ // changed pndx=
+					" sid=(SELECT sid FROM "+conn.table(TasksTable)+" WHERE task_uuid=? AND sid=? AND affinity_timeout > 0)"+
+					" WHERE queue_name=? AND state='active' AND task_uuid=?",
+				now.UnixNano(),
+				msg.ID,
+				serverID,
+				msg.Queue,
+				msg.ID)
+		} else {
+			st = Statement(
+				"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=NULL, pending_since=?, "+
+					" pndx=(SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, "+ // changed pndx=
+					" sid=(SELECT sid FROM "+conn.table(TasksTable)+" WHERE task_uuid=? AND affinity_timeout > 0)"+
+					" WHERE queue_name=? AND state='active' AND task_uuid=?",
+				now.UnixNano(),
+				msg.ID,
+				msg.Queue,
+				msg.ID)
+		}
 	} else {
 		scheduledAt := int64(0)
 		state := pending
@@ -921,7 +937,6 @@ func (conn *Connection) requeueTask(now time.Time, serverID string, msg *base.Ta
 		// - if the server id is provided, update 'sid'
 		// - if the task has a unique key, move the unique key deadline
 		uniqueKeyExpireAt := now.Add(time.Second * time.Duration(msg.UniqueKeyTTL))
-
 		scheduledAtReq := ""
 		scheduledAtPos := 0
 		if msg.ReprocessAfter > 0 {
@@ -935,28 +950,32 @@ func (conn *Connection) requeueTask(now time.Time, serverID string, msg *base.Ta
 
 		if len(serverID) > 0 {
 			if len(msg.UniqueKey) > 0 {
-				scheduledAtPos = 4
+				scheduledAtPos = 5
 				st = Statement(
-					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=NULL, sid=?, done_at=?, unique_key_deadline=?, "+scheduledAtReq+
+					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=NULL,"+
+						" sid=(SELECT sid FROM "+conn.table(TasksTable)+" WHERE task_uuid=? AND sid=? AND affinity_timeout > 0),"+
+						" done_at=?, unique_key_deadline=?, "+scheduledAtReq+
 						" pndx=(SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1 "+
 						" WHERE queue_name=? AND state='active' AND task_uuid=?",
 					state,
+					msg.ID,
 					serverID,
 					now.Unix(),
 					uniqueKeyExpireAt.Unix(),
-
 					msg.Queue,
 					msg.ID)
 			} else {
-				scheduledAtPos = 3
+				scheduledAtPos = 4
 				st = Statement(
-					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=NULL, sid=?, done_at=?,"+scheduledAtReq+
+					"UPDATE "+conn.table(TasksTable)+" SET state=?, deadline=NULL,"+
+						" sid=(SELECT sid FROM "+conn.table(TasksTable)+" WHERE task_uuid=? AND sid=? AND affinity_timeout > 0),"+
+						" done_at=?,"+scheduledAtReq+
 						" pndx=(SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1 "+
 						" WHERE queue_name=? AND state='active' AND task_uuid=?",
 					state,
+					msg.ID,
 					serverID,
 					now.Unix(),
-
 					msg.Queue,
 					msg.ID)
 			}
@@ -970,7 +989,6 @@ func (conn *Connection) requeueTask(now time.Time, serverID string, msg *base.Ta
 					state,
 					now.Unix(),
 					uniqueKeyExpireAt.Unix(),
-
 					msg.Queue,
 					msg.ID)
 			} else {
@@ -981,7 +999,6 @@ func (conn *Connection) requeueTask(now time.Time, serverID string, msg *base.Ta
 						" WHERE queue_name=? AND state='active' AND task_uuid=?",
 					state,
 					now.Unix(),
-
 					msg.Queue,
 					msg.ID)
 			}
@@ -1217,7 +1234,7 @@ func (conn *Connection) retryTask(now time.Time, msg *base.TaskMessage, processA
 
 	st := Statement(
 		"UPDATE "+conn.table(TasksTable)+" SET task_msg=?, state='retry', "+
-			" sid=NULL, done_at=?, retry_at=?, failed=?, cleanup_at=? "+
+			" sid=NULL, deadline=NULL, done_at=?, retry_at=?, failed=?, cleanup_at=? "+
 			" WHERE queue_name=? AND state='active' AND task_uuid=?",
 		encoded,
 		now.Unix(),

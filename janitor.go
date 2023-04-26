@@ -27,22 +27,36 @@ type janitor struct {
 
 	// average interval between checks.
 	avgInterval time.Duration
+
+	// health provider (the healthchecker)
+	healthStarted chan struct{}
+	healthy       chan struct{}
 }
 
 type janitorParams struct {
-	logger   *log.Logger
-	broker   base.Broker
-	queues   Queues
-	interval time.Duration
+	logger      *log.Logger
+	broker      base.Broker
+	queues      Queues
+	interval    time.Duration
+	healthCheck healthChecker
 }
 
 func newJanitor(params janitorParams) *janitor {
+	var health chan struct{}
+	var healthy chan struct{}
+	if params.healthCheck != nil {
+		healthy = make(chan struct{})
+		params.healthCheck.subscribeHealth(healthy)
+		health = params.healthCheck.startedChan()
+	}
 	return &janitor{
-		logger:      params.logger,
-		broker:      params.broker,
-		done:        make(chan struct{}),
-		queues:      params.queues,
-		avgInterval: params.interval,
+		logger:        params.logger,
+		broker:        params.broker,
+		done:          make(chan struct{}),
+		queues:        params.queues,
+		avgInterval:   params.interval,
+		healthStarted: health,
+		healthy:       healthy,
 	}
 }
 
@@ -59,6 +73,18 @@ func (j *janitor) start(wg *sync.WaitGroup) {
 	go func() {
 		defer wg.Done()
 		for {
+
+			// perform an initial run
+			if !onceHealthy(
+				j.healthStarted,
+				j.healthy,
+				j.done,
+				"Janitor",
+				j.logger,
+				j.exec) {
+				return
+			}
+
 			select {
 			case <-j.done:
 				j.logger.Debug("Janitor done")

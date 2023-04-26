@@ -217,7 +217,7 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 	ctx := context.Background()
 
 	for _, tc := range tests {
-		//fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
+		// fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
 		FlushDB(t, r.conn)
 
 		// initial dequeue
@@ -234,10 +234,10 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 
 		err = r.Requeue("", tc.msg, false)
 		require.NoError(t, err)
-		_, _, err = r.Dequeue("bla", tc.msg.Queue)
+		_, _, err = r.Dequeue(serverID, tc.msg.Queue)
 		require.NoError(t, err)
 
-		// re-queueing with a server id: can be dequeued only by this server
+		// re-queueing with the same server id: can be dequeued only by this server
 		err = r.Requeue(serverID, tc.msg, false)
 		require.NoError(t, err)
 		// not available for other servers
@@ -306,13 +306,13 @@ func TestEnqueueWithServerAffinityAfterError(t *testing.T) {
 	ctx := context.Background()
 
 	for _, tc := range tests {
-		//fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
+		// fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
 		FlushDB(t, r.conn)
 
 		// initial dequeue
 		err := r.EnqueueUnique(ctx, tc.msg, ttl)
 		require.NoError(t, err)
-		_, _, err = r.Dequeue("", tc.msg.Queue)
+		_, _, err = r.Dequeue(serverID, tc.msg.Queue)
 		require.NoError(t, err)
 
 		// re-queueing with a server id: can be dequeued only by this server
@@ -399,7 +399,7 @@ func TestRequeueScheduled(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		//fmt.Println("TestRequeueScheduled - test", i, "now", now.Unix())
+		// fmt.Println("TestRequeueScheduled - test", i, "now", now.Unix())
 		FlushDB(t, r.conn)
 
 		// initial enqueue/dequeue
@@ -410,7 +410,7 @@ func TestRequeueScheduled(t *testing.T) {
 			err = r.Enqueue(context.Background(), tc.msg)
 		}
 		require.NoError(t, err)
-		_, _, err = r.Dequeue("", tc.msg.Queue)
+		_, _, err = r.Dequeue(tc.serverID, tc.msg.Queue)
 		require.NoError(t, err)
 
 		// re-queue

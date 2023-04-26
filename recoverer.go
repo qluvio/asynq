@@ -30,6 +30,10 @@ type recoverer struct {
 
 	// expired task
 	expiration time.Duration
+
+	// health provider (the healthchecker)
+	healthStarted chan struct{}
+	healthy       chan struct{}
 }
 
 type recovererParams struct {
@@ -40,9 +44,17 @@ type recovererParams struct {
 	expiration     time.Duration
 	retryDelayFunc RetryDelayFunc
 	isFailureFunc  func(error) bool
+	healthCheck    healthChecker
 }
 
 func newRecoverer(params recovererParams) *recoverer {
+	var health chan struct{}
+	var healthy chan struct{}
+	if params.healthCheck != nil {
+		healthy = make(chan struct{})
+		params.healthCheck.subscribeHealth(healthy)
+		health = params.healthCheck.startedChan()
+	}
 	return &recoverer{
 		logger:         params.logger,
 		broker:         params.broker,
@@ -52,6 +64,8 @@ func newRecoverer(params recovererParams) *recoverer {
 		expiration:     params.expiration,
 		retryDelayFunc: params.retryDelayFunc,
 		isFailureFunc:  params.isFailureFunc,
+		healthStarted:  health,
+		healthy:        healthy,
 	}
 }
 
@@ -65,7 +79,18 @@ func (r *recoverer) start(wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r.recover()
+
+		// perform an initial run
+		if !onceHealthy(
+			r.healthStarted,
+			r.healthy,
+			r.done,
+			"Recoverer",
+			r.logger,
+			r.recover) {
+			return
+		}
+
 		timer := time.NewTimer(r.interval)
 		for {
 			select {
@@ -86,9 +111,10 @@ func (r *recoverer) recover() {
 	deadline := time.Now().Add(-r.expiration)
 	msgs, err := r.broker.ListDeadlineExceeded(deadline, r.queues.Names()...)
 	if err != nil {
-		r.logger.Warn("recoverer: could not list deadline exceeded tasks")
+		r.logger.Warnf("recoverer: could not list deadline-exceeded tasks: %+v", err)
 		return
 	}
+	r.logger.Debugf("recoverer: deadline-exceeded tasks count: %d", len(msgs))
 	for _, msg := range msgs {
 		if msg.Retried >= msg.Retry {
 			r.archive(msg, context.DeadlineExceeded)
