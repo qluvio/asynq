@@ -348,7 +348,7 @@ func composeOptions(opts ...Option) (option, error) {
 			}
 			res.taskID = id
 		case timeoutOption:
-			res.timeout = time.Duration(opt)
+			res.timeout = time.Duration(opt).Truncate(time.Second)
 		case deadlineOption:
 			res.deadline = time.Time(opt)
 		case uniqueOption:

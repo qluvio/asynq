@@ -488,6 +488,10 @@ return data
 
 // listMessages returns a list of TaskInfo in Redis list with the given key.
 func (r *RDB) listMessages(qname string, state base.TaskState, pgn base.Pagination) ([]*base.TaskInfo, error) {
+	if pgn.StartAfterUuid != "" {
+		return nil, errors.E(errors.Internal, "reason", "option 'start_after' not supported with redis")
+	}
+
 	var key string
 	switch state {
 	case base.TaskStateActive:
@@ -637,6 +641,10 @@ return data
 // listZSetEntries returns a list of message and score pairs in Redis sorted-set
 // with the given key.
 func (r *RDB) listZSetEntries(qname string, state base.TaskState, pgn base.Pagination) ([]*base.TaskInfo, error) {
+	if pgn.StartAfterUuid != "" {
+		return nil, errors.E(errors.Internal, "reason", "option 'start_after' not supported with redis")
+	}
+
 	var key string
 	switch state {
 	case base.TaskStateScheduled:

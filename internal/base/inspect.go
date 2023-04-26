@@ -137,6 +137,9 @@ type Pagination struct {
 
 	// Page number starting from zero.
 	Page int
+
+	// Task ID after which to start listing
+	StartAfterUuid string
 }
 
 func (p Pagination) Start() int64 {

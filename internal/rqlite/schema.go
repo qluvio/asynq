@@ -145,6 +145,9 @@ func (conn *Connection) CreateTablesIfNotExist() (bool, error) {
 			return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
 		}
 	}
+	if len(qrs) == 0 {
+		return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, nil, []*sqlite3.Statement{get}))
+	}
 	if qrs[0].NumRows() > 0 {
 		return false, nil
 	}

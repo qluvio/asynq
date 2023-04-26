@@ -106,10 +106,17 @@ func (conn *Connection) listTasksPaged(queue string, state string, page *base.Pa
 		queue,
 		state)
 	if page != nil {
-		if len(orderBy) == 0 {
+		if len(orderBy) == 0 || page.StartAfterUuid != "" {
+			// if option startAfter is used we order by insertion order
 			orderBy = "ndx"
 		}
+		if page.StartAfterUuid != "" {
+			st = st.Append("AND ndx > (SELECT ndx "+
+				" FROM "+conn.table(TasksTable)+
+				" WHERE task_uuid = ?)", page.StartAfterUuid)
+		}
 		st = st.Append(fmt.Sprintf(" ORDER BY %s LIMIT %d OFFSET %d", orderBy, page.Size, page.Start()))
+
 	} else {
 		if len(orderBy) == 0 {
 			orderBy = "ndx"
@@ -632,6 +639,10 @@ func (conn *Connection) setTaskActive(ndx int64, serverID string, serverAffinity
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
 		return false, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
+	}
+	if len(wrs) == 0 {
+		// no row update
+		return false, nil
 	}
 	// if the row was changed (by another rqlite) no row is affected
 	return wrs[0].RowsAffected == 1, nil

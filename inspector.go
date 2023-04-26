@@ -221,13 +221,15 @@ type ListOption interface{}
 
 // Internal list option representations.
 type (
-	pageSizeOpt int
-	pageNumOpt  int
+	pageSizeOpt       int
+	pageNumOpt        int
+	startAfterUuidOpt string
 )
 
 type listOption struct {
-	pageSize int
-	pageNum  int
+	pageSize       int
+	pageNum        int
+	startAfterUuid string
 }
 
 const (
@@ -249,6 +251,8 @@ func composeListOptions(opts ...ListOption) listOption {
 			res.pageSize = int(opt)
 		case pageNumOpt:
 			res.pageNum = int(opt)
+		case startAfterUuidOpt:
+			res.startAfterUuid = string(opt)
 		default:
 			// ignore unexpected option
 		}
@@ -271,10 +275,15 @@ func PageSize(n int) ListOption {
 //
 // Negative page number is treated as one.
 func Page(n int) ListOption {
-	if n < 0 {
+	if n <= 0 {
 		n = 1
 	}
 	return pageNumOpt(n)
+}
+
+// StartAfterUuid returns an option to specify the ID of the task after which to start listing.
+func StartAfterUuid(id string) ListOption {
+	return startAfterUuidOpt(id)
 }
 
 // ListPendingTasks retrieves pending tasks from the specified queue.
@@ -285,7 +294,7 @@ func (i *Inspector) ListPendingTasks(qname string, opts ...ListOption) ([]*TaskI
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
+	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1, StartAfterUuid: opt.startAfterUuid}
 	infos, err := i.rdb.ListPending(qname, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):

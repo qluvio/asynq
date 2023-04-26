@@ -63,6 +63,17 @@ func (hc *healthchecker) start(wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+
+		// initial health check
+		select {
+		case <-hc.done:
+			hc.logger.Debug("Healthchecker done!")
+			return
+		default:
+			err := hc.broker.Ping()
+			hc.healthcheckFunc(err)
+		}
+
 		timer := time.NewTimer(hc.interval)
 		for {
 			select {
