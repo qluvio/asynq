@@ -454,7 +454,7 @@ func (conn *Connection) enqueueMessages(ctx context.Context, now time.Time, msgs
 				err = errors.E(op, errors.AlreadyExists, errors.ErrDuplicateTask)
 			}
 		} else {
-			err = expectOneRowUpdated(op, wrs[ndx], stmts[ndx], true)
+			err = expectOneRowUpdated(op, wrs, ndx, stmts[ndx], true)
 		}
 		if err != nil {
 			msgs[i].Err = err
@@ -752,7 +752,7 @@ func (conn *Connection) setTaskDone(now time.Time, serverID string, msg *base.Ta
 	}
 	// with uniqueKey the unique lock may have been forced to put the task
 	// again in state 'pending' - see enqueueUniqueMessages
-	err = expectOneRowUpdated(op, wrs[0], st, len(msg.UniqueKey) == 0)
+	err = expectOneRowUpdated(op, wrs, 0, st, len(msg.UniqueKey) == 0)
 	if err != nil {
 		return err
 	}
@@ -833,7 +833,7 @@ func (conn *Connection) setTaskCompleted(now time.Time, serverID string, msg *ba
 	}
 	// with uniqueKey the unique lock may have been forced to put the task
 	// again in state 'pending' - see enqueueUniqueMessages
-	err = expectOneRowUpdated(op, wrs[0], st, len(msg.UniqueKey) == 0)
+	err = expectOneRowUpdated(op, wrs, 0, st, len(msg.UniqueKey) == 0)
 	if err != nil {
 		return err
 	}
@@ -887,7 +887,7 @@ func (conn *Connection) writeTaskResult(qname, taskID string, data []byte, activ
 		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 
-	err = expectOneRowUpdated(op, wrs[0], st, true)
+	err = expectOneRowUpdated(op, wrs, 0, st, true)
 	if err != nil {
 		return 0, err
 	}
@@ -1019,7 +1019,7 @@ func (conn *Connection) requeueTask(now time.Time, serverID string, msg *base.Ta
 
 	// with uniqueKey the unique lock may have been forced to put the task
 	// again in state 'pending' - see enqueueUniqueMessages
-	err = expectOneRowUpdated(op, wrs[0], st, len(msg.UniqueKey) == 0)
+	err = expectOneRowUpdated(op, wrs, 0, st, len(msg.UniqueKey) == 0)
 	if err != nil {
 		return err
 	}
@@ -1091,7 +1091,7 @@ func (conn *Connection) scheduleTasks(ctx context.Context, msgs ...*base.Message
 				err = errors.E(op, errors.AlreadyExists, errors.ErrDuplicateTask)
 			}
 		} else {
-			err = expectOneRowUpdated(op, wrs[ndx], stmts[ndx], true)
+			err = expectOneRowUpdated(op, wrs, ndx, stmts[ndx], true)
 		}
 		if err != nil {
 			msgs[i].Err = err
@@ -1253,7 +1253,7 @@ func (conn *Connection) retryTask(now time.Time, msg *base.TaskMessage, processA
 
 	// with uniqueKey the unique lock may have been forced to put the task
 	// again in state 'pending' - see enqueueUniqueMessages
-	err = expectOneRowUpdated(op, wrs[0], st, len(msg.UniqueKey) == 0)
+	err = expectOneRowUpdated(op, wrs, 0, st, len(msg.UniqueKey) == 0)
 	if err != nil {
 		return err
 	}
@@ -1304,7 +1304,7 @@ func (conn *Connection) archiveTask(now time.Time, msg *base.TaskMessage, errMsg
 
 	// with uniqueKey the unique lock may have been forced to put the task
 	// again in state 'pending' - see enqueueUniqueMessages
-	err = expectOneRowUpdated(op, wrs[1], stmts[1], len(msg.UniqueKey) == 0)
+	err = expectOneRowUpdated(op, wrs, 1, stmts[1], len(msg.UniqueKey) == 0)
 	if err != nil {
 		return err
 	}
