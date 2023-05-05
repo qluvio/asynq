@@ -232,6 +232,10 @@ type listOption struct {
 	startAfterUuid string
 }
 
+func (opt listOption) pagination() base.Pagination {
+	return base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1, StartAfterUuid: opt.startAfterUuid}
+}
+
 const (
 	// Page size used by default in list operation.
 	defaultPageSize = 30
@@ -294,8 +298,7 @@ func (i *Inspector) ListPendingTasks(qname string, opts ...ListOption) ([]*TaskI
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1, StartAfterUuid: opt.startAfterUuid}
-	infos, err := i.rdb.ListPending(qname, pgn)
+	infos, err := i.rdb.ListPending(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -322,8 +325,7 @@ func (i *Inspector) ListActiveTasks(qname string, opts ...ListOption) ([]*TaskIn
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListActive(qname, pgn)
+	infos, err := i.rdb.ListActive(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -351,8 +353,7 @@ func (i *Inspector) ListScheduledTasks(qname string, opts ...ListOption) ([]*Tas
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListScheduled(qname, pgn)
+	infos, err := i.rdb.ListScheduled(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -380,8 +381,7 @@ func (i *Inspector) ListRetryTasks(qname string, opts ...ListOption) ([]*TaskInf
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListRetry(qname, pgn)
+	infos, err := i.rdb.ListRetry(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -409,8 +409,7 @@ func (i *Inspector) ListArchivedTasks(qname string, opts ...ListOption) ([]*Task
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListArchived(qname, pgn)
+	infos, err := i.rdb.ListArchived(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -438,8 +437,7 @@ func (i *Inspector) ListCompletedTasks(qname string, opts ...ListOption) ([]*Tas
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListCompleted(qname, pgn)
+	infos, err := i.rdb.ListCompleted(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -911,8 +909,7 @@ type SchedulerEnqueueEvent struct {
 // By default, it retrieves the first 30 tasks.
 func (i *Inspector) ListSchedulerEnqueueEvents(entryID string, opts ...ListOption) ([]*SchedulerEnqueueEvent, error) {
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	data, err := i.rdb.ListSchedulerEnqueueEvents(entryID, pgn)
+	data, err := i.rdb.ListSchedulerEnqueueEvents(entryID, opt.pagination())
 	if err != nil {
 		return nil, err
 	}
