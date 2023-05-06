@@ -5,6 +5,7 @@
 package asynq
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -3292,6 +3293,82 @@ func TestInspectorSchedulerEntries(t *testing.T) {
 			t.Errorf("SchedulerEntries() = %v, want %v; (-want,+got)\n%s",
 				got, tc.want, diff)
 		}
+	}
+}
+
+func TestInspectorCancelProcessing(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+	m1 := h.NewTaskMessage("task1", nil)
+	m2 := h.NewTaskMessage("task2", nil)
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+	inspector := NewInspector(getClientConnOpt(t))
+	defer func() { _ = inspector.Close() }()
+
+	tests := []struct {
+		pending map[string][]*base.TaskMessage
+		id      string
+		want    []*TaskInfo
+	}{
+		{
+			pending: map[string][]*base.TaskMessage{
+				"default": {m1, m2},
+			},
+			id: m1.ID,
+			want: []*TaskInfo{
+				newTaskInfo(m2, base.TaskStateActive, time.Time{}, nil),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		func() {
+			ctx.FlushDB()
+			ctx.SeedAllPendingQueues(tc.pending)
+
+			server := newServer(client.rdb, Config{
+				Concurrency: 10,
+				RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+					return time.Second
+				},
+				LogLevel: testLogLevel,
+			})
+			defer server.Shutdown()
+
+			done := make(chan bool)
+			defer func() { done <- true }()
+			handler := func(ctx context.Context, _ *Task) error {
+				select {
+				case <-ctx.Done():
+				case <-done:
+					done <- true
+				}
+				return nil
+			}
+			_ = server.Start(HandlerFunc(handler))
+			defer server.Stop()
+
+			err := inspector.CancelProcessing(tc.id)
+			if err != nil {
+				t.Errorf("CancelProcessing(%q) returned error: %v", tc.id, err)
+				return
+			}
+
+			time.Sleep(time.Second * 10)
+
+			got, err := inspector.ListActiveTasks("default")
+			if err != nil {
+				t.Errorf("ListActiveTasks() returned error: %v", err)
+				return
+			}
+			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(TaskInfo{})); diff != "" {
+				t.Errorf("ListActiveTasks() = %v, want %v; (-want,+got)\n%s",
+					got, tc.want, diff)
+				return
+			}
+		}()
 	}
 }
 
