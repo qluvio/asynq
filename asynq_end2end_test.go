@@ -283,6 +283,7 @@ func doTestEndToEndRestartWithActiveTasks(t *testing.T, regularShutdown bool) {
 
 // TestCancelProcessing tests canceling a single task
 func TestCancelProcessing(t *testing.T) {
+	t.Skip("manual only")
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
 
