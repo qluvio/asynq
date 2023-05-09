@@ -3298,16 +3298,17 @@ func TestInspectorSchedulerEntries(t *testing.T) {
 }
 
 func TestInspectorCancelProcessing(t *testing.T) {
-	lfa := time.Now()
+	lfa := time.Now().Truncate(time.Second)
 
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
 
-	at1 := newTaskInfo(m1, base.TaskStateArchived, time.Time{}, nil)
-	at1.LastErr = context.Canceled.Error()
-	at1.LastFailedAt = lfa
+	am1 := &base.TaskMessage{}
+	*am1 = *m1
+	am1.ErrorMsg = context.Canceled.Error()
+	am1.LastFailedAt = lfa.Unix()
 
 	client := NewClient(getClientConnOpt(t))
 	defer func() { _ = client.Close() }()
@@ -3329,7 +3330,7 @@ func TestInspectorCancelProcessing(t *testing.T) {
 				newTaskInfo(m2, base.TaskStateActive, time.Time{}, nil),
 			},
 			want2: []*TaskInfo{
-				at1,
+				newTaskInfo(am1, base.TaskStateArchived, time.Time{}, nil),
 			},
 		},
 	}
