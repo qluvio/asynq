@@ -265,6 +265,9 @@ func doTestEndToEndRestartWithActiveTasks(t *testing.T, regularShutdown bool) {
 		require.Equal(t, int64(count), counter)
 		d := time.Now().Sub(t0)
 		fmt.Println("all tasks done after", d.String())
+
+		// wait a bit before listing again (ci build slow?)
+		time.Sleep(taskTimeout)
 		tis, err := srv.broker.Inspector().ListActive(base.DefaultQueueName, base.Pagination{Size: 100})
 
 		srv.Stop()
