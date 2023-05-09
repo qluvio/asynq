@@ -302,6 +302,19 @@ func TestCancelProcessing(t *testing.T) {
 	require.NoError(t, err)
 
 	var doneErr error
+	doneErrMu := sync.Mutex{}
+
+	setDoneErr := func(err error) {
+		doneErrMu.Lock()
+		defer doneErrMu.Unlock()
+		doneErr = err
+	}
+	getDoneErr := func() error {
+		doneErrMu.Lock()
+		defer doneErrMu.Unlock()
+		return doneErr
+	}
+
 	closeCh := make(chan struct{})
 	doneCh := make(chan struct{})
 	handler := func(ctx context.Context, task *Task) error {
@@ -316,7 +329,7 @@ func TestCancelProcessing(t *testing.T) {
 			}
 		}
 		close(doneCh)
-		doneErr = err
+		setDoneErr(err)
 		return err
 	}
 
@@ -335,7 +348,7 @@ func TestCancelProcessing(t *testing.T) {
 	case <-doneCh:
 	}
 
-	require.Equal(t, context.Canceled, doneErr)
+	require.Equal(t, context.Canceled, getDoneErr())
 	time.Sleep(time.Millisecond * 200) // wait a couple of heartbeat interval
 	_, ok = srv.processor.cancelations.Get(task.ID)
 	require.False(t, ok)
