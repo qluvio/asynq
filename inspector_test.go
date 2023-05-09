@@ -3333,7 +3333,8 @@ func TestInspectorCancelProcessing(t *testing.T) {
 				RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
 					return time.Second
 				},
-				LogLevel: testLogLevel,
+				LogLevel:            testLogLevel,
+				HeartBeaterInterval: time.Millisecond * 5,
 			})
 			defer server.Shutdown()
 
@@ -3350,13 +3351,15 @@ func TestInspectorCancelProcessing(t *testing.T) {
 			_ = server.Start(HandlerFunc(handler))
 			defer server.Stop()
 
+			time.Sleep(time.Second)
+
 			err := inspector.CancelProcessing(tc.id)
 			if err != nil {
 				t.Errorf("CancelProcessing(%q) returned error: %v", tc.id, err)
 				return
 			}
 
-			time.Sleep(time.Second * 10)
+			time.Sleep(time.Second)
 
 			got, err := inspector.ListActiveTasks("default")
 			if err != nil {
