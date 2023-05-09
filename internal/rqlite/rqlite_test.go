@@ -1158,13 +1158,14 @@ func TestScheduleUnique(t *testing.T) {
 		Queue:     base.DefaultQueueName,
 		UniqueKey: base.UniqueKey(base.DefaultQueueName, "email", h.JSON(map[string]interface{}{"user_id": 123})),
 	}
+	now := time.Now()
 
 	tests := []struct {
 		msg       *base.TaskMessage
 		processAt time.Time
 		ttl       time.Duration // uniqueness lock ttl
 	}{
-		{&m1, time.Now().UTC().Add(15 * time.Minute), time.Minute},
+		{&m1, now.UTC().Add(15 * time.Minute), time.Minute},
 	}
 	ctx := context.Background()
 
@@ -1172,7 +1173,7 @@ func TestScheduleUnique(t *testing.T) {
 		FlushDB(t, r.conn)
 
 		desc := "(*RQLite).ScheduleUnique(msg, processAt, ttl)"
-		expectUniqueKeyDeadline := time.Now().UTC().Add(tc.ttl).Unix()
+		expectUniqueKeyDeadline := now.UTC().Add(tc.ttl).Unix()
 		err := r.ScheduleUnique(ctx, tc.msg, tc.processAt, tc.ttl)
 		if err != nil {
 			t.Errorf("Frist task: %s = %v, want nil", desc, err)

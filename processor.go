@@ -256,7 +256,10 @@ func (p *processor) exec() {
 			}()
 			// finish task processing in p.fini() goroutine to allow this goroutine to end
 			t := &processorTask{msg: msg, ctx: ctx, cleanup: cleanup, resCh: resCh}
-			p.wait <- t
+			select {
+			case p.wait <- t:
+			default:
+			}
 		}()
 	}
 }
@@ -293,8 +296,11 @@ func (p *processor) fini() {
 				case err := <-t.resCh:
 					resErr = err
 				default:
+					select {
 					// wait again for async task to complete; do not cleanup
-					p.wait <- t
+					case p.wait <- t:
+					default:
+					}
 					return
 				}
 			}

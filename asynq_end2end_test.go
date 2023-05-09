@@ -277,3 +277,73 @@ func doTestEndToEndRestartWithActiveTasks(t *testing.T, regularShutdown bool) {
 		require.Less(t, d, time.Second*20)
 	}
 }
+
+// TestCancelProcessing tests canceling a single task
+func TestCancelProcessing(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	ctx.FlushDB()
+
+	client := NewClient(getClientConnOpt(t))
+	srv := newServer(client.rdb, Config{
+		Concurrency: 10,
+		RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+			return time.Second
+		},
+		HeartBeaterInterval: time.Millisecond * 10,
+		LogLevel:            testLogLevel,
+	})
+	defer srv.Shutdown()
+	inspect := newInspector(client.rdb)
+
+	// Create a single task
+	task, err := client.Enqueue(makeTask(1000))
+	require.NoError(t, err)
+
+	var doneErr error
+	closeCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	handler := func(ctx context.Context, task *Task) error {
+		close(closeCh)
+		var err error
+	out:
+		for {
+			select {
+			case <-ctx.Done():
+				err = ctx.Err()
+				break out
+			}
+		}
+		close(doneCh)
+		doneErr = err
+		return err
+	}
+
+	_ = srv.Start(HandlerFunc(handler))
+	select {
+	case <-closeCh:
+	}
+
+	_, ok := srv.processor.cancelations.Get(task.ID)
+	require.True(t, ok)
+
+	err = inspect.CancelProcessing(task.ID)
+	require.NoError(t, err)
+
+	select {
+	case <-doneCh:
+	}
+
+	require.Equal(t, context.Canceled, doneErr)
+	time.Sleep(time.Millisecond * 200) // wait a couple of heartbeat interval
+	_, ok = srv.processor.cancelations.Get(task.ID)
+	require.False(t, ok)
+
+	ti, err := inspect.GetTaskInfo(base.DefaultQueueName, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, TaskStateRetry, ti.State)
+
+	srv.Stop()
+	_ = client.Close()
+}
