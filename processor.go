@@ -12,7 +12,6 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/hibiken/asynq/internal/base"
@@ -64,7 +63,8 @@ type processor struct {
 
 	// wait channel used to feed tasks to fini()
 	wait       chan *processorTask
-	waitClosed atomic.Bool
+	waitClosed bool
+	waitMu     sync.Mutex
 
 	// quit channel is closed when the shutdown of the "processor" goroutine starts.
 	quit chan struct{}
@@ -167,8 +167,10 @@ func (p *processor) shutdownNow(immediately bool) {
 		}
 	}
 
-	p.waitClosed.Store(true)
+	p.waitMu.Lock()
 	close(p.wait)
+	p.waitClosed = true
+	p.waitMu.Unlock()
 	if !immediately {
 		p.logger.Info("processor: all workers have finished")
 	} else {
@@ -259,9 +261,11 @@ func (p *processor) exec() {
 			}()
 			// finish task processing in p.fini() goroutine to allow this goroutine to end
 			t := &processorTask{msg: msg, ctx: ctx, cleanup: cleanup, resCh: resCh}
-			if !p.waitClosed.Load() {
+			p.waitMu.Lock()
+			if !p.waitClosed {
 				p.wait <- t
 			}
+			p.waitMu.Unlock()
 		}()
 	}
 }
@@ -298,10 +302,12 @@ func (p *processor) fini() {
 				case err := <-t.resCh:
 					resErr = err
 				default:
-					if !p.waitClosed.Load() {
+					p.waitMu.Lock()
+					if !p.waitClosed {
 						// wait again for async task to complete; do not cleanup
 						p.wait <- t
 					}
+					p.waitMu.Unlock()
 					return
 				}
 			}
