@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -3338,9 +3339,11 @@ func TestInspectorCancelProcessing(t *testing.T) {
 			})
 			defer server.Shutdown()
 
-			done := make(chan bool)
-			defer func() { done <- true }()
+			done := make(chan bool, 1)
+			var wg sync.WaitGroup
 			handler := func(ctx context.Context, _ *Task) error {
+				wg.Add(1)
+				defer wg.Done()
 				select {
 				case <-ctx.Done():
 				case <-done:
@@ -3371,6 +3374,9 @@ func TestInspectorCancelProcessing(t *testing.T) {
 					got, tc.want, diff)
 				return
 			}
+
+			done <- true
+			wg.Wait()
 		}()
 	}
 }
