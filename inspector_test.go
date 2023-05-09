@@ -3341,8 +3341,12 @@ func TestInspectorCancelProcessing(t *testing.T) {
 
 			done := make(chan bool, 1)
 			var wg sync.WaitGroup
+			for _, tasks := range tc.pending {
+				for _ = range tasks {
+					wg.Add(1)
+				}
+			}
 			handler := func(ctx context.Context, _ *Task) error {
-				wg.Add(1)
 				defer wg.Done()
 				select {
 				case <-ctx.Done():
