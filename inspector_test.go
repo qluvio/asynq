@@ -3298,10 +3298,16 @@ func TestInspectorSchedulerEntries(t *testing.T) {
 }
 
 func TestInspectorCancelProcessing(t *testing.T) {
+	lfa := time.Now()
+
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
 	m1 := h.NewTaskMessage("task1", nil)
 	m2 := h.NewTaskMessage("task2", nil)
+
+	at1 := newTaskInfo(m1, base.TaskStateArchived, time.Time{}, nil)
+	at1.LastErr = context.Canceled.Error()
+	at1.LastFailedAt = lfa
 
 	client := NewClient(getClientConnOpt(t))
 	defer func() { _ = client.Close() }()
@@ -3312,6 +3318,7 @@ func TestInspectorCancelProcessing(t *testing.T) {
 		pending map[string][]*base.TaskMessage
 		id      string
 		want    []*TaskInfo
+		want2   []*TaskInfo
 	}{
 		{
 			pending: map[string][]*base.TaskMessage{
@@ -3320,6 +3327,9 @@ func TestInspectorCancelProcessing(t *testing.T) {
 			id: m1.ID,
 			want: []*TaskInfo{
 				newTaskInfo(m2, base.TaskStateActive, time.Time{}, nil),
+			},
+			want2: []*TaskInfo{
+				at1,
 			},
 		},
 	}
@@ -3376,6 +3386,23 @@ func TestInspectorCancelProcessing(t *testing.T) {
 			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(TaskInfo{})); diff != "" {
 				t.Errorf("ListActiveTasks() = %v, want %v; (-want,+got)\n%s",
 					got, tc.want, diff)
+				return
+			}
+
+			got, err = inspector.ListArchivedTasks("default")
+			if err != nil {
+				t.Errorf("ListArchivedTasks() returned error: %v", err)
+				return
+			}
+			for _, t := range got {
+				if !t.LastFailedAt.IsZero() {
+					// Replace LastFailedAt for the sake of diff below
+					t.LastFailedAt = lfa
+				}
+			}
+			if diff := cmp.Diff(tc.want2, got, cmp.AllowUnexported(TaskInfo{})); diff != "" {
+				t.Errorf("ListArchivedTasks() = %v, want %v; (-want,+got)\n%s",
+					got, tc.want2, diff)
 				return
 			}
 
