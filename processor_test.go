@@ -326,6 +326,137 @@ func TestProcessorSuccessWithAsyncTasks(t *testing.T) {
 	}
 }
 
+func TestProcessorContextDoneWithAsyncTasks(t *testing.T) {
+	rand.Seed(time.Now().UnixNano())
+	var (
+		ctx    = setupTestContext(t)
+		client = NewClient(getClientConnOpt(t))
+
+		lfa = time.Now().Truncate(time.Second).Unix()
+
+		m1 = h.NewTaskMessage("task1", nil)
+		m2 = h.NewTaskMessage("task2", nil)
+		m3 = h.NewTaskMessageWithQueue("task3", nil, "high")
+		m4 = h.NewTaskMessageWithQueue("task4", nil, "low")
+		m5 = h.NewTaskMessage("task5", nil)
+		m6 = h.NewTaskMessage("task6", nil)
+		m7 = h.NewTaskMessageWithQueue("task7", nil, "high")
+		m8 = h.NewTaskMessageWithQueue("task8", nil, "low")
+	)
+	defer func() { _ = ctx.Close() }()
+	defer func() { _ = client.Close() }()
+
+	tests := []struct {
+		pending      map[string][]*base.TaskMessage
+		queues       []string            // list of queues to consume the tasks from
+		wantArchived []*base.TaskMessage // tasks to be processed at the end
+	}{
+		{
+			pending: map[string][]*base.TaskMessage{
+				"default": {m1, m2, m5, m6},
+				"high":    {m3, m7},
+				"low":     {m4, m8},
+			},
+			queues:       []string{"default", "high", "low"},
+			wantArchived: []*base.TaskMessage{m1, m2, m3, m4, m5, m6, m7, m8},
+		},
+	}
+
+	for i, tc := range tests {
+		for n, m := range tc.wantArchived {
+			am := &base.TaskMessage{}
+			*am = *m
+			am.ErrorMsg = context.Canceled.Error()
+			am.LastFailedAt = lfa
+			tc.wantArchived[n] = am
+		}
+
+		t.Run(fmt.Sprintf("test-%d", i), func(t *testing.T) {
+			// Set up test case.
+			ctx.FlushDB()
+			ctx.SeedAllPendingQueues(tc.pending)
+
+			// Instantiate a new processor.
+			var wg sync.WaitGroup
+			for _, msgs := range tc.pending {
+				for _ = range msgs {
+					wg.Add(1)
+				}
+			}
+			handler := func(ctx context.Context, task *Task) error {
+				go func() {
+					select {
+					case <-ctx.Done():
+					}
+					time.Sleep(time.Second)
+					task.AsyncProcessor().TaskFailed(errors.New("failed"))
+					wg.Done()
+				}()
+				return AsynchronousTask
+			}
+			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler))
+			p.queues = (&QueuesConfig{
+				Priority: Lenient,
+				Queues: map[string]int{
+					"default": 2,
+					"high":    3,
+					"low":     1,
+				},
+			}).configure()
+			p.start(&sync.WaitGroup{})
+
+			// Wait for a second to allow all pending tasks to be processed.
+			time.Sleep(time.Second)
+
+			// Cancel all (active) tasks.
+			for _, msgs := range tc.pending {
+				for _, msg := range msgs {
+					cancel, ok := p.cancelations.Get(msg.ID)
+					if !ok {
+						t.Errorf("%s task has no cancelation", msg.Type)
+					}
+					cancel()
+				}
+			}
+
+			// Wait to allow all (active) tasks to be canceled.
+			wg.Wait()
+
+			// Wait for a second to allow all (active) tasks to be processed.
+			time.Sleep(time.Second)
+
+			// Make sure no messages are stuck in active list.
+			for _, qname := range tc.queues {
+				active := ctx.GetActiveMessages(qname)
+				if len(active) != 0 {
+					t.Errorf("%q has %d tasks, want 0", base.ActiveKey(qname), len(active))
+				}
+			}
+
+			// Make sure all messages are in archived list.
+			var archived []*base.TaskMessage
+			for _, qname := range tc.queues {
+				msgs := ctx.GetArchivedMessages(qname)
+				archived = append(archived, msgs...)
+			}
+			for _, msg := range archived {
+				if msg.LastFailedAt != 0 {
+					// Replace LastFailedAt for the sake of diff below
+					msg.LastFailedAt = lfa
+				}
+			}
+			sort.Slice(archived, func(i int, j int) bool {
+				return archived[i].Type < archived[j].Type
+			})
+			if diff := cmp.Diff(tc.wantArchived, archived, taskCmpOpts...); diff != "" {
+				t.Errorf("mismatch found in archived tasks; (-want, +got)\n%s", diff)
+			}
+
+			p.shutdown()
+		})
+	}
+}
+
 // https://github.com/hibiken/asynq/issues/166
 func TestProcessTasksWithLargeNumberInPayload(t *testing.T) {
 	ctx := setupTestContext(t)
