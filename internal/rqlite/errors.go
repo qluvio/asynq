@@ -86,7 +86,14 @@ func expectQueryResultCount(op errors.Op, expectedCount int, qrs []sqlite3.Query
 // expectOneRowUpdated returns an error if the write-result indicates that more
 // than one row was updated. If strict is true it also returns an error if no
 // row were updated.
-func expectOneRowUpdated(op errors.Op, wr sqlite3.WriteResult, st interface{}, strict bool) error {
+func expectOneRowUpdated(op errors.Op, wrs []sqlite3.WriteResult, index int, st interface{}, strict bool) error {
+	if len(wrs) <= index {
+		return errors.E(op, errors.Internal, fmt.Sprintf(
+			"no write result at index %d - write result length (%d)",
+			index,
+			len(wrs)))
+	}
+	wr := wrs[index]
 	switch wr.RowsAffected {
 	case 0:
 		if strict {

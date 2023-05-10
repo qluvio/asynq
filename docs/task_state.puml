@@ -9,12 +9,16 @@ skinparam State {
 }
 
 [*] -up-> pending : enqueue
+note on link
+  client
+end note
 pending -left-> active : dequeue
 note on link
   processor
 end note
 
 state processed
+state completed
 state archived
 archived: retry count exceeded or
 archived: skip retry
@@ -34,6 +38,7 @@ state active {
   end note
 
   processing --> processed : done
+  processing --> completed : done (with retention)
 
   state failed <<active>>
   state timedOut <<active>>
@@ -65,8 +70,13 @@ note on link
   forwarder
 end note
 
-
+'completed --> [*]
 processed --> [*]
+completed --> [*]
+note on link
+  retention period
+  elapsed
+end note
 archived --> [*]
 
 @enduml

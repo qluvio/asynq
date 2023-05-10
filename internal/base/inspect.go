@@ -55,6 +55,9 @@ type Inspector interface {
 	// DeleteAllCompletedTasks deletes all completed tasks from the given queue
 	// and returns the number of tasks deleted.
 	DeleteAllCompletedTasks(qname string) (int64, error)
+	// DeleteAllProcessedTasks deletes all processed tasks from the given queue
+	// and returns the number of tasks deleted.
+	DeleteAllProcessedTasks(qname string) (int64, error)
 
 	// DeleteTask finds a task that matches the id from the given queue and deletes it.
 	// It returns nil if it successfully archived the task.
@@ -134,6 +137,9 @@ type Pagination struct {
 
 	// Page number starting from zero.
 	Page int
+
+	// Task ID after which to start listing
+	StartAfterUuid string
 }
 
 func (p Pagination) Start() int64 {
