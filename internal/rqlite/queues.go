@@ -226,13 +226,17 @@ func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, 
 				if task.failed {
 					ret.Failed++
 				}
+			case completed:
+				ret.Completed++
+				ret.Processed++
 			case processed:
 				ret.Processed++
 			}
 		}
 		ret.Latency = now.Sub(time.Unix(0, oldestPending))
-		// processed are not included
+		// processed are not included in size
 		ret.Size = ret.Pending + ret.Active + ret.Scheduled + ret.Retry + ret.Archived
+		ret.Processed += ret.Failed
 
 	} else if qrs[1].Next() {
 		// return error ?
@@ -332,14 +336,10 @@ func (conn *Connection) getTaskInfo(now time.Time, qname string, taskid string) 
 }
 
 func getTaskInfo(op errors.Op, now time.Time, tr *taskRow) (*base.TaskInfo, error) {
-	var state base.TaskState
-	if tr.state != processed {
-		// PENDING(GIL): 'processed' is not in base.TaskState
-		var err error
-		state, err = base.TaskStateFromString(tr.state)
-		if err != nil {
-			return nil, errors.E(op, errors.Internal, err)
-		}
+
+	state, err := base.TaskStateFromString(tr.state)
+	if err != nil {
+		return nil, errors.E(op, errors.Internal, err)
 	}
 
 	nextProcessAt := time.Time{}

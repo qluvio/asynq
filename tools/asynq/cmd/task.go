@@ -373,7 +373,7 @@ func printTaskInfo(info *asynq.TaskInfo) {
 	fmt.Printf("ID:              %s\n", info.ID)
 	fmt.Printf("Type:            %s\n", info.Type)
 	fmt.Printf("State:           %v\n", info.State)
-	fmt.Printf("Deadline:        %v\n", formatLastFailedAt(info.Deadline))
+	fmt.Printf("Deadline:        %v\n", formatPastTime(info.Deadline))
 	fmt.Printf("Timeout:         %v\n", info.Timeout)
 	fmt.Printf("Retried:         %d / %d\n", info.Retried, info.MaxRetry)
 	fmt.Printf("Recurrent:       %t", info.Recurrent)
@@ -407,7 +407,7 @@ func formatPastTime(t time.Time) string {
 	if t.IsZero() || t.Unix() == 0 {
 		return ""
 	}
-	return t.Format(time.UnixDate)
+	return t.UTC().Format(time.UnixDate)
 }
 
 func taskArchive(cmd *cobra.Command, args []string) {

@@ -26,7 +26,7 @@ func NewRQLiteConnection(ctx context.Context, config *Config, httpClient *http.C
 	}
 
 	return &Connection{
-		DbConnection: &RQLiteConnection{conn: &rqliteConn},
+		DbConnection: &RQLiteConnection{conn: rqliteConn},
 		config:       config,
 	}, nil
 }

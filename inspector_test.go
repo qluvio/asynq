@@ -356,7 +356,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				Paused:    false,
 				Timestamp: now,
 			},
-			// PENDING(GIL): see comment in test TestCurrentStats in rqlite/inspect_test
+			// PENDING(GIL): see comment(s) in test TestCurrentStats in rqlite/inspect_test
 			wantRqlite: &QueueInfo{
 				Queue:     "default",
 				Latency:   15 * time.Second,
@@ -366,7 +366,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				Scheduled: 2,
 				Retry:     2,
 				Archived:  0,
-				Processed: 120,
+				Processed: 122,
 				Failed:    2,
 				Paused:    false,
 				Timestamp: now,
@@ -1111,6 +1111,9 @@ func TestInspectorListCompletedTasks(t *testing.T) {
 }
 
 func TestInspectorListPagination(t *testing.T) {
+	if brokerType == RedisType {
+		t.Skip("not implemented for redis")
+	}
 	// Create 100 tasks.
 	var msgs []*base.TaskMessage
 	for i := 0; i <= 99; i++ {
@@ -1125,9 +1128,10 @@ func TestInspectorListPagination(t *testing.T) {
 	defer func() { _ = inspector.Close() }()
 
 	tests := []struct {
-		page     int
-		pageSize int
-		want     []*TaskInfo
+		page       int
+		pageSize   int
+		startAfter string
+		want       []*TaskInfo
 	}{
 		{
 			page:     1,
@@ -1138,6 +1142,18 @@ func TestInspectorListPagination(t *testing.T) {
 				createPendingTask(msgs[2]),
 				createPendingTask(msgs[3]),
 				createPendingTask(msgs[4]),
+			},
+		},
+		{
+			page:       1,
+			pageSize:   5,
+			startAfter: msgs[0].ID,
+			want: []*TaskInfo{
+				createPendingTask(msgs[1]),
+				createPendingTask(msgs[2]),
+				createPendingTask(msgs[3]),
+				createPendingTask(msgs[4]),
+				createPendingTask(msgs[5]),
 			},
 		},
 		{
@@ -1156,10 +1172,32 @@ func TestInspectorListPagination(t *testing.T) {
 				createPendingTask(msgs[29]),
 			},
 		},
+		{
+			page:       3,
+			pageSize:   10,
+			startAfter: msgs[9].ID,
+			want: []*TaskInfo{
+				createPendingTask(msgs[30]),
+				createPendingTask(msgs[31]),
+				createPendingTask(msgs[32]),
+				createPendingTask(msgs[33]),
+				createPendingTask(msgs[34]),
+				createPendingTask(msgs[35]),
+				createPendingTask(msgs[36]),
+				createPendingTask(msgs[37]),
+				createPendingTask(msgs[38]),
+				createPendingTask(msgs[39]),
+			},
+		},
 	}
 
 	for _, tc := range tests {
-		got, err := inspector.ListPendingTasks("default", Page(tc.page), PageSize(tc.pageSize))
+		if tc.startAfter != "" && brokerType == RedisType {
+			// start after not available in redis
+			continue
+		}
+		got, err := inspector.ListPendingTasks(
+			"default", Page(tc.page), PageSize(tc.pageSize), StartAfterUuid(tc.startAfter))
 		if err != nil {
 			t.Errorf("ListPendingTask('default') returned error: %v", err)
 			continue

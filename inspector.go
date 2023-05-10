@@ -221,13 +221,19 @@ type ListOption interface{}
 
 // Internal list option representations.
 type (
-	pageSizeOpt int
-	pageNumOpt  int
+	pageSizeOpt       int
+	pageNumOpt        int
+	startAfterUuidOpt string
 )
 
 type listOption struct {
-	pageSize int
-	pageNum  int
+	pageSize       int
+	pageNum        int
+	startAfterUuid string
+}
+
+func (opt listOption) pagination() base.Pagination {
+	return base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1, StartAfterUuid: opt.startAfterUuid}
 }
 
 const (
@@ -249,6 +255,8 @@ func composeListOptions(opts ...ListOption) listOption {
 			res.pageSize = int(opt)
 		case pageNumOpt:
 			res.pageNum = int(opt)
+		case startAfterUuidOpt:
+			res.startAfterUuid = string(opt)
 		default:
 			// ignore unexpected option
 		}
@@ -271,10 +279,15 @@ func PageSize(n int) ListOption {
 //
 // Negative page number is treated as one.
 func Page(n int) ListOption {
-	if n < 0 {
+	if n <= 0 {
 		n = 1
 	}
 	return pageNumOpt(n)
+}
+
+// StartAfterUuid returns an option to specify the ID of the task after which to start listing.
+func StartAfterUuid(id string) ListOption {
+	return startAfterUuidOpt(id)
 }
 
 // ListPendingTasks retrieves pending tasks from the specified queue.
@@ -285,8 +298,7 @@ func (i *Inspector) ListPendingTasks(qname string, opts ...ListOption) ([]*TaskI
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListPending(qname, pgn)
+	infos, err := i.rdb.ListPending(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -313,8 +325,7 @@ func (i *Inspector) ListActiveTasks(qname string, opts ...ListOption) ([]*TaskIn
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListActive(qname, pgn)
+	infos, err := i.rdb.ListActive(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -342,8 +353,7 @@ func (i *Inspector) ListScheduledTasks(qname string, opts ...ListOption) ([]*Tas
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListScheduled(qname, pgn)
+	infos, err := i.rdb.ListScheduled(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -371,8 +381,7 @@ func (i *Inspector) ListRetryTasks(qname string, opts ...ListOption) ([]*TaskInf
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListRetry(qname, pgn)
+	infos, err := i.rdb.ListRetry(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -400,8 +409,7 @@ func (i *Inspector) ListArchivedTasks(qname string, opts ...ListOption) ([]*Task
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListArchived(qname, pgn)
+	infos, err := i.rdb.ListArchived(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -429,8 +437,7 @@ func (i *Inspector) ListCompletedTasks(qname string, opts ...ListOption) ([]*Tas
 		return nil, fmt.Errorf("asynq: %v", err)
 	}
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListCompleted(qname, pgn)
+	infos, err := i.rdb.ListCompleted(qname, opt.pagination())
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -496,6 +503,16 @@ func (i *Inspector) DeleteAllCompletedTasks(qname string) (int, error) {
 		return 0, err
 	}
 	n, err := i.rdb.DeleteAllCompletedTasks(qname)
+	return int(n), err
+}
+
+// DeleteAllProcessedTasks deletes all processed tasks from the specified queue,
+// and reports the number tasks deleted.
+func (i *Inspector) DeleteAllProcessedTasks(qname string) (int, error) {
+	if err := base.ValidateQueueName(qname); err != nil {
+		return 0, err
+	}
+	n, err := i.rdb.DeleteAllProcessedTasks(qname)
 	return int(n), err
 }
 
@@ -892,8 +909,7 @@ type SchedulerEnqueueEvent struct {
 // By default, it retrieves the first 30 tasks.
 func (i *Inspector) ListSchedulerEnqueueEvents(entryID string, opts ...ListOption) ([]*SchedulerEnqueueEvent, error) {
 	opt := composeListOptions(opts...)
-	pgn := base.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	data, err := i.rdb.ListSchedulerEnqueueEvents(entryID, pgn)
+	data, err := i.rdb.ListSchedulerEnqueueEvents(entryID, opt.pagination())
 	if err != nil {
 		return nil, err
 	}

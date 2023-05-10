@@ -152,6 +152,10 @@ type Config struct {
 	// cancellation pubsub channel.
 	// Default to 5 second
 	SubscriberRetryTimeout time.Duration
+
+	// JanitorInterval specifies the janitor polling period
+	// Default to 8 seconds
+	JanitorInterval time.Duration
 }
 
 // An ErrorHandler handles an error occured during task processing.
@@ -344,6 +348,9 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	if cfg.SubscriberRetryTimeout <= 0 {
 		cfg.SubscriberRetryTimeout = time.Second * 5
 	}
+	if cfg.JanitorInterval <= 0 {
+		cfg.JanitorInterval = time.Second * 8
+	}
 
 	if cfg.Queues == nil {
 		cfg.Queues = &QueuesConfig{}
@@ -390,12 +397,6 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		starting:    starting,
 		finished:    finished,
 	})
-	forwarder := newForwarder(forwarderParams{
-		logger:   logger,
-		broker:   broker,
-		queues:   cfg.Queues,
-		interval: cfg.ForwarderInterval,
-	})
 	subscriber := newSubscriber(subscriberParams{
 		logger:       logger,
 		broker:       broker,
@@ -418,6 +419,19 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		finished:        finished,
 		emptyQSleep:     cfg.ProcessorEmptyQSleep,
 	})
+	healthchecker := newHealthChecker(healthcheckerParams{
+		logger:          logger,
+		broker:          broker,
+		interval:        healthcheckInterval,
+		healthcheckFunc: cfg.HealthCheckFunc,
+	})
+	forwarder := newForwarder(forwarderParams{
+		logger:      logger,
+		broker:      broker,
+		queues:      cfg.Queues,
+		interval:    cfg.ForwarderInterval,
+		healthCheck: healthchecker,
+	})
 	recoverer := newRecoverer(recovererParams{
 		logger:         logger,
 		broker:         broker,
@@ -426,18 +440,14 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		queues:         cfg.Queues,
 		interval:       cfg.RecovererInterval,
 		expiration:     cfg.RecovererExpiration,
-	})
-	healthchecker := newHealthChecker(healthcheckerParams{
-		logger:          logger,
-		broker:          broker,
-		interval:        healthcheckInterval,
-		healthcheckFunc: cfg.HealthCheckFunc,
+		healthCheck:    healthchecker,
 	})
 	janitor := newJanitor(janitorParams{
-		logger:   logger,
-		broker:   broker,
-		queues:   cfg.Queues,
-		interval: 8 * time.Second,
+		logger:      logger,
+		broker:      broker,
+		queues:      cfg.Queues,
+		interval:    cfg.JanitorInterval,
+		healthCheck: healthchecker,
 	})
 	return &Server{
 		logger:        logger,
@@ -546,6 +556,10 @@ func (srv *Server) Start(handler Handler) error {
 // active workers to finish processing tasks for duration specified in Config.ShutdownTimeout.
 // If worker didn't finish processing a task during the timeout, the task will be pushed back to Redis.
 func (srv *Server) Shutdown() {
+	srv.shutdown(false)
+}
+
+func (srv *Server) shutdown(now bool) {
 	switch srv.state.Get() {
 	case base.StateNew, base.StateClosed:
 		// server is not running, do nothing and return.
@@ -558,7 +572,7 @@ func (srv *Server) Shutdown() {
 	// processor -> syncer (via syncCh)
 	// processor -> heartbeater (via starting, finished channels)
 	srv.forwarder.shutdown()
-	srv.processor.shutdown()
+	srv.processor.shutdownNow(now)
 	srv.recoverer.shutdown()
 	srv.syncer.shutdown()
 	srv.subscriber.shutdown()

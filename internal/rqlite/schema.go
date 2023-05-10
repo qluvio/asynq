@@ -33,8 +33,8 @@ const (
 
 	QueuesTable          = "asynq_queues"
 	CreateQueuesTableFmt = `CREATE TABLE IF NOT EXISTS %s (
-	queue_name text not null primary key, 
-	state      text not null	
+	queue_name      text not null primary key, 
+	state           text not null
 )`
 	active    = "active"
 	paused    = "paused"
@@ -144,6 +144,9 @@ func (conn *Connection) CreateTablesIfNotExist() (bool, error) {
 		if qrs[0].Err() == nil || !strings.Contains(qrs[0].Err().Error(), "no such table:") {
 			return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
 		}
+	}
+	if len(qrs) == 0 {
+		return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, nil, []*sqlite3.Statement{get}))
 	}
 	if qrs[0].NumRows() > 0 {
 		return false, nil

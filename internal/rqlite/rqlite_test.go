@@ -217,7 +217,7 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 	ctx := context.Background()
 
 	for _, tc := range tests {
-		//fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
+		// fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
 		FlushDB(t, r.conn)
 
 		// initial dequeue
@@ -234,10 +234,10 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 
 		err = r.Requeue("", tc.msg, false)
 		require.NoError(t, err)
-		_, _, err = r.Dequeue("bla", tc.msg.Queue)
+		_, _, err = r.Dequeue(serverID, tc.msg.Queue)
 		require.NoError(t, err)
 
-		// re-queueing with a server id: can be dequeued only by this server
+		// re-queueing with the same server id: can be dequeued only by this server
 		err = r.Requeue(serverID, tc.msg, false)
 		require.NoError(t, err)
 		// not available for other servers
@@ -306,13 +306,13 @@ func TestEnqueueWithServerAffinityAfterError(t *testing.T) {
 	ctx := context.Background()
 
 	for _, tc := range tests {
-		//fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
+		// fmt.Println("TestEnqueueWithServerAffinity - test", i, "now", now.Unix())
 		FlushDB(t, r.conn)
 
 		// initial dequeue
 		err := r.EnqueueUnique(ctx, tc.msg, ttl)
 		require.NoError(t, err)
-		_, _, err = r.Dequeue("", tc.msg.Queue)
+		_, _, err = r.Dequeue(serverID, tc.msg.Queue)
 		require.NoError(t, err)
 
 		// re-queueing with a server id: can be dequeued only by this server
@@ -399,7 +399,7 @@ func TestRequeueScheduled(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		//fmt.Println("TestRequeueScheduled - test", i, "now", now.Unix())
+		// fmt.Println("TestRequeueScheduled - test", i, "now", now.Unix())
 		FlushDB(t, r.conn)
 
 		// initial enqueue/dequeue
@@ -410,7 +410,7 @@ func TestRequeueScheduled(t *testing.T) {
 			err = r.Enqueue(context.Background(), tc.msg)
 		}
 		require.NoError(t, err)
-		_, _, err = r.Dequeue("", tc.msg.Queue)
+		_, _, err = r.Dequeue(tc.serverID, tc.msg.Queue)
 		require.NoError(t, err)
 
 		// re-queue
@@ -1158,13 +1158,14 @@ func TestScheduleUnique(t *testing.T) {
 		Queue:     base.DefaultQueueName,
 		UniqueKey: base.UniqueKey(base.DefaultQueueName, "email", h.JSON(map[string]interface{}{"user_id": 123})),
 	}
+	now := time.Now()
 
 	tests := []struct {
 		msg       *base.TaskMessage
 		processAt time.Time
 		ttl       time.Duration // uniqueness lock ttl
 	}{
-		{&m1, time.Now().UTC().Add(15 * time.Minute), time.Minute},
+		{&m1, now.UTC().Add(15 * time.Minute), time.Minute},
 	}
 	ctx := context.Background()
 
@@ -1172,7 +1173,7 @@ func TestScheduleUnique(t *testing.T) {
 		FlushDB(t, r.conn)
 
 		desc := "(*RQLite).ScheduleUnique(msg, processAt, ttl)"
-		expectUniqueKeyDeadline := time.Now().UTC().Add(tc.ttl).Unix()
+		expectUniqueKeyDeadline := now.UTC().Add(tc.ttl).Unix()
 		err := r.ScheduleUnique(ctx, tc.msg, tc.processAt, tc.ttl)
 		if err != nil {
 			t.Errorf("Frist task: %s = %v, want nil", desc, err)
