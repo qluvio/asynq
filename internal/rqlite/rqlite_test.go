@@ -897,7 +897,7 @@ func TestDone(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
+	for i, tc := range tests {
 		FlushDB(t, r.conn)
 		// fill active queues and deadline with 1 minute TTL for unique keys
 		SeedAllDeadlines(t, r, tc.deadlines, time.Minute)
@@ -924,23 +924,11 @@ func TestDone(t *testing.T) {
 			}
 		}
 
-		gotProcessed, err := r.conn.listTasks(tc.target.Queue, processed)
+		dayStats, err := r.conn.queueDayStats(tc.target.Queue, now)
 		require.NoError(t, err)
-		if len(gotProcessed) != 1 {
-			t.Errorf("%s; GET %q, want 1", tc.desc, len(gotProcessed))
+		if dayStats.Processed != 1 {
+			t.Errorf("%s (%d); GET %q, want 1", tc.desc, i, dayStats.Processed)
 			continue
-		}
-
-		cleanupAt := gotProcessed[0].cleanupAt
-		doneAt := gotProcessed[0].doneAt
-		gotTTL := time.Duration(cleanupAt - doneAt)
-
-		if gotTTL > statsTTL {
-			t.Errorf("%s; TTL %q = %v, want less than or equal to %v", tc.desc, gotProcessed[0].taskUuid, gotTTL, statsTTL)
-		}
-
-		if len(tc.target.UniqueKey) > 0 && gotProcessed[0].uniqueKeyDeadline > 0 {
-			t.Errorf("%s; Uniqueness lock %q still exists", tc.desc, tc.target.UniqueKey)
 		}
 	}
 }
@@ -1558,7 +1546,7 @@ func TestRetryWithNonFailureError(t *testing.T) {
 		FlushDB(t, r.conn)
 		SeedAllActiveQueues(t, r, tc.active, true)
 		SeedAllDeadlines(t, r, tc.deadlines, 0)
-		SeedAllRetryQueues(t, r, tc.retry)
+		SeedAllRetryQueues(t, r, tc.retry, true)
 
 		callTime := time.Now() // time when method was called
 		err := r.Retry(tc.msg, tc.processAt, tc.errMsg, false /*isFailure*/)
@@ -1600,10 +1588,10 @@ func TestRetryWithNonFailureError(t *testing.T) {
 		}
 
 		// If isFailure is set to false, no stats should be recorded to avoid skewing the error rate.
-		gotProcessed := GetProcessedMessages(t, r, tc.msg.Queue)
-		if len(gotProcessed) != 0 {
+		qStats := GetQueueStats(t, r, tc.msg.Queue)
+		if len(qStats) != 0 {
 			t.Errorf("GET 'processed' in queue %s = %d, want empty",
-				tc.msg.Queue, len(gotProcessed))
+				tc.msg.Queue, len(qStats))
 		}
 	}
 }

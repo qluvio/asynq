@@ -27,6 +27,7 @@ const (
 	PubsubPollingInterval     = time.Millisecond * 200 // polling period for pub-sub
 	rqliteType                = "rqlite"
 	sqliteType                = "sqlite"
+	dayFormat                 = "2006-01-02"
 )
 
 var _ base.Broker = (*RQLite)(nil)
