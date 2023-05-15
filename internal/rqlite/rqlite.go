@@ -183,7 +183,8 @@ func (r *RQLite) open() error {
 	r.conn, err = newConnection(
 		context.Background(), // PENDING(GIL): use a context with deadline ...
 		r.config,
-		r.httpClient)
+		r.httpClient,
+		r.logger)
 	if err != nil {
 		return err
 	}

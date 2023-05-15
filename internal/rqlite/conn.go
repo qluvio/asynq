@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/hibiken/asynq/internal/log"
 	"github.com/hibiken/asynq/internal/sqlite3"
 )
 
@@ -22,14 +23,14 @@ type Connection struct {
 	tables     map[string]string
 }
 
-func newConnection(ctx context.Context, config *Config, httpClient *http.Client) (*Connection, error) {
+func newConnection(ctx context.Context, config *Config, httpClient *http.Client, logger log.Base) (*Connection, error) {
 	op := errors.Op("newConnection")
 
 	var err error
 	var conn *Connection
 	switch config.Type {
 	case rqliteType:
-		conn, err = NewRQLiteConnection(ctx, config, httpClient)
+		conn, err = NewRQLiteConnection(ctx, config, httpClient, logger)
 	case sqliteType:
 		conn, err = NewSQLiteConnection(ctx, config)
 	}
