@@ -508,6 +508,7 @@ func (p *processor) handleFailedMessage(ctx context.Context, msg *base.TaskMessa
 	}
 	if !p.isFailureFunc(err) {
 		// retry the task without marking it as failed
+		p.logger.Debugf("Retrying task id=%s - not failed - (err: %v)", msg.ID, err)
 		p.retry(ctx, msg, err, false /*isFailure*/)
 		return
 	}
@@ -519,6 +520,7 @@ func (p *processor) handleFailedMessage(ctx context.Context, msg *base.TaskMessa
 		}
 		p.archive(ctx, msg, err)
 	} else {
+		p.logger.Debugf("Retrying task id=%s (err: %v)", msg.ID, err)
 		p.retry(ctx, msg, err, true /*isFailure*/)
 	}
 }

@@ -247,7 +247,7 @@ type ResultWriter struct {
 func (w *ResultWriter) Write(data []byte) (n int, err error) {
 	select {
 	case <-w.ctx.Done():
-		return 0, fmt.Errorf("failed to result task result: %v", w.ctx.Err())
+		return 0, fmt.Errorf("task %s: failed to write result: %v", w.id, w.ctx.Err())
 	default:
 	}
 	return w.broker.WriteResult(w.qname, w.id, data)
