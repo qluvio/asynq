@@ -366,7 +366,7 @@ func TestProcessorContextDoneWithAsyncTasks(t *testing.T) {
 		for n, m := range tc.wantArchived {
 			am := &base.TaskMessage{}
 			*am = *m
-			am.ErrorMsg = context.Canceled.Error()
+			am.ErrorMsg = TaskCanceled.Error()
 			am.LastFailedAt = lfa
 			tc.wantArchived[n] = am
 		}
