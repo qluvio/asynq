@@ -3345,7 +3345,7 @@ func TestInspectorCancelProcessing(t *testing.T) {
 
 	am1 := &base.TaskMessage{}
 	*am1 = *m1
-	am1.ErrorMsg = context.Canceled.Error()
+	am1.ErrorMsg = TaskCanceled.Error()
 	am1.LastFailedAt = lfa.Unix()
 
 	client := NewClient(getClientConnOpt(t))

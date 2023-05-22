@@ -25,6 +25,10 @@ import (
 // the task should not be retried and should be archived instead.
 var SkipRetry = errors.New("skip retry for the task")
 
+// TaskCanceled is used as a return value from Handler.ProcessTask to indicate that
+// the task has been canceled, should not be retried, and should be archived instead.
+var TaskCanceled = errors.New("task canceled")
+
 // AsynchronousTask is used as a return value from Handler.ProcessTask to
 // indicate that the task is processing asynchronously separately from the main
 // worker goroutine.
@@ -230,8 +234,12 @@ func (p *processor) exec() {
 
 		p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
 		go func() {
+			resCh := make(chan error, 3)
 			ctx, cancel := asynqcontext.New(msg, deadline)
-			p.cancelations.Add(msg.ID, cancel)
+			p.cancelations.Add(msg.ID, func() {
+				resCh <- TaskCanceled
+				// Need to make sure resCh is processed before ctxDoneCh; let cleanup cancel context later
+			})
 			cleanup := func() {
 				cancel()
 				p.cancelations.Delete(msg.ID)
@@ -249,7 +257,6 @@ func (p *processor) exec() {
 			default:
 			}
 
-			resCh := make(chan error, 2)
 			rw := &ResultWriter{id: msg.ID, qname: msg.Queue, broker: p.broker, ctx: ctx}
 			ap := &AsyncProcessor{resCh: resCh}
 			// hold mutex until worker goroutine returns; ensures that AsyncProcessor does not send to resCh first
@@ -504,7 +511,7 @@ func (p *processor) handleFailedMessage(ctx context.Context, msg *base.TaskMessa
 		p.retry(ctx, msg, err, false /*isFailure*/)
 		return
 	}
-	if msg.Retried >= msg.Retry || errors.Is(err, SkipRetry) || errors.Is(err, context.Canceled) {
+	if msg.Retried >= msg.Retry || errors.Is(err, SkipRetry) || errors.Is(err, TaskCanceled) {
 		if msg.Retried >= msg.Retry {
 			p.logger.Warnf("Retry exhausted for task id=%s", msg.ID)
 		} else {
