@@ -2,6 +2,8 @@ package rqlite
 
 import (
 	"fmt"
+	"runtime"
+	"strings"
 
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/sqlite3"
@@ -23,12 +25,18 @@ func (s StatementError) String() string {
 // RqliteError indicates a command sent to rqlite returned error.
 type RqliteError struct {
 	Op         errors.Op
+	Caller     string
 	Err        error            // outer most error
 	Statements []StatementError // specific error
 }
 
 func (e *RqliteError) Error() string {
-	ret := fmt.Sprintf("%s - rqlite error: %v ", e.Op, e.Err)
+	ret := fmt.Sprintf("%s - rqlite error: %s", e.Op, e.Err.Error())
+	if e.Caller != "" {
+		ret += ", at: " + e.Caller
+	} else {
+		ret += " "
+	}
 	if len(e.Statements) == 0 {
 		return ret
 	}
@@ -45,6 +53,7 @@ func (e *RqliteError) Unwrap() error { return e.Err }
 
 func NewRqliteWsError(op errors.Op, wrs []sqlite3.WriteResult, err error, stmts []*sqlite3.Statement) error {
 	statements := make([]StatementError, 0)
+	caller := caller(1)
 	for ndx, wr := range wrs {
 		if wr.Err != nil {
 			statements = append(statements, StatementError{Error: wr.Err, Statement: stmts[ndx]})
@@ -52,6 +61,7 @@ func NewRqliteWsError(op errors.Op, wrs []sqlite3.WriteResult, err error, stmts 
 	}
 	return &RqliteError{
 		Op:         op,
+		Caller:     caller,
 		Err:        err,
 		Statements: statements,
 	}
@@ -59,6 +69,7 @@ func NewRqliteWsError(op errors.Op, wrs []sqlite3.WriteResult, err error, stmts 
 
 func NewRqliteRsError(op errors.Op, qrs []sqlite3.QueryResult, err error, stmts []*sqlite3.Statement) error {
 	statements := make([]StatementError, 0)
+	caller := caller(1)
 	for ndx, qr := range qrs {
 		if qr.Err() != nil {
 			statements = append(statements, StatementError{Error: qr.Err(), Statement: stmts[ndx]})
@@ -66,6 +77,7 @@ func NewRqliteRsError(op errors.Op, qrs []sqlite3.QueryResult, err error, stmts 
 	}
 	return &RqliteError{
 		Op:         op,
+		Caller:     caller,
 		Err:        err,
 		Statements: statements,
 	}
@@ -112,4 +124,33 @@ func expectOneRowUpdated(op errors.Op, wrs []sqlite3.WriteResult, index int, st 
 		return errors.E(op, errStr)
 	}
 	return nil
+}
+
+// caller reports information on the caller at the given index in calling
+// goroutine's stack. The argument index is the number of stack frames to ascend,
+// with 0 identifying the caller of Caller.
+// This function uses internally runtime.Caller
+// The returned string contains the 'simple' name of the package and function
+// followed by (file-name:line-number) of the caller.
+func caller(index int) string {
+	simpleName := func(name string) string {
+		if n := strings.LastIndex(name, "/"); n > 0 {
+			name = name[n+1:]
+		}
+		return name
+	}
+
+	fname := "unknown"
+	pc, file, line, ok := runtime.Caller(index + 1) // account for this call
+	if !ok {
+		file = "??"
+		line = 1
+	} else {
+		file = simpleName(file)
+	}
+	f := runtime.FuncForPC(pc)
+	if f != nil {
+		fname = simpleName(f.Name())
+	}
+	return fmt.Sprintf("%s (%s:%d)", fname, file, line)
 }

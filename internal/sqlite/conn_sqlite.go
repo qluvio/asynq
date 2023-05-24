@@ -24,5 +24,5 @@ func NewSQLiteConnection(ctx context.Context, dbPath string, inMemory bool) (*sq
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}
-	return sqlite3.NewSQLiteConnection(conn), nil
+	return sqlite3.NewSQLiteConnection(conn, true), nil
 }
