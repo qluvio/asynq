@@ -38,9 +38,9 @@ func BenchmarkEndToEndSimple(b *testing.B) {
 
 		srv := newServer(client.rdb, Config{
 			Concurrency: 10,
-			RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+			RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
 				return time.Second
-			},
+			}),
 			LogLevel: testLogLevel,
 		})
 		// Create a bunch of tasks
@@ -80,9 +80,9 @@ func BenchmarkEndToEnd(b *testing.B) {
 		client := NewClient(getClientConnOpt(b))
 		srv := newServer(client.rdb, Config{
 			Concurrency: 10,
-			RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+			RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
 				return time.Second
-			},
+			}),
 			LogLevel: testLogLevel,
 		})
 		// Create a bunch of tasks
@@ -210,9 +210,9 @@ func BenchmarkClientWhileServerRunning(b *testing.B) {
 		client := NewClient(getClientConnOpt(b))
 		srv := newServer(client.rdb, Config{
 			Concurrency: 10,
-			RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+			RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
 				return time.Second
-			},
+			}),
 			LogLevel: testLogLevel,
 		})
 		// Enqueue 10,000 tasks.

@@ -234,7 +234,7 @@ func TestRecoverer(t *testing.T) {
 			broker:         client.rdb,
 			queues:         (&QueuesConfig{Queues: map[string]int{"default": 1, "critical": 1}}).configure(),
 			interval:       1 * time.Second,
-			retryDelayFunc: func(n int, err error, task *Task) time.Duration { return 30 * time.Second },
+			retryDelayFunc: RetryDelayFunc(func(n int, err error, task *Task) time.Duration { return 30 * time.Second }),
 			isFailureFunc:  defaultIsFailureFunc,
 		})
 

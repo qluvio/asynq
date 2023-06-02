@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,9 +26,9 @@ func TestEndToEnd(t *testing.T) {
 	client := NewClient(getClientConnOpt(t))
 	srv := newServer(client.rdb, Config{
 		Concurrency: 10,
-		RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
 			return time.Second
-		},
+		}),
 		LogLevel: testLogLevel,
 	})
 	defer srv.Shutdown()
@@ -89,9 +90,9 @@ func TestEndToEndAsync(t *testing.T) {
 	client := NewClient(getClientConnOpt(t))
 	srv := newServer(client.rdb, Config{
 		Concurrency: 10,
-		RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
 			return time.Second
-		},
+		}),
 		LogLevel: testLogLevel,
 	})
 	defer srv.Shutdown()
@@ -177,9 +178,9 @@ func doTestEndToEndRestartWithActiveTasks(t *testing.T, regularShutdown bool) {
 		client := NewClient(getClientConnOpt(t))
 		srv := newServer(client.rdb, Config{
 			Concurrency: 10,
-			RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+			RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
 				return time.Second * 10
-			},
+			}),
 			LogLevel:             DebugLevel,
 			ProcessorEmptyQSleep: time.Millisecond * 200,
 			ShutdownTimeout:      time.Millisecond * 10,
@@ -239,9 +240,9 @@ func doTestEndToEndRestartWithActiveTasks(t *testing.T, regularShutdown bool) {
 		client := NewClient(getClientConnOpt(t))
 		srv := newServer(client.rdb, Config{
 			Concurrency: 10,
-			RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+			RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
 				return time.Second
-			},
+			}),
 			LogLevel:             DebugLevel,
 			ProcessorEmptyQSleep: time.Millisecond * 200,
 			ShutdownTimeout:      time.Millisecond * 10,
@@ -292,9 +293,9 @@ func TestCancelProcessing(t *testing.T) {
 	client := NewClient(getClientConnOpt(t))
 	srv := newServer(client.rdb, Config{
 		Concurrency: 10,
-		RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
 			return time.Second
-		},
+		}),
 		HeartBeaterInterval: time.Millisecond * 10,
 		LogLevel:            testLogLevel,
 	})
@@ -363,4 +364,69 @@ func TestCancelProcessing(t *testing.T) {
 
 	srv.Stop()
 	_ = client.Close()
+}
+
+// TestAfterTask
+func TestAfterTask(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	ctx.FlushDB()
+
+	client := NewClient(getClientConnOpt(t))
+	srv := newServer(client.rdb, Config{
+		Concurrency: 10,
+		LogLevel:    testLogLevel,
+	})
+	defer srv.Shutdown()
+
+	// Create a bunch of tasks
+	for i := 0; i < 10; i++ {
+		if _, err := client.Enqueue(makeTask(i)); err != nil {
+			t.Fatalf("could not enqueue a task: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(10)
+
+	after := []int(nil)
+	mu := sync.Mutex{}
+
+	received := func(i int) {
+		mu.Lock()
+		defer mu.Unlock()
+		after = append(after, i)
+	}
+
+	handler := func(ctx context.Context, task *Task) error {
+		defer wg.Done()
+		m := map[string]int{}
+		err := json.Unmarshal(task.payload, &m)
+		if err != nil {
+			t.Fatalf("unmarshal task: %v", err)
+		}
+		indx, ok := m["data"]
+		if !ok {
+			t.Fatalf("invalid payload: %v", string(task.payload))
+		}
+
+		if indx%2 == 0 {
+			task.CallAfter(func(string, error, bool) {
+				received(indx)
+			})
+		}
+		return nil
+	}
+
+	_ = srv.Start(HandlerFunc(handler))
+	wg.Wait()
+	srv.Stop()
+
+	// do the comparison after stopping the server to finish active tasks
+	sort.Ints(after)
+	require.Equal(t, []int{0, 2, 4, 6, 8}, after)
+
+	_ = client.Close()
+
 }
