@@ -21,6 +21,7 @@ type Connection struct {
 	config     *Config
 	tableNames map[string]string
 	tables     map[string]string
+	indexes    map[string][]string
 }
 
 func newConnection(ctx context.Context, config *Config, httpClient *http.Client, logger log.Base) (*Connection, error) {
@@ -42,6 +43,10 @@ func newConnection(ctx context.Context, config *Config, httpClient *http.Client,
 	conn.buildTables()
 
 	_, err = conn.CreateTablesIfNotExist()
+	if err != nil {
+		return nil, errors.E(op, errors.Internal, err)
+	}
+	err = conn.CreateIndexes()
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}

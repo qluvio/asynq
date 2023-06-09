@@ -22,6 +22,15 @@ var AllTables = map[string]string{
 	StatsTable:            CreateStatsTableFmt,
 }
 
+type IndexCtor struct {
+	Name   string
+	Format string
+}
+
+var AllIndexes = map[string][]IndexCtor{
+	TasksTable: {CreateTasksIndexesFmt},
+}
+
 const (
 	Version               = "1.0.0"
 	VersionTable          = "asynq_schema_version"
@@ -121,6 +130,13 @@ const (
 )`
 )
 
+var (
+	CreateTasksIndexesFmt = IndexCtor{
+		Name:   "idx_%s_queue_and_state",
+		Format: `CREATE INDEX IF NOT EXISTS %s ON %s (queue_name,state);`,
+	}
+)
+
 func (conn *Connection) buildTables() {
 	tables := make(map[string]string)
 	tableNames := make(map[string]string)
@@ -129,12 +145,27 @@ func (conn *Connection) buildTables() {
 		tables[t] = fmt.Sprintf(ctorFmt, t)
 		tableNames[table] = t
 	}
+	indexes := make(map[string][]string)
+	for table, ndxCtorFmts := range AllIndexes {
+		tableIndexes := []string(nil)
+		t := conn.config.TablesPrefix + table
+		for _, ndxCtorFmt := range ndxCtorFmts {
+			name := fmt.Sprintf(ndxCtorFmt.Name, t)
+			tableIndexes = append(tableIndexes, fmt.Sprintf(ndxCtorFmt.Format, name, t))
+		}
+		indexes[t] = tableIndexes
+	}
 	conn.tables = tables
 	conn.tableNames = tableNames
+	conn.indexes = indexes
 }
 
 func (conn *Connection) AllTables() map[string]string {
 	return conn.tables
+}
+
+func (conn *Connection) AllIndexes() map[string][]string {
+	return conn.indexes
 }
 
 func (conn *Connection) table(name string) string {
@@ -184,6 +215,25 @@ func (conn *Connection) CreateTables() error {
 	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
 	if err != nil {
 		return NewRqliteWsError("CreateTables", wrs, err, stmts)
+	}
+
+	return nil
+}
+
+func (conn *Connection) CreateIndexes() error {
+	stmts := make([]*sqlite3.Statement, 0)
+	indexes := make([]string, 0)
+	for _, stmt := range conn.AllIndexes() {
+		indexes = append(indexes, stmt...)
+	}
+	sort.Strings(indexes)
+	for _, stmt := range indexes {
+		stmts = append(stmts, Statement(stmt))
+	}
+
+	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
+	if err != nil {
+		return NewRqliteWsError("CreateIndexes", wrs, err, stmts)
 	}
 
 	return nil

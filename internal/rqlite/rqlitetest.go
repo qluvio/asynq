@@ -15,4 +15,9 @@ func FlushDB(tb testing.TB, conn *Connection) {
 	if err != nil {
 		tb.Fatal("Unable to create rqlite tables", err)
 	}
+	err = conn.CreateIndexes()
+	if err != nil {
+		tb.Fatal("Unable to create rqlite indexes", err)
+	}
+
 }
