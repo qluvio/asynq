@@ -20,6 +20,7 @@ import (
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/timeutil"
+	"github.com/stretchr/testify/require"
 )
 
 var taskCmpOpts = []cmp.Option{
@@ -651,6 +652,24 @@ func TestProcessorRetry(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProcessorNilRetry(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	task := NewTask("", nil)
+
+	var retryDelayFunc func(n int, e error, t *Task) time.Duration
+	s := newServer(client.rdb, Config{
+		RetryDelayFunc: RetryDelayFunc(retryDelayFunc),
+	})
+	d := s.processor.retryDelay.RetryDelay(1, nil, task)
+
+	require.True(t, d > 0)
 }
 
 func TestProcessorMarkAsComplete(t *testing.T) {
