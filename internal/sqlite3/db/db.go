@@ -90,7 +90,11 @@ func Open(dbPath string, fkEnabled bool) (*DB, error) {
 // OpenContext opens a file-based database, creating it if it does not exist.
 // After this function returns, an actual SQLite file will always exist.
 func OpenContext(ctx context.Context, dbPath string, fkEnabled bool) (*DB, error) {
-	rwDSN := fmt.Sprintf("file:%s?_fk=%s", dbPath, strconv.FormatBool(fkEnabled))
+	rwOpts := []string{
+		"_txlock=immediate",
+		fmt.Sprintf("_fk=%s", strconv.FormatBool(fkEnabled)),
+	}
+	rwDSN := fmt.Sprintf("file:%s?%s", dbPath, strings.Join(rwOpts, "&"))
 	rwDB, err := sql.Open("sqlite3", rwDSN)
 	if err != nil {
 		return nil, err
@@ -98,9 +102,9 @@ func OpenContext(ctx context.Context, dbPath string, fkEnabled bool) (*DB, error
 
 	roOpts := []string{
 		"mode=ro",
+		"_txlock=deferred",
 		fmt.Sprintf("_fk=%s", strconv.FormatBool(fkEnabled)),
 	}
-
 	roDSN := fmt.Sprintf("file:%s?%s", dbPath, strings.Join(roOpts, "&"))
 	roDB, err := sql.Open("sqlite3", roDSN)
 	if err != nil {
