@@ -31,7 +31,7 @@ func TestOneSecEnqueue(t *testing.T) {
 	r := setup(t)
 	FlushDB(t, r.conn)
 	msg := asynqtest.NewTaskMessage("task1", nil)
-	now := time.Now()
+	now := r.Now()
 	ctx := context.Background()
 
 	count := 0

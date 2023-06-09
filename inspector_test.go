@@ -291,7 +291,6 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 		oldestPendingMessageEnqueueTime map[string]time.Time
 		qname                           string
 		want                            *QueueInfo
-		wantRqlite                      *QueueInfo
 	}{
 		{
 			pending: map[string][]*base.TaskMessage{
@@ -358,21 +357,6 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				Paused:    false,
 				Timestamp: now,
 			},
-			// PENDING(GIL): see comment(s) in test TestCurrentStats in rqlite/inspect_test
-			wantRqlite: &QueueInfo{
-				Queue:     "default",
-				Latency:   15 * time.Second,
-				Size:      6,
-				Pending:   1,
-				Active:    1,
-				Scheduled: 2,
-				Retry:     2,
-				Archived:  0,
-				Processed: 122,
-				Failed:    2,
-				Paused:    false,
-				Timestamp: now,
-			},
 		},
 	}
 
@@ -397,18 +381,10 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 				tc.qname, got, err, tc.want)
 			continue
 		}
-		if brokerType == RqliteType || brokerType == SqliteType {
-			if diff := cmp.Diff(tc.wantRqlite, got, timeCmpOpt, ignoreMemUsg); diff != "" {
-				t.Errorf("r.GetQueueInfo(%q) = %v, %v, want %v, nil; (-want, +got)\n%s",
-					tc.qname, got, err, tc.want, diff)
-				continue
-			}
-		} else {
-			if diff := cmp.Diff(tc.want, got, timeCmpOpt, ignoreMemUsg); diff != "" {
-				t.Errorf("r.GetQueueInfo(%q) = %v, %v, want %v, nil; (-want, +got)\n%s",
-					tc.qname, got, err, tc.want, diff)
-				continue
-			}
+		if diff := cmp.Diff(tc.want, got, timeCmpOpt, ignoreMemUsg); diff != "" {
+			t.Errorf("r.GetQueueInfo(%q) = %v, %v, want %v, nil; (-want, +got)\n%s",
+				tc.qname, got, err, tc.want, diff)
+			continue
 		}
 	}
 
@@ -419,6 +395,14 @@ func TestInspectorHistory(t *testing.T) {
 	defer func() { _ = ctx.Close() }()
 	inspector := NewInspector(getClientConnOpt(t))
 	defer func() { _ = inspector.Close() }()
+
+	dayOf := func(now time.Time, deltaDays ...int) time.Time {
+		y, m, d := now.Date()
+		if len(deltaDays) > 0 && deltaDays[0] != 0 {
+			d += deltaDays[0]
+		}
+		return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	}
 
 	now := time.Now()
 	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
@@ -451,7 +435,7 @@ func TestInspectorHistory(t *testing.T) {
 		ctx.InitQueue(tc.qname)
 		// populate last n days data
 		for i := 0; i < tc.n; i++ {
-			ts := now.Add(-time.Duration(i) * 24 * time.Hour)
+			ts := dayOf(now.Add(-time.Duration(i) * 24 * time.Hour))
 			ctx.SeedProcessedQueue(processedCount(i), tc.qname, ts)
 			ctx.SeedFailedQueue(failedCount(i), tc.qname, ts)
 		}
@@ -471,10 +455,11 @@ func TestInspectorHistory(t *testing.T) {
 				Queue:     tc.qname,
 				Processed: processedCount(i),
 				Failed:    failedCount(i),
-				Date:      now.Add(-time.Duration(i) * 24 * time.Hour),
+				Date:      dayOf(now.Add(-time.Duration(i) * 24 * time.Hour)),
 			}
 			// Allow 2 seconds difference in timestamp.
 			timeCmpOpt := cmpopts.EquateApproxTime(2 * time.Second)
+			got[i].Date = dayOf(got[i].Date) // RDB incorrectly uses the current time !
 			if diff := cmp.Diff(want, got[i], timeCmpOpt); diff != "" {
 				t.Errorf("Inspector.History %d days ago data; got %+v, want %+v; (-want,+got):\n%s",
 					i, got[i], want, diff)

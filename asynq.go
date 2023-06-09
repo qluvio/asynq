@@ -196,8 +196,6 @@ func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time
 		info.State = TaskStateArchived
 	case base.TaskStateCompleted:
 		info.State = TaskStateCompleted
-	case base.TaskStateProcessed:
-		info.State = TaskStateProcessed
 	default:
 		panic(fmt.Sprintf("internal error: unknown state: %d", state))
 	}
@@ -225,9 +223,6 @@ const (
 
 	// TaskStateCompleted indicates that the task is processed successfully and retained until the retention TTL expires.
 	TaskStateCompleted
-
-	// TaskStateProcessed indicates that the task is processed.
-	TaskStateProcessed
 )
 
 func (s TaskState) String() string {
@@ -244,8 +239,6 @@ func (s TaskState) String() string {
 		return "archived"
 	case TaskStateCompleted:
 		return "completed"
-	case TaskStateProcessed:
-		return "processed"
 	}
 	panic("asynq: unknown task state")
 }
@@ -271,7 +264,7 @@ type ResultWriter struct {
 func (w *ResultWriter) Write(data []byte) (n int, err error) {
 	select {
 	case <-w.ctx.Done():
-		return 0, fmt.Errorf("failed to result task result: %v", w.ctx.Err())
+		return 0, fmt.Errorf("task %s: failed to write result: %v", w.id, w.ctx.Err())
 	default:
 	}
 	return w.broker.WriteResult(w.qname, w.id, data)

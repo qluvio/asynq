@@ -27,6 +27,7 @@ const (
 	PubsubPollingInterval     = time.Millisecond * 200 // polling period for pub-sub
 	rqliteType                = "rqlite"
 	sqliteType                = "sqlite"
+	dayFormat                 = "2006-01-02"
 )
 
 var _ base.Broker = (*RQLite)(nil)
@@ -182,7 +183,8 @@ func (r *RQLite) open() error {
 	r.conn, err = newConnection(
 		context.Background(), // PENDING(GIL): use a context with deadline ...
 		r.config,
-		r.httpClient)
+		r.httpClient,
+		r.logger)
 	if err != nil {
 		return err
 	}

@@ -176,12 +176,14 @@ func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, 
 			selectTaskRow+
 				" FROM "+conn.table(TasksTable)+
 				" WHERE queue_name=? ", queue),
+		conn.queueDayStatsStatement(queue, now),
 	}
+
 	qrs, err := conn.QueryStmt(conn.ctx(), stmts...)
 	if err != nil {
 		return nil, NewRqliteRsError(op, qrs, err, stmts)
 	}
-	err = expectQueryResultCount(op, 2, qrs)
+	err = expectQueryResultCount(op, 3, qrs)
 	if err != nil {
 		return nil, err
 	}
@@ -218,25 +220,19 @@ func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, 
 				ret.Scheduled++
 			case retry:
 				ret.Retry++
-				if task.failed {
-					ret.Failed++
-				}
 			case archived:
 				ret.Archived++
-				if task.failed {
-					ret.Failed++
-				}
 			case completed:
 				ret.Completed++
-				ret.Processed++
-			case processed:
-				ret.Processed++
 			}
 		}
 		ret.Latency = now.Sub(time.Unix(0, oldestPending))
 		// processed are not included in size
-		ret.Size = ret.Pending + ret.Active + ret.Scheduled + ret.Retry + ret.Archived
-		ret.Processed += ret.Failed
+		ret.Size = ret.Pending + ret.Active + ret.Scheduled + ret.Retry + ret.Archived + ret.Completed
+
+		ds, err := parseDailyStatsRow(qrs[2])
+		ret.Processed = ds.Processed
+		ret.Failed = ds.Failed
 
 	} else if qrs[1].Next() {
 		// return error ?
@@ -248,81 +244,7 @@ func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, 
 }
 
 func (conn *Connection) historicalStats(now time.Time, queue string, ndays int) ([]*base.DailyStats, error) {
-	op := errors.Op("historicalStats")
-	const day = 24 * time.Hour
-
-	stmts := make([]*sqlite3.Statement, 0, ndays*3)
-	last := now.Unix()
-
-	for i := 0; i < ndays; i++ {
-		first := now.Add(-time.Duration(i+1) * day).Unix()
-
-		// processed
-		stmts = append(stmts, Statement("SELECT COUNT(*) "+
-			" FROM "+conn.table(TasksTable)+
-			" WHERE queue_name=? AND state='processed' AND done_at>? AND done_at<=?",
-			queue,
-			first,
-			last))
-		// retry/failed
-		stmts = append(stmts, Statement("SELECT COUNT(*) "+
-			" FROM "+conn.table(TasksTable)+
-			" WHERE queue_name=? AND state='retry' AND failed=true AND done_at>? AND done_at<=?",
-			queue,
-			first,
-			last))
-		// archived/failed
-		stmts = append(stmts, Statement("SELECT COUNT(*) "+
-			" FROM "+conn.table(TasksTable)+
-			" WHERE queue_name=? AND state='archived' AND failed=true AND archived_at>? AND archived_at<=?",
-			queue,
-			first,
-			last))
-		last = first
-	}
-
-	qrs, err := conn.QueryStmt(conn.ctx(), stmts...)
-	if err != nil {
-		return nil, NewRqliteRsError(op, qrs, err, stmts)
-	}
-	err = expectQueryResultCount(op, ndays*3, qrs)
-	if err != nil {
-		return nil, errors.E(op, errors.Internal, err)
-	}
-	ret := make([]*base.DailyStats, 0, ndays)
-	for i := 0; i < ndays; i++ {
-		ts := now.Add(-time.Duration(i) * 24 * time.Hour)
-		ndx := i * 3
-
-		nbProcessed := 0
-		qrs[ndx].Next()
-		err = qrs[ndx].Scan(&nbProcessed)
-		if err != nil {
-			return nil, errors.E(op, errors.Internal, err)
-		}
-
-		nbRetry := 0
-		qrs[ndx+1].Next()
-		err = qrs[ndx+1].Scan(&nbRetry)
-		if err != nil {
-			return nil, errors.E(op, errors.Internal, err)
-		}
-
-		nbArchived := 0
-		qrs[ndx+2].Next()
-		err = qrs[ndx+2].Scan(&nbArchived)
-		if err != nil {
-			return nil, errors.E(op, errors.Internal, err)
-		}
-
-		ret = append(ret, &base.DailyStats{
-			Queue:     queue,
-			Processed: nbProcessed,
-			Failed:    nbArchived + nbRetry,
-			Time:      ts,
-		})
-	}
-	return ret, nil
+	return conn.queueStats(now, queue, ndays)
 }
 
 func (conn *Connection) getTaskInfo(now time.Time, qname string, taskid string) (*base.TaskInfo, error) {

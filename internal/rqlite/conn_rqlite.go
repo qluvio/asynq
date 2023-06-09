@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/hibiken/asynq/internal/log"
 	"github.com/hibiken/asynq/internal/sqlite3"
 	"github.com/rqlite/gorqlite"
 )
@@ -13,8 +14,15 @@ type RQLiteConnection struct {
 	conn *gorqlite.Connection
 }
 
-func NewRQLiteConnection(ctx context.Context, config *Config, httpClient *http.Client) (*Connection, error) {
+func NewRQLiteConnection(ctx context.Context, config *Config, httpClient *http.Client, logger log.Base) (*Connection, error) {
 	op := errors.Op("open")
+
+	type Tracer interface {
+		Tracef(format string, args ...interface{})
+	}
+	if tracer, ok := logger.(Tracer); ok {
+		gorqlite.WithTracer(tracer)
+	}
 
 	rqliteConn, err := gorqlite.OpenContext(ctx, config.RqliteUrl, httpClient)
 	if err != nil {

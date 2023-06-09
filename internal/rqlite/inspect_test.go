@@ -67,17 +67,17 @@ func TestCurrentStats(t *testing.T) {
 	now := r.Now()
 
 	tests := []struct {
-		pending    map[string][]*base.TaskMessage
-		inProgress map[string][]*base.TaskMessage
-		scheduled  map[string][]base.Z
-		retry      map[string][]base.Z
-		archived   map[string][]base.Z
-		completed  map[string][]base.Z
-		processed  map[string]int
-		failed     map[string]int
-		paused     []string
-		qname      string
-		want       *base.Stats
+		pending   map[string][]*base.TaskMessage
+		active    map[string][]*base.TaskMessage
+		scheduled map[string][]base.Z
+		retry     map[string][]base.Z
+		archived  map[string][]base.Z
+		completed map[string][]base.Z
+		processed map[string]int
+		failed    map[string]int
+		paused    []string
+		qname     string
+		want      *base.Stats
 	}{
 		{
 			pending: map[string][]*base.TaskMessage{
@@ -85,7 +85,7 @@ func TestCurrentStats(t *testing.T) {
 				"critical": {m5},
 				"low":      {m6},
 			},
-			inProgress: map[string][]*base.TaskMessage{
+			active: map[string][]*base.TaskMessage{
 				"default":  {m2},
 				"critical": {},
 				"low":      {},
@@ -128,11 +128,11 @@ func TestCurrentStats(t *testing.T) {
 			want: &base.Stats{
 				Queue:     "default",
 				Paused:    false,
-				Size:      6,
+				Size:      4,
 				Pending:   1,
 				Active:    1,
 				Scheduled: 2,
-				Retry:     2,
+				Retry:     0,
 				Archived:  0,
 				Completed: 0,
 				Processed: 122, // the redis test says 120 (but due to the way the test is inited) the doc says processed include failed!
@@ -146,7 +146,7 @@ func TestCurrentStats(t *testing.T) {
 				"critical": {m5},
 				"low":      {m6},
 			},
-			inProgress: map[string][]*base.TaskMessage{
+			active: map[string][]*base.TaskMessage{
 				"default":  {m2},
 				"critical": {},
 				"low":      {},
@@ -189,8 +189,8 @@ func TestCurrentStats(t *testing.T) {
 			want: &base.Stats{
 				Queue:     "critical",
 				Paused:    true,
-				Size:      1,
-				Pending:   1,
+				Size:      1, // redis test has 0 but m5 not in pending
+				Pending:   1, // redis test has 0 but m5 not in pending
 				Active:    0,
 				Scheduled: 0,
 				Retry:     0,
@@ -203,7 +203,7 @@ func TestCurrentStats(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
+	for i, tc := range tests {
 		FlushDB(t, r.conn)
 		for _, qname := range tc.paused {
 			err := r.conn.EnsureQueue(qname)
@@ -213,17 +213,14 @@ func TestCurrentStats(t *testing.T) {
 			}
 		}
 		SeedAllPendingQueues(t, r, tc.pending)
-		SeedAllActiveQueues(t, r, tc.inProgress, true)
+		SeedAllActiveQueues(t, r, tc.active, true)
 		SeedAllScheduledQueues(t, r, tc.scheduled)
 		SeedAllRetryQueues(t, r, tc.retry)
 		SeedAllArchivedQueues(t, r, tc.archived)
 		SeedAllCompletedQueues(t, r, tc.completed)
 
-		SeedAllProcessedQueues(t, r, tc.processed, now.Unix())
-		// PENDING(GIL): a task that fails go either into archived or retry
-		//   in this test we make it go to retry which changes the expected 'retry'
-		//   and 'size' counts (compared to RDB)
-		SeedAllFailedQueues(t, r, tc.failed, now.Unix())
+		SeedAllProcessedQueues(t, r, tc.processed, now)
+		SeedAllFailedQueues(t, r, tc.failed, now, false)
 
 		got, err := r.CurrentStats(tc.qname)
 		if err != nil {
@@ -233,6 +230,7 @@ func TestCurrentStats(t *testing.T) {
 
 		ignoreMemUsg := cmpopts.IgnoreFields(base.Stats{}, "MemoryUsage")
 		if diff := cmp.Diff(tc.want, got, timeCmpOpt, ignoreMemUsg); diff != "" {
+			t.Logf("test %d", i)
 			t.Errorf("r.CurrentStats(%q) = %v, %v, want %v, nil; (-want, +got)\n%s", tc.qname, got, err, tc.want, diff)
 			continue
 		}
@@ -272,14 +270,14 @@ func TestHistoricalStats(t *testing.T) {
 		return i + 1
 	}
 
-	for _, tc := range tests {
+	for ti, tc := range tests {
 		FlushDB(t, r.conn)
 
 		// populate last n days data
 		for i := 0; i < tc.n; i++ {
 			ts := now.Add(-time.Duration(i) * 24 * time.Hour)
-			SeedProcessedQueue(t, r, processedCount(i), tc.qname, ts.Unix())
-			SeedFailedQueue(t, r, failedCount(i), tc.qname, ts.Unix())
+			SeedProcessedQueue(t, r, processedCount(i), tc.qname, ts)
+			SeedFailedQueue(t, r, failedCount(i), tc.qname, ts, true)
 		}
 
 		got, err := r.HistoricalStats(tc.qname, tc.n)
@@ -298,11 +296,12 @@ func TestHistoricalStats(t *testing.T) {
 				Queue:     tc.qname,
 				Processed: processedCount(i),
 				Failed:    failedCount(i),
-				Time:      now.Add(-time.Duration(i) * 24 * time.Hour),
+				Time:      dayOf(now.Add(-time.Duration(i) * 24 * time.Hour)),
 			}
 			// Allow 2 seconds difference in timestamp.
 			cmpOpt := cmpopts.EquateApproxTime(2 * time.Second)
 			if diff := cmp.Diff(want, got[i], cmpOpt); diff != "" {
+				t.Logf("test %d, historical-stat: %d", ti, i)
 				t.Errorf("Rqlite.HistoricalStats for the last %d days; got %+v, want %+v; (-want,+got):\n%s", i, got[i], want, diff)
 			}
 		}
@@ -314,7 +313,7 @@ func TestGetTaskInfo(t *testing.T) {
 	r := setup(t)
 	defer func() { _ = r.Close() }()
 
-	now := time.Now()
+	now := r.Now()
 	fiveMinsFromNow := now.Add(5 * time.Minute)
 	oneHourFromNow := now.Add(1 * time.Hour)
 	twoHoursAgo := now.Add(-2 * time.Hour)
@@ -461,7 +460,7 @@ func TestGetTaskInfoError(t *testing.T) {
 	m4 := h.NewTaskMessageWithQueue("task4", nil, "custom")
 	m5 := h.NewTaskMessageWithQueue("task5", nil, "custom")
 
-	now := time.Now()
+	now := r.Now()
 	fiveMinsFromNow := now.Add(5 * time.Minute)
 	oneHourFromNow := now.Add(1 * time.Hour)
 	twoHoursAgo := now.Add(-2 * time.Hour)

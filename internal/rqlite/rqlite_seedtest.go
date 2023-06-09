@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/sqlite3"
 	"github.com/stretchr/testify/require"
@@ -73,6 +72,8 @@ func SeedCompletedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 
+		st = r.conn.processedStatsStatement(time.Unix(msg.CompletedAt, 0), msg.Queue)
+		wrs, err = r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err)
 	}
 }
@@ -151,14 +152,14 @@ func SeedActiveQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname s
 	}
 }
 
-func SeedAllRetryQueues(tb testing.TB, r *RQLite, deadlines map[string][]base.Z) {
+func SeedAllRetryQueues(tb testing.TB, r *RQLite, deadlines map[string][]base.Z, noStats ...bool) {
 	for q, msgs := range deadlines {
-		SeedRetryQueue(tb, r, msgs, q)
+		SeedRetryQueue(tb, r, msgs, q, noStats...)
 	}
 }
 
 // SeedRetryQueue initializes the specified queue with the given retry messages.
-func SeedRetryQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
+func SeedRetryQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string, noStats ...bool) {
 	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 
@@ -183,6 +184,13 @@ func SeedRetryQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 			msg.Message.ID)
 		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
+
+		if len(noStats) == 0 || !noStats[0] {
+			st = r.conn.failedStatsStatement(time.Unix(retryAt, 0), m.Queue)
+			wrs, err = r.conn.WriteStmt(r.conn.ctx(), st)
+			require.NoError(tb, err, "error %v", wrs[0].Err)
+		}
+
 	}
 }
 
@@ -219,7 +227,9 @@ func SeedArchivedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 
-		require.NoError(tb, err)
+		st = r.conn.failedStatsStatement(time.Unix(deadline, 0), m.Queue)
+		wrs, err = r.conn.WriteStmt(r.conn.ctx(), st)
+		require.NoError(tb, err, "error %v", wrs[0].Err)
 
 	}
 }
@@ -252,73 +262,58 @@ func SeedScheduledQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
 	}
 }
 
-func SeedAllProcessedQueues(tb testing.TB, r *RQLite, processed map[string]int, doneAt int64) {
+func SeedAllProcessedQueues(tb testing.TB, r *RQLite, processed map[string]int, doneAt time.Time) {
 	for q, count := range processed {
 		SeedProcessedQueue(tb, r, count, q, doneAt)
 	}
 }
 
 // SeedProcessedQueue initializes the specified queue with the number of processed messages.
-func SeedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneAt int64) {
+func SeedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneAt time.Time) {
 	seedProcessedQueue(tb, r, count, qname, doneAt, false)
 }
 
 // seedProcessedQueue initializes the specified queue with the number of processed messages.
-func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneAt int64, failed bool) {
+func seedProcessedQueue(tb testing.TB, r *RQLite, count int, qname string, doneAt time.Time, failed bool) {
 	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 
-	stmts := make([]*sqlite3.Statement, 0, count)
-	for i := 0; i < count; i++ {
-
-		task := h.NewTaskMessage("", nil)
-		em, err := encodeMessage(task)
-		require.NoError(tb, err)
-		var st *sqlite3.Statement
-		if !failed {
-			st = Statement(
-				"INSERT INTO "+r.conn.table(TasksTable)+"(queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, pndx, state, done_at) "+
-					"VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+r.conn.table(TasksTable)+")+1, ?, ?)",
-				qname,
-				task.Type,
-				task.ID,
-				task.ID,
-				em,
-				0,
-				0,
-				processed,
-				doneAt)
-		} else {
-			st = Statement(
-				"INSERT INTO "+r.conn.table(TasksTable)+"(queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, pndx, state, done_at, failed) "+
-					"VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+r.conn.table(TasksTable)+")+1, ?, ?, ?)",
-				qname,
-				task.Type,
-				task.ID,
-				task.ID,
-				em,
-				0,
-				0,
-				retry,
-				doneAt,
-				true)
-		}
-		stmts = append(stmts, st)
+	var st *sqlite3.Statement
+	if !failed {
+		st = r.conn.processedStatsStatementCount(doneAt, qname, count)
+	} else {
+		st = r.conn.failedStatsStatementCount(doneAt, qname, count, count)
 	}
 
-	if len(stmts) > 0 {
-		_, err = r.conn.WriteStmt(r.conn.ctx(), stmts...)
-		require.NoError(tb, err, "error %v", err)
-	}
+	wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
+	require.NoError(tb, err, "error %v", err)
+	require.True(tb, len(wrs) > 0)
+	require.NoError(tb, wrs[0].Err)
 }
 
-func SeedFailedQueue(tb testing.TB, r *RQLite, count int, qname string, doneAt int64) {
+// seedFailedQueue initializes the specified queue with the number of failed messages.
+func seedFailedQueue(tb testing.TB, r *RQLite, count int, qname string, doneAt time.Time) {
+	err := r.conn.EnsureQueue(qname)
+	require.NoError(tb, err)
+
+	st := r.conn.failedOnlyStatsStatementCount(doneAt, qname, count)
+	wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
+	require.NoError(tb, err, "error %v", err)
+	require.True(tb, len(wrs) > 0)
+	require.NoError(tb, wrs[0].Err)
+}
+
+func SeedFailedQueue(tb testing.TB, r *RQLite, count int, qname string, doneAt time.Time, failedOnly bool) {
+	if failedOnly {
+		seedFailedQueue(tb, r, count, qname, doneAt)
+		return
+	}
 	seedProcessedQueue(tb, r, count, qname, doneAt, true)
 }
 
-func SeedAllFailedQueues(tb testing.TB, r *RQLite, failed map[string]int, doneAt int64) {
+func SeedAllFailedQueues(tb testing.TB, r *RQLite, failed map[string]int, doneAt time.Time, failedOnly bool) {
 	for q, count := range failed {
-		SeedFailedQueue(tb, r, count, q, doneAt)
+		SeedFailedQueue(tb, r, count, q, doneAt, failedOnly)
 	}
 }
 

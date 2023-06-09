@@ -66,8 +66,6 @@ func (s TaskState) String() string {
 		return "archived"
 	case TaskStateCompleted:
 		return "completed"
-	case TaskStateProcessed:
-		return "processed"
 	}
 	panic(fmt.Sprintf("internal error: unknown task state %d", s))
 }
@@ -86,8 +84,6 @@ func TaskStateFromString(s string) (TaskState, error) {
 		return TaskStateArchived, nil
 	case "completed":
 		return TaskStateCompleted, nil
-	case "processed":
-		return TaskStateProcessed, nil
 	}
 	return 0, errors.E(errors.FailedPrecondition, fmt.Sprintf("%q is not supported task state", s))
 }

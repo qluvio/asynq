@@ -2,20 +2,26 @@ package sqlite3
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/sqlite3/command"
 	"github.com/hibiken/asynq/internal/sqlite3/db"
 	"github.com/hibiken/asynq/internal/sqlite3/encoding"
+	"github.com/mattn/go-sqlite3"
 )
 
 type SQLiteConnection struct {
-	db *db.DB
+	mu        sync.Mutex // protect db
+	db        *db.DB     // the actual connection
+	retryBusy bool       // retry 'execute' on sqlite3.ErrBusy error: 'database is locked'
 }
 
-func NewSQLiteConnection(db *db.DB) *SQLiteConnection {
+func NewSQLiteConnection(db *db.DB, retryBusy bool) *SQLiteConnection {
 	ret := &SQLiteConnection{
-		db: db,
+		db:        db,
+		retryBusy: retryBusy,
 	}
 	return ret
 }
@@ -43,13 +49,19 @@ func newRequest(stmts []*Statement) *command.Request {
 		})
 	}
 	return &command.Request{
-		Transaction: true, // PENDING(GIL): config
+		Transaction: true,
 		Statements:  statements,
 	}
 }
 
+func (c *SQLiteConnection) QueryContext(ctx context.Context, req *command.Request, xTime bool) ([]*command.QueryRows, error) {
+	// no lock: db uses a 'read' connection
+	return c.db.QueryContext(ctx, req, xTime)
+}
+
 func (c *SQLiteConnection) QueryStmt(ctx context.Context, stmts ...*Statement) ([]QueryResult, error) {
-	qrows, err := c.db.QueryContext(ctx, newRequest(stmts), true) // PENDING(GIL): config
+	req := newRequest(stmts)
+	qrows, err := c.QueryContext(ctx, req, true)
 	if err != nil {
 		return nil, err
 	}
@@ -66,8 +78,48 @@ func (c *SQLiteConnection) QueryStmt(ctx context.Context, stmts ...*Statement) (
 	return ret, nil
 }
 
+func (c *SQLiteConnection) ExecuteContext(ctx context.Context, req *command.Request, xTime bool) ([]*command.ExecuteResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	attempt := 0
+	// uncomment for troubleshooting
+	//t0 := time.Now()
+
+	// We are protected by taking the lock for concurrent calls using this
+	// connection, but not against concurrent calls made with another connection.
+	// Hence, retry write attempts that failed with error: SQLITE_BUSY - 05, with
+	// message 'database is locked'.
+	//
+	// Note that all constructors of db.DB open their internal write connections
+	// with option '_txlock=immediate' which is expected to provide a failure
+	// upfront (and not after executing some statements). Also function newRequest
+	// (in this file) always uses Transaction: true
+
+	for {
+		attempt++
+		wrs, err := c.db.ExecuteContext(ctx, req, xTime)
+		if sqliteErr, ok := err.(sqlite3.Error); ok &&
+			sqliteErr.Code == sqlite3.ErrBusy &&
+			attempt <= 20 &&
+			c.retryBusy {
+			// 99% of errors (in a unit-test) were eliminated with a 5ms delay
+			// but half of them required 5 retries or more.
+			// Also: using an exponential backoff did not help at all.
+			time.Sleep(time.Millisecond * 5)
+			continue
+		}
+		// uncomment for troubleshooting
+		//if attempt > 1 {
+		//	fmt.Println("ExecuteContext", "attempt", attempt, "d", time.Now().Sub(t0), "err", err)
+		//}
+		return wrs, err
+	}
+}
+
 func (c *SQLiteConnection) WriteStmt(ctx context.Context, stmts ...*Statement) ([]WriteResult, error) {
-	wrs, err := c.db.ExecuteContext(ctx, newRequest(stmts), true) // PENDING(GIL): config
+	req := newRequest(stmts)
+	wrs, err := c.ExecuteContext(ctx, req, true)
 	if err != nil {
 		return nil, err
 	}
