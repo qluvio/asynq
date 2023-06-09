@@ -28,8 +28,11 @@ func GetPendingMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMess
 	return getMessages(tb, r, queue, pending)
 }
 
-func GetProcessedMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMessage {
-	return getMessages(tb, r, queue, processed)
+func GetQueueStats(tb testing.TB, r *RQLite, queue string) []*base.DailyStats {
+	require.NotNil(tb, r.conn)
+	ret, err := r.conn.queueStats(r.Now(), queue, 0)
+	require.NoError(tb, err)
+	return ret
 }
 
 func GetCompletedEntries(tb testing.TB, r *RQLite, qname string) []base.Z {

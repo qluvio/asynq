@@ -19,6 +19,7 @@ var AllTables = map[string]string{
 	SchedulerHistoryTable: CreateSchedulerHistoryTableFmt,
 	CancellationTable:     CreateCancellationTableFmt,
 	VersionTable:          CreateVersionTableFmt,
+	StatsTable:            CreateStatsTableFmt,
 }
 
 const (
@@ -42,7 +43,6 @@ const (
 	scheduled = "scheduled"
 	retry     = "retry"
 	archived  = "archived"
-	processed = "processed"
 	completed = "completed"
 
 	TasksTable          = "asynq_tasks"
@@ -108,6 +108,16 @@ const (
 	ndx                     integer not null primary key,
 	uuid                    text not null,
 	cancelled_at            integer
+)`
+
+	StatsTable          = "asynq_stats"
+	CreateStatsTableFmt = `CREATE TABLE IF NOT EXISTS %s (
+	day                    text not null, 
+	ts                     integer,  
+	queue_name             text not null,
+	processed              integer DEFAULT 0,
+	failed                 integer DEFAULT 0,
+    PRIMARY KEY (day, queue_name)                              
 )`
 )
 

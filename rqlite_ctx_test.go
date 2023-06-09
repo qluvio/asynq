@@ -128,19 +128,19 @@ func (c *rqliteTestContext) SeedAllScheduledQueues(scheduled map[string][]base.Z
 }
 
 func (c *rqliteTestContext) SeedAllProcessedQueues(processed map[string]int, doneAt time.Time) {
-	rqlite.SeedAllProcessedQueues(c.tb, c.r, processed, doneAt.Unix())
+	rqlite.SeedAllProcessedQueues(c.tb, c.r, processed, doneAt)
 }
 
 func (c *rqliteTestContext) SeedAllFailedQueues(failed map[string]int, doneAt time.Time) {
-	rqlite.SeedAllFailedQueues(c.tb, c.r, failed, doneAt.Unix())
+	rqlite.SeedAllFailedQueues(c.tb, c.r, failed, doneAt, true)
 }
 
 func (c *rqliteTestContext) SeedProcessedQueue(processedCount int, qname string, ts time.Time) {
-	rqlite.SeedProcessedQueue(c.tb, c.r, processedCount, qname, ts.Unix())
+	rqlite.SeedProcessedQueue(c.tb, c.r, processedCount, qname, ts)
 }
 
 func (c *rqliteTestContext) SeedFailedQueue(failedCount int, qname string, ts time.Time) {
-	rqlite.SeedFailedQueue(c.tb, c.r, failedCount, qname, ts.Unix())
+	rqlite.SeedFailedQueue(c.tb, c.r, failedCount, qname, ts, true)
 }
 
 func (c *rqliteTestContext) SeedLastPendingSince(qname string, enqueueTime time.Time) {
