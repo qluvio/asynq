@@ -329,7 +329,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		cfg.ServerID = uuid.New().String()
 	}
 	delayFunc := cfg.RetryDelayFunc
-	if delayFunc == nil {
+	if IsNil(delayFunc) {
 		delayFunc = DefaultRetryDelay
 	}
 	isFailureFunc := cfg.IsFailure
