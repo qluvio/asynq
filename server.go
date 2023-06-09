@@ -390,7 +390,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	syncCh := make(chan *syncRequest)
 	state := base.NewServerState()
 	cancels := base.NewCancelations()
-	after := base.NewAfterTasks()
+	afterTasks := base.NewAfterTasks()
 
 	syncer := newSyncer(syncerParams{
 		logger:     logger,
@@ -422,7 +422,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		isFailureFunc:   isFailureFunc,
 		syncCh:          syncCh,
 		cancelations:    cancels,
-		after:           after,
+		afterTasks:      afterTasks,
 		concurrency:     n,
 		queues:          cfg.Queues,
 		errHandler:      cfg.ErrorHandler,

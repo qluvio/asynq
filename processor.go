@@ -80,8 +80,8 @@ type processor struct {
 	// cancelations is a set of cancel functions for all active tasks.
 	cancelations *base.Cancelations
 
-	// after is a set of function set by active tasks to be called after task execution
-	after *base.AfterTasks
+	// afterTasks is a set of function set by active tasks to be called after task execution
+	afterTasks *base.AfterTasks
 
 	starting chan<- *workerInfo
 	finished chan<- *base.TaskMessage
@@ -97,7 +97,7 @@ type processorParams struct {
 	isFailureFunc   func(error) bool
 	syncCh          chan<- *syncRequest
 	cancelations    *base.Cancelations
-	after           *base.AfterTasks
+	afterTasks      *base.AfterTasks
 	concurrency     int // currently limited to 32767; see processor.fini()
 	queues          Queues
 	errHandler      ErrorHandler
@@ -126,7 +126,7 @@ func newProcessor(params processorParams) *processor {
 		isFailureFunc:   params.isFailureFunc,
 		syncRequestCh:   params.syncCh,
 		cancelations:    params.cancelations,
-		after:           params.after,
+		afterTasks:      params.afterTasks,
 		errLogLimiter:   rate.NewLimiter(rate.Every(3*time.Second), 1),
 		sema:            make(chan struct{}, params.concurrency),
 		done:            make(chan struct{}),
@@ -268,7 +268,7 @@ func (p *processor) exec() {
 			ap.mutex.Lock()
 			go func() {
 				defer ap.mutex.Unlock()
-				task := newTask(msg.Type, msg.Payload, rw, ap, func(fn func(string, error, bool)) { p.after.Add(msg.ID, fn) })
+				task := newTask(msg.Type, msg.Payload, rw, ap, func(fn func(string, error, bool)) { p.afterTasks.Add(msg.ID, fn) })
 				resCh <- p.perform(ctx, task)
 			}()
 			// finish task processing in p.fini() goroutine to allow this goroutine to end
@@ -460,9 +460,9 @@ func (p *processor) requeueAborting(msg *base.TaskMessage) {
 }
 
 func (p *processor) taskFinished(msg *base.TaskMessage, err error, isFailure bool) {
-	if fn, ok := p.after.Get(msg.ID); ok {
+	if fn, ok := p.afterTasks.Get(msg.ID); ok {
 		fn(msg.ID, err, isFailure)
-		p.after.Delete(msg.ID)
+		p.afterTasks.Delete(msg.ID)
 	}
 }
 
