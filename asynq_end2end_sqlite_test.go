@@ -42,9 +42,9 @@ func TestLocalLongRun(t *testing.T) {
 	srv := newServer(client.rdb, Config{
 		ServerID:    "inod1111",
 		Concurrency: 10,
-		RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
 			return time.Millisecond * 200
-		},
+		}),
 		LogLevel:             InfoLevel,
 		ProcessorEmptyQSleep: time.Millisecond * 200,
 		ShutdownTimeout:      time.Millisecond * 10,

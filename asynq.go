@@ -35,6 +35,9 @@ type Task struct {
 
 	// p is the AsyncProcessor for the task.
 	p *AsyncProcessor
+
+	// callAfter lets task processing schedule a function call after task execution
+	callAfter func(fn func(string, error, bool))
 }
 
 func (t *Task) Type() string    { return t.typename }
@@ -52,6 +55,19 @@ func (t *Task) ResultWriter() *ResultWriter { return t.w }
 // Only the tasks passed to Handler.ProcessTask have a valid AsyncProcessor pointer.
 func (t *Task) AsyncProcessor() *AsyncProcessor { return t.p }
 
+// CallAfter enables task processing to schedule execution of a function after the
+// task execution. The function is guaranteed to be called once the task state has
+// changed in the broker database.
+// Function parameter:
+// string: task id
+// error: is the error returned by task execution.
+// bool: indicates if the error - if not nil - was considered as an actual error
+func (t *Task) CallAfter(fn func(string, error, bool)) {
+	if t.callAfter != nil {
+		t.callAfter(fn)
+	}
+}
+
 // NewTask returns a new Task given a type name and payload data.
 // Options can be passed to configure task processing behavior.
 func NewTask(typename string, payload []byte, opts ...Option) *Task {
@@ -63,12 +79,13 @@ func NewTask(typename string, payload []byte, opts ...Option) *Task {
 }
 
 // newTask creates a task with the given typename, payload, ResultWriter, and AsyncProcessor.
-func newTask(typename string, payload []byte, w *ResultWriter, p *AsyncProcessor) *Task {
+func newTask(typename string, payload []byte, w *ResultWriter, p *AsyncProcessor, ca func(fn func(string, error, bool))) *Task {
 	return &Task{
-		typename: typename,
-		payload:  payload,
-		w:        w,
-		p:        p,
+		typename:  typename,
+		payload:   payload,
+		w:         w,
+		p:         p,
+		callAfter: ca,
 	}
 }
 

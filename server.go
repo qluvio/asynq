@@ -66,7 +66,7 @@ type Config struct {
 	// Function to calculate retry delay for a failed task.
 	//
 	// By default, it uses exponential backoff algorithm to calculate the delay.
-	RetryDelayFunc RetryDelayFunc
+	RetryDelayFunc RetryDelayHandler
 
 	// Predicate function to determine whether the error returned from Handler is a failure.
 	// If the function returns false, Server will not increment the retried counter for the task,
@@ -158,7 +158,7 @@ type Config struct {
 	JanitorInterval time.Duration
 }
 
-// An ErrorHandler handles an error occured during task processing.
+// An ErrorHandler handles an error that occurred during task processing.
 type ErrorHandler interface {
 	HandleError(ctx context.Context, task *Task, err error)
 }
@@ -172,6 +172,10 @@ func (fn ErrorHandlerFunc) HandleError(ctx context.Context, task *Task, err erro
 	fn(ctx, task, err)
 }
 
+type RetryDelayHandler interface {
+	RetryDelay(n int, e error, t *Task) time.Duration
+}
+
 // RetryDelayFunc calculates the retry delay duration for a failed task given
 // the retry count, error, and the task.
 //
@@ -179,6 +183,10 @@ func (fn ErrorHandlerFunc) HandleError(ctx context.Context, task *Task, err erro
 // e is the error returned by the task handler.
 // t is the task in question.
 type RetryDelayFunc func(n int, e error, t *Task) time.Duration
+
+func (fn RetryDelayFunc) RetryDelay(n int, e error, t *Task) time.Duration {
+	return fn(n, e, t)
+}
 
 // Logger supports logging at various log levels.
 type Logger interface {
@@ -291,6 +299,8 @@ func DefaultRetryDelayFunc(n int, e error, t *Task) time.Duration {
 	return time.Duration(s) * time.Second
 }
 
+var DefaultRetryDelay = RetryDelayFunc(DefaultRetryDelayFunc)
+
 func defaultIsFailureFunc(err error) bool { return err != nil }
 
 const (
@@ -320,7 +330,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	}
 	delayFunc := cfg.RetryDelayFunc
 	if delayFunc == nil {
-		delayFunc = DefaultRetryDelayFunc
+		delayFunc = DefaultRetryDelay
 	}
 	isFailureFunc := cfg.IsFailure
 	if isFailureFunc == nil {
@@ -380,6 +390,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	syncCh := make(chan *syncRequest)
 	state := base.NewServerState()
 	cancels := base.NewCancelations()
+	afterTasks := base.NewAfterTasks()
 
 	syncer := newSyncer(syncerParams{
 		logger:     logger,
@@ -411,6 +422,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		isFailureFunc:   isFailureFunc,
 		syncCh:          syncCh,
 		cancelations:    cancels,
+		afterTasks:      afterTasks,
 		concurrency:     n,
 		queues:          cfg.Queues,
 		errHandler:      cfg.ErrorHandler,

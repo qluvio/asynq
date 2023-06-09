@@ -3365,9 +3365,9 @@ func TestInspectorCancelProcessing(t *testing.T) {
 
 			server := newServer(client.rdb, Config{
 				Concurrency: 10,
-				RetryDelayFunc: func(n int, err error, t *Task) time.Duration {
+				RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
 					return time.Second
-				},
+				}),
 				LogLevel:            testLogLevel,
 				HeartBeaterInterval: time.Millisecond * 5,
 			})

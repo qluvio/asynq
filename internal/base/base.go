@@ -657,7 +657,7 @@ func DecodeSchedulerEnqueueEvent(b []byte) (*SchedulerEnqueueEvent, error) {
 
 // Cancelations is a collection that holds cancel functions for all active tasks.
 //
-// Cancelations are safe for concurrent use by multipel goroutines.
+// Cancelations are safe for concurrent use by multiple goroutines.
 type Cancelations struct {
 	mu          sync.Mutex
 	cancelFuncs map[string]context.CancelFunc

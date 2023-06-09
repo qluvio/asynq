@@ -43,8 +43,8 @@ type processor struct {
 
 	queues Queues
 
-	retryDelayFunc RetryDelayFunc
-	isFailureFunc  func(error) bool
+	retryDelay    RetryDelayHandler
+	isFailureFunc func(error) bool
 
 	errHandler ErrorHandler
 
@@ -80,6 +80,9 @@ type processor struct {
 	// cancelations is a set of cancel functions for all active tasks.
 	cancelations *base.Cancelations
 
+	// afterTasks is a set of function set by active tasks to be called after task execution
+	afterTasks *base.AfterTasks
+
 	starting chan<- *workerInfo
 	finished chan<- *base.TaskMessage
 
@@ -90,10 +93,11 @@ type processorParams struct {
 	logger          *log.Logger
 	serverID        string
 	broker          base.Broker
-	retryDelayFunc  RetryDelayFunc
+	retryDelayFunc  RetryDelayHandler
 	isFailureFunc   func(error) bool
 	syncCh          chan<- *syncRequest
 	cancelations    *base.Cancelations
+	afterTasks      *base.AfterTasks
 	concurrency     int // currently limited to 32767; see processor.fini()
 	queues          Queues
 	errHandler      ErrorHandler
@@ -118,10 +122,11 @@ func newProcessor(params processorParams) *processor {
 		serverID:        params.serverID,
 		broker:          params.broker,
 		queues:          params.queues,
-		retryDelayFunc:  params.retryDelayFunc,
+		retryDelay:      params.retryDelayFunc,
 		isFailureFunc:   params.isFailureFunc,
 		syncRequestCh:   params.syncCh,
 		cancelations:    params.cancelations,
+		afterTasks:      params.afterTasks,
 		errLogLimiter:   rate.NewLimiter(rate.Every(3*time.Second), 1),
 		sema:            make(chan struct{}, params.concurrency),
 		done:            make(chan struct{}),
@@ -263,7 +268,7 @@ func (p *processor) exec() {
 			ap.mutex.Lock()
 			go func() {
 				defer ap.mutex.Unlock()
-				task := newTask(msg.Type, msg.Payload, rw, ap)
+				task := newTask(msg.Type, msg.Payload, rw, ap, func(fn func(string, error, bool)) { p.afterTasks.Add(msg.ID, fn) })
 				resCh <- p.perform(ctx, task)
 			}()
 			// finish task processing in p.fini() goroutine to allow this goroutine to end
@@ -454,6 +459,13 @@ func (p *processor) requeueAborting(msg *base.TaskMessage) {
 	}
 }
 
+func (p *processor) taskFinished(msg *base.TaskMessage, err error, isFailure bool) {
+	if fn, ok := p.afterTasks.Get(msg.ID); ok {
+		fn(msg.ID, err, isFailure)
+		p.afterTasks.Delete(msg.ID)
+	}
+}
+
 func (p *processor) handleSucceededMessage(ctx context.Context, msg *base.TaskMessage) {
 	if msg.Retention > 0 {
 		p.markAsComplete(ctx, msg)
@@ -463,7 +475,14 @@ func (p *processor) handleSucceededMessage(ctx context.Context, msg *base.TaskMe
 }
 
 func (p *processor) markAsComplete(ctx context.Context, msg *base.TaskMessage) {
-	err := p.broker.MarkAsComplete(p.serverID, msg)
+	markAsComplete := func() error {
+		err := p.broker.MarkAsComplete(p.serverID, msg)
+		if err == nil {
+			p.taskFinished(msg, nil, false)
+		}
+		return err
+	}
+	err := markAsComplete()
 	if err != nil {
 		errMsg := fmt.Sprintf("Could not move task id=%s type=%q from %q to %q:  %+v",
 			msg.ID, msg.Type, base.ActiveKey(msg.Queue), base.CompletedKey(msg.Queue), err)
@@ -474,7 +493,7 @@ func (p *processor) markAsComplete(ctx context.Context, msg *base.TaskMessage) {
 		p.logger.Warnf("%s; Will retry syncing", errMsg)
 		p.syncRequestCh <- &syncRequest{
 			fn: func() error {
-				return p.broker.MarkAsComplete(p.serverID, msg)
+				return markAsComplete()
 			},
 			errMsg:   errMsg,
 			deadline: deadline,
@@ -483,7 +502,15 @@ func (p *processor) markAsComplete(ctx context.Context, msg *base.TaskMessage) {
 }
 
 func (p *processor) markAsDone(ctx context.Context, msg *base.TaskMessage) {
-	err := p.broker.Done(p.serverID, msg)
+	markAsDone := func() error {
+		err := p.broker.Done(p.serverID, msg)
+		if err == nil {
+			p.taskFinished(msg, nil, false)
+		}
+		return err
+	}
+
+	err := markAsDone()
 	if err != nil {
 		errMsg := fmt.Sprintf("Could not remove task id=%s type=%q from %q err: %+v", msg.ID, msg.Type, base.ActiveKey(msg.Queue), err)
 		deadline, ok := ctx.Deadline()
@@ -493,7 +520,7 @@ func (p *processor) markAsDone(ctx context.Context, msg *base.TaskMessage) {
 		p.logger.Warnf("%s; Will retry syncing", errMsg)
 		p.syncRequestCh <- &syncRequest{
 			fn: func() error {
-				return p.broker.Done(p.serverID, msg)
+				return markAsDone()
 			},
 			errMsg:   errMsg,
 			deadline: deadline,
@@ -530,9 +557,18 @@ func (p *processor) retry(ctx context.Context, msg *base.TaskMessage, e error, i
 	if msg.Recurrent {
 		retried = 0
 	}
-	d := p.retryDelayFunc(retried, e, NewTask(msg.Type, msg.Payload))
+	d := p.retryDelay.RetryDelay(retried, e, NewTask(msg.Type, msg.Payload))
 	retryAt := time.Now().Add(d)
-	err := p.broker.Retry(msg, retryAt, e.Error(), isFailure)
+
+	retry := func() error {
+		err := p.broker.Retry(msg, retryAt, e.Error(), isFailure)
+		if err == nil {
+			p.taskFinished(msg, e, isFailure)
+		}
+		return err
+	}
+
+	err := retry()
 	if err != nil {
 		errMsg := fmt.Sprintf("Could not move task id=%s from %q to %q: %+v", msg.ID, base.ActiveKey(msg.Queue), base.RetryKey(msg.Queue), err)
 		deadline, ok := ctx.Deadline()
@@ -542,7 +578,7 @@ func (p *processor) retry(ctx context.Context, msg *base.TaskMessage, e error, i
 		p.logger.Warnf("%s; Will retry syncing", errMsg)
 		p.syncRequestCh <- &syncRequest{
 			fn: func() error {
-				return p.broker.Retry(msg, retryAt, e.Error(), isFailure)
+				return retry()
 			},
 			errMsg:   errMsg,
 			deadline: deadline,
@@ -551,7 +587,15 @@ func (p *processor) retry(ctx context.Context, msg *base.TaskMessage, e error, i
 }
 
 func (p *processor) archive(ctx context.Context, msg *base.TaskMessage, e error) {
-	err := p.broker.Archive(msg, e.Error())
+	archive := func() error {
+		err := p.broker.Archive(msg, e.Error())
+		if err == nil {
+			p.taskFinished(msg, e, true)
+		}
+		return err
+	}
+
+	err := archive()
 	if err != nil {
 		errMsg := fmt.Sprintf("Could not move task id=%s from %q to %q: %+v", msg.ID, base.ActiveKey(msg.Queue), base.ArchivedKey(msg.Queue), err)
 		deadline, ok := ctx.Deadline()
@@ -561,7 +605,7 @@ func (p *processor) archive(ctx context.Context, msg *base.TaskMessage, e error)
 		p.logger.Warnf("%s; Will retry syncing", errMsg)
 		p.syncRequestCh <- &syncRequest{
 			fn: func() error {
-				return p.broker.Archive(msg, e.Error())
+				return archive()
 			},
 			errMsg:   errMsg,
 			deadline: deadline,

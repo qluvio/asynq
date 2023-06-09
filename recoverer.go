@@ -14,10 +14,10 @@ import (
 )
 
 type recoverer struct {
-	logger         *log.Logger
-	broker         base.Broker
-	retryDelayFunc RetryDelayFunc
-	isFailureFunc  func(error) bool
+	logger        *log.Logger
+	broker        base.Broker
+	retryDelay    RetryDelayHandler
+	isFailureFunc func(error) bool
 
 	// channel to communicate back to the long running "recoverer" goroutine.
 	done chan struct{}
@@ -42,7 +42,7 @@ type recovererParams struct {
 	queues         Queues
 	interval       time.Duration
 	expiration     time.Duration
-	retryDelayFunc RetryDelayFunc
+	retryDelayFunc RetryDelayHandler
 	isFailureFunc  func(error) bool
 	healthCheck    healthChecker
 }
@@ -56,16 +56,16 @@ func newRecoverer(params recovererParams) *recoverer {
 		health = params.healthCheck.startedChan()
 	}
 	return &recoverer{
-		logger:         params.logger,
-		broker:         params.broker,
-		done:           make(chan struct{}),
-		queues:         params.queues,
-		interval:       params.interval,
-		expiration:     params.expiration,
-		retryDelayFunc: params.retryDelayFunc,
-		isFailureFunc:  params.isFailureFunc,
-		healthStarted:  health,
-		healthy:        healthy,
+		logger:        params.logger,
+		broker:        params.broker,
+		done:          make(chan struct{}),
+		queues:        params.queues,
+		interval:      params.interval,
+		expiration:    params.expiration,
+		retryDelay:    params.retryDelayFunc,
+		isFailureFunc: params.isFailureFunc,
+		healthStarted: health,
+		healthy:       healthy,
 	}
 }
 
@@ -125,7 +125,7 @@ func (r *recoverer) recover() {
 }
 
 func (r *recoverer) retry(msg *base.TaskMessage, err error) {
-	delay := r.retryDelayFunc(msg.Retried, err, NewTask(msg.Type, msg.Payload))
+	delay := r.retryDelay.RetryDelay(msg.Retried, err, NewTask(msg.Type, msg.Payload))
 	retryAt := time.Now().Add(delay)
 	if err := r.broker.Retry(msg, retryAt, err.Error(), r.isFailureFunc(err)); err != nil {
 		r.logger.Warnf("recoverer: could not retry deadline exceeded task: %v", err)

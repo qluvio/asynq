@@ -25,7 +25,7 @@ import (
 var taskCmpOpts = []cmp.Option{
 	sortTaskOpt,                 // sort the tasks
 	cmp.AllowUnexported(Task{}), // allow typename, payload fields to be compared
-	cmpopts.IgnoreFields(Task{}, "opts", "w", "p"), // ignore opts, w, p fields
+	cmpopts.IgnoreFields(Task{}, "opts", "w", "p", "callAfter"), // ignore opts, w, p fields
 }
 
 // fakeHeartbeater receives from starting and finished channels and do nothing.
@@ -63,7 +63,7 @@ func newProcessorForTest(t *testing.T, r base.Broker, h Handler) *processor {
 	p := newProcessor(processorParams{
 		logger:          testLogger,
 		broker:          r,
-		retryDelayFunc:  DefaultRetryDelayFunc,
+		retryDelayFunc:  DefaultRetryDelay,
 		isFailureFunc:   defaultIsFailureFunc,
 		syncCh:          syncCh,
 		cancelations:    base.NewCancelations(),
@@ -593,9 +593,9 @@ func TestProcessorRetry(t *testing.T) {
 			ctx.SeedPendingQueue(tc.pending, base.DefaultQueueName) // initialize default queue.
 
 			// instantiate a new processor
-			delayFunc := func(n int, e error, t *Task) time.Duration {
+			delayFunc := RetryDelayFunc(func(n int, e error, t *Task) time.Duration {
 				return tc.delay
-			}
+			})
 			var (
 				mu sync.Mutex // guards n
 				n  int        // number of times error handler is called
@@ -607,7 +607,7 @@ func TestProcessorRetry(t *testing.T) {
 			}
 			p := newProcessorForTest(t, client.rdb, tc.handler)
 			p.errHandler = ErrorHandlerFunc(errHandler)
-			p.retryDelayFunc = delayFunc
+			p.retryDelay = delayFunc
 
 			p.start(&sync.WaitGroup{})
 			runTime := time.Now() // time when processor is running
@@ -855,7 +855,7 @@ func TestProcessorWithStrictPriority(t *testing.T) {
 			p := newProcessor(processorParams{
 				logger:          testLogger,
 				broker:          client.rdb,
-				retryDelayFunc:  DefaultRetryDelayFunc,
+				retryDelayFunc:  DefaultRetryDelay,
 				isFailureFunc:   defaultIsFailureFunc,
 				syncCh:          syncCh,
 				cancelations:    base.NewCancelations(),
