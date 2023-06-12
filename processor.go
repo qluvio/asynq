@@ -7,7 +7,6 @@ package asynq
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -19,6 +18,7 @@ import (
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
 	"golang.org/x/time/rate"
+	"go.uber.org/atomic"
 )
 
 // SkipRetry is used as a return value from Handler.ProcessTask to indicate that
@@ -59,16 +59,12 @@ type processor struct {
 	// sema is a counting semaphore to ensure the number of active workers
 	// does not exceed the limit.
 	sema chan struct{}
+	qsema map[string]chan struct{} // queue string -> chan
 
 	// channel to communicate back to the long running "processor" goroutine.
 	// once is used to send value to the channel only once.
 	done chan struct{}
 	once sync.Once
-
-	// wait channel used to feed tasks to fini()
-	wait       chan *processorTask
-	waitClosed bool
-	waitMu     sync.Mutex
 
 	// quit channel is closed when the shutdown of the "processor" goroutine starts.
 	quit chan struct{}
@@ -76,6 +72,16 @@ type processor struct {
 	// abort channel communicates to the in-flight worker goroutines to stop.
 	abort    chan struct{}
 	abortNow chan struct{}
+
+	// tasks is a set of active tasks.
+	tasks map[string]*processorTask // task id -> task info
+	tasksMutex sync.Mutex
+
+	// results channel streams task results to fini() to finish processing tasks.
+	results chan processorResult
+
+	// deadlines is a set of deadlines for all active tasks.
+	deadlines *base.Deadlines
 
 	// cancelations is a set of cancel functions for all active tasks.
 	cancelations *base.Cancelations
@@ -98,7 +104,7 @@ type processorParams struct {
 	syncCh          chan<- *syncRequest
 	cancelations    *base.Cancelations
 	afterTasks      *base.AfterTasks
-	concurrency     int // currently limited to 32767; see processor.fini()
+	concurrency     int
 	queues          Queues
 	errHandler      ErrorHandler
 	shutdownTimeout time.Duration
@@ -108,15 +114,27 @@ type processorParams struct {
 }
 
 type processorTask struct {
-	msg     *base.TaskMessage
 	ctx     context.Context
+	msg     *base.TaskMessage
+	done    *atomic.Bool
 	cleanup func()
-	resCh   chan error
+}
+
+type processorResult struct {
+	task *processorTask
+	err  error
 }
 
 // newProcessor constructs a new processor.
 func newProcessor(params processorParams) *processor {
-
+	qsema := make(map[string]chan struct{})
+	for q, c := range params.queues.Concurrencies() {
+		if c <= 0 {
+			c = params.concurrency
+		}
+		qsema[q] = make(chan struct{}, c)
+	}
+	abort := make(chan struct{})
 	return &processor{
 		logger:          params.logger,
 		serverID:        params.serverID,
@@ -129,11 +147,14 @@ func newProcessor(params processorParams) *processor {
 		afterTasks:      params.afterTasks,
 		errLogLimiter:   rate.NewLimiter(rate.Every(3*time.Second), 1),
 		sema:            make(chan struct{}, params.concurrency),
+		qsema:           qsema,
 		done:            make(chan struct{}),
-		wait:            make(chan *processorTask, params.concurrency),
 		quit:            make(chan struct{}),
-		abort:           make(chan struct{}),
+		abort:           abort,
 		abortNow:        make(chan struct{}),
+		tasks:           make(map[string]*processorTask),
+		results:         make(chan processorResult, params.concurrency),
+		deadlines:       base.NewDeadlines(abort, params.concurrency),
 		errHandler:      params.errHandler,
 		handler:         HandlerFunc(func(ctx context.Context, t *Task) error { return fmt.Errorf("handler not set") }),
 		shutdownTimeout: params.shutdownTimeout,
@@ -176,10 +197,6 @@ func (p *processor) shutdownNow(immediately bool) {
 		}
 	}
 
-	p.waitMu.Lock()
-	close(p.wait)
-	p.waitClosed = true
-	p.waitMu.Unlock()
 	if !immediately {
 		p.logger.Info("processor: all workers have finished")
 	} else {
@@ -214,12 +231,23 @@ func (p *processor) exec() {
 	case <-p.quit:
 		return
 	case p.sema <- struct{}{}: // acquire token
+		qready := func(qname string) func() {
+			qsema := p.qsema[qname]
+			select {
+			case qsema <- struct{}{}: // acquire queue token
+				return func() {
+					<-qsema // release queue token
+				}
+			default:
+				return nil
+			}
+		}
 		qnames := p.queues.Names()
-		msg, deadline, err := p.broker.Dequeue(p.serverID, qnames...)
+		msg, deadline, err := p.broker.Dequeue(p.serverID, qready, qnames...)
 		switch {
 		case errors.Is(err, errors.ErrNoProcessableTask):
-			p.logger.Debug("All queues are empty")
-			// Queues are empty, this is a normal behavior.
+			p.logger.Debug("All queues are empty and/or concurrency limits reached")
+			// Queues are empty and/or concurrency limits reached, this is a normal behavior.
 			// Sleep to avoid slamming redis and let scheduler move tasks into queues.
 			// Note: We are not using blocking pop operation and polling queues instead.
 			// This adds significant load to redis.
@@ -239,187 +267,95 @@ func (p *processor) exec() {
 
 		p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
 		go func() {
-			resCh := make(chan error, 3)
 			ctx, cancel := asynqcontext.New(msg, deadline)
-			p.cancelations.Add(msg.ID, func() {
-				resCh <- TaskCanceled
-				// Need to make sure resCh is processed before ctxDoneCh; let cleanup cancel context later
-			})
 			cleanup := func() {
 				cancel()
 				p.cancelations.Delete(msg.ID)
+				p.deadlines.Delete(msg.ID)
 				p.finished <- msg
+				<-p.qsema[msg.Queue] // release queue token
 				<-p.sema // release token
 			}
+
+			ptask := &processorTask{ctx: ctx, msg: msg, done: atomic.NewBool(false), cleanup: cleanup}
+			p.tasksMutex.Lock()
+			p.tasks[msg.ID] = ptask
+			p.tasksMutex.Unlock()
+			p.deadlines.Add(msg.ID, deadline, func() {
+				p.results <- processorResult{task: ptask, err: context.DeadlineExceeded}
+				// ctx will be canceled via context deadline
+			})
+			p.cancelations.Add(msg.ID, func() {
+				p.results <- processorResult{task: ptask, err: TaskCanceled}
+				cancel()
+			})
 
 			// check context before starting a worker goroutine.
 			select {
 			case <-ctx.Done():
-				// already canceled (e.g. deadline exceeded).
-				p.handleFailedMessage(ctx, msg, "already done", ctx.Err())
-				cleanup()
+				// already canceled (e.g. deadline exceeded); do nothing
 				return
 			default:
 			}
 
 			rw := &ResultWriter{id: msg.ID, qname: msg.Queue, broker: p.broker, ctx: ctx}
-			ap := &AsyncProcessor{resCh: resCh}
-			// hold mutex until worker goroutine returns; ensures that AsyncProcessor does not send to resCh first
-			ap.mutex.Lock()
+			ap := &AsyncProcessor{results: p.results, task: ptask}
 			go func() {
-				defer ap.mutex.Unlock()
 				task := newTask(msg.Type, msg.Payload, rw, ap, func(fn func(string, error, bool)) { p.afterTasks.Add(msg.ID, fn) })
-				resCh <- p.perform(ctx, task)
+				p.results <- processorResult{task: ptask, err: p.perform(ctx, task)}
 			}()
-			// finish task processing in p.fini() goroutine to allow this goroutine to end
-			t := &processorTask{msg: msg, ctx: ctx, cleanup: cleanup, resCh: resCh}
-			p.waitMu.Lock()
-			if !p.waitClosed {
-				p.wait <- t
-			}
-			p.waitMu.Unlock()
 		}()
 	}
 }
 
 // fini waits for tasks to complete and finishes processing each task.
 func (p *processor) fini() {
-	ctxDoneCh := func(t *processorTask) reflect.SelectCase {
-		return reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(t.ctx.Done())}
-	}
-	ctxDoneFn := func(t *processorTask) func(reflect.Value) {
-		return func(_ reflect.Value) {
-			p.handleFailedMessage(t.ctx, t.msg, "done", t.ctx.Err())
-			t.cleanup()
-			return
-		}
-	}
-
-	resCh := func(t *processorTask) reflect.SelectCase {
-		return reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(t.resCh)}
-	}
-	resFn := func(t *processorTask) func(reflect.Value) {
-		return func(v reflect.Value) {
-			var resErr error
-			switch err := v.Interface().(type) {
-			case error:
-				resErr = err
-			case nil:
-				resErr = nil
-			}
-			if resErr == AsynchronousTask {
-				// task worker goroutine marked self as asynchronous task
-				// check res again in case task already completed
-				select {
-				case err := <-t.resCh:
-					resErr = err
-				default:
-					p.waitMu.Lock()
-					if !p.waitClosed {
-						// wait again for async task to complete; do not cleanup
-						p.wait <- t
-					}
-					p.waitMu.Unlock()
-					return
-				}
-			}
-			if resErr != nil {
-				p.handleFailedMessage(t.ctx, t.msg, "errored", resErr)
-				t.cleanup()
-				return
-			}
-			if !t.msg.Recurrent {
-				p.handleSucceededMessage(t.ctx, t.msg)
-			} else {
-				p.requeue(t.ctx, t.msg)
-			}
-			t.cleanup()
-			return
-		}
-	}
-
-	// these should only be modified by the main fini() goroutine, to prevent races
-	var tasks []*processorTask                  // list of waiting tasks
-	selectChs := make([]reflect.SelectCase, 2)  // list of select case channel receives
-	selectFns := make([]func(reflect.Value), 2) // list of corresponding select case operations
-
-	// select index 0 reserved for p.abort
-	abortIdx := 0
-	selectChs[abortIdx] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.abort)}
-	selectFns[abortIdx] = func(_ reflect.Value) {
-		// time is up, push all messages back to queue and quit this goroutine
-		abort := func(t *processorTask) {
-			select {
-			case <-p.abortNow:
-				return
-			default:
-			}
-			p.logger.Warnf("Quitting worker. task id=%s", t.msg.ID)
-			p.requeueAborting(t.msg)
-			t.cleanup()
-		}
-		for _, t := range tasks {
-			abort(t)
-		}
-		for t := range p.wait { // closed by p.shutdown() after all tasks have completed and been cleaned up
-			abort(t)
-		}
-		return
-	}
-
-	// select index 1 reserved for p.wait
-	waitIdx := 1
-	selectChs[waitIdx] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.wait)}
-	selectFns[waitIdx] = func(v reflect.Value) {
-		select {
-		case <-p.abortNow:
-			return
-		default:
-		}
-		// add task to waitlist
-		t := v.Interface().(*processorTask)
-		tasks = append(tasks, t)
-		selectChs = append(selectChs, ctxDoneCh(t), resCh(t))
-		selectFns = append(selectFns, ctxDoneFn(t), resFn(t))
-		return
-	}
-
-	var quit bool
 	for {
 		select {
 		case <-p.abortNow:
 			return
-		default:
-			// Note: reflect.Select() is limited to 65536 cases at any one time; see https://pkg.go.dev/reflect#Select
-			// As such, this implementation can support a concurrency of up to 32767 (=[65536-2]/2) tasks
-			// PENDING: replace reflect.Select() with more efficient solution; consider https://stackoverflow.com/a/66125252
-			i, v, ok := reflect.Select(selectChs)
-			process := selectFns[i]
-			if i == abortIdx {
-				// need to abort lists, so process in current goroutine
-				process(v)
-				return
-			} else if i == waitIdx {
-				if ok {
-					// need to update lists, so process in current goroutine
-					process(v)
-				} else {
-					// p.wait closed; need to quit after finishing remaining tasks
-					selectChs[waitIdx].Chan = reflect.Value{} // stop watching p.wait
-					quit = true
+		case <-p.abort:
+			// time is up, push all messages back to queue and quit this goroutine
+			// assumes that exec() is no longer running
+			p.tasksMutex.Lock()
+			defer p.tasksMutex.Unlock()
+			for _, t := range p.tasks {
+				select {
+				case <-p.abortNow:
+					return
+				default:
 				}
-			} else {
-				// remove task from lists
-				i = i - (i % 2)                                       // reduce i to first index of pair
-				tasks = append(tasks[:i/2-1], tasks[i/2:]...)         // remove (i/2-1)th item
-				selectChs = append(selectChs[:i], selectChs[i+2:]...) // remove (i)th pair
-				selectFns = append(selectFns[:i], selectFns[i+2:]...) // remove (i)th pair
-				// process in separate goroutine to continue fini() immediately
-				go process(v)
+				p.logger.Warnf("Quitting worker. task id=%s", t.msg.ID)
+				p.requeueAborting(t.msg)
+				t.cleanup()
 			}
-			if quit && len(tasks) == 0 {
-				// shutdown
-				return
+			return
+		case r := <-p.results:
+			if errors.Is(r.err, AsynchronousTask) {
+				// task worker goroutine marked self as asynchronous task; do nothing
+				break
+			}
+			done := r.task.done.Swap(true)
+			if !done {
+				// process in separate goroutine to continue fini() immediately
+				go func() {
+					defer r.task.cleanup()
+					p.tasksMutex.Lock()
+					delete(p.tasks, r.task.msg.ID)
+					p.tasksMutex.Unlock()
+					if r.err != nil {
+						reason := "errored"
+						if errors.Is(r.err, context.Canceled) || errors.Is(r.err, context.DeadlineExceeded) {
+							reason = "done"
+						}
+						p.handleFailedMessage(r.task.ctx, r.task.msg, reason, r.err)
+					} else if r.task.msg.Recurrent {
+						p.requeue(r.task.ctx, r.task.msg)
+					} else {
+						p.handleSucceededMessage(r.task.ctx, r.task.msg)
+					}
+					return
+				}()
 			}
 		}
 	}

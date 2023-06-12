@@ -34,7 +34,7 @@ func TestHeartbeater(t *testing.T) {
 			interval:    2 * time.Second,
 			host:        "localhost",
 			pid:         45678,
-			queues:      (&QueuesConfig{Queues: map[string]int{"default": 1}}).configure(),
+			queues:      (&QueuesConfig{Queues: map[string]interface{}{"default": 1}}),
 			concurrency: 10,
 		},
 	}
@@ -148,7 +148,7 @@ func TestHeartbeaterWithRedisDown(t *testing.T) {
 		broker:      testBroker,
 		interval:    time.Second,
 		concurrency: 10,
-		queues:      (&QueuesConfig{Queues: map[string]int{"default": 1}}).configure(),
+		queues:      (&QueuesConfig{Queues: map[string]interface{}{"default": 1}}),
 		state:       state,
 		starting:    make(chan *workerInfo),
 		finished:    make(chan *base.TaskMessage),

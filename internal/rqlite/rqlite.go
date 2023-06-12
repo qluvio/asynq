@@ -280,7 +280,7 @@ func (r *RQLite) EnqueueUniqueBatch(ctx context.Context, msg ...*base.MessageBat
 // off a queue if one exists and returns the message and deadline.
 // Dequeue skips a queue if the queue is paused.
 // If all queues are empty, ErrNoProcessableTask error is returned.
-func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessage, deadline time.Time, err error) {
+func (r *RQLite) Dequeue(serverID string, qready base.QueueReadyFunc, qnames ...string) (msg *base.TaskMessage, deadline time.Time, err error) {
 	var op errors.Op = "rqlite.Dequeue"
 	conn, err := r.client(op)
 	if err != nil {
@@ -288,6 +288,10 @@ func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessa
 	}
 
 	for _, qname := range qnames {
+		qcleanup := qready(qname)
+		if qcleanup == nil {
+			continue
+		}
 
 		q, err := r.getQueue(qname)
 		if err != nil {

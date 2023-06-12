@@ -51,7 +51,7 @@ func TestLocalLongRun(t *testing.T) {
 		HealthCheckInterval:  time.Millisecond * 200,
 		ForwarderInterval:    time.Millisecond * 200,
 		Queues: &QueuesConfig{
-			Queues: map[string]int{
+			Queues: map[string]interface{}{
 				"low":    1,
 				"normal": 3,
 				"high":   5,

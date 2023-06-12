@@ -655,9 +655,101 @@ func DecodeSchedulerEnqueueEvent(b []byte) (*SchedulerEnqueueEvent, error) {
 	}, nil
 }
 
+// Deadlines is a collection that holds deadlines for all active tasks.
+// When a deadline is reached, the associated cancel function is executed.
+// Assumes that deadlines have unique IDs and will not be added multiples times.
+//
+// Deadlines is safe for concurrent use by multiple goroutines.
+type Deadlines struct {
+	update chan deadline
+}
+
+// NewDeadlines returns a Deadlines instance.
+func NewDeadlines(abort chan struct{}, size int) *Deadlines {
+	d := &Deadlines{update: make(chan deadline, size)}
+	go func() {
+		dls := []deadline{}
+		for {
+			if func() bool {
+				var c <-chan time.Time
+				if len(dls) == 0 {
+					c = make(chan time.Time) // dummy
+				} else {
+					t := time.NewTimer(time.Until(dls[0].dl))
+					defer t.Stop()
+					c = t.C
+				}
+				select {
+				case <-abort:
+					return true
+				case dl := <-d.update:
+					if dl.fn != nil {
+						dls = insertDeadline(dls, dl)
+					} else {
+						dls = removeDeadline(dls, dl)
+					}
+				case <-c:
+					dl := dls[0]
+					dls = removeDeadline(dls, dl)
+					dl.fn()
+				}
+				return false
+			}() {
+				return
+			}
+		}
+	}()
+	return d
+}
+
+// Add adds a new cancel func to the collection.
+func (d *Deadlines) Add(id string, dl time.Time, fn context.CancelFunc) {
+	d.update <- deadline{id: id, dl: dl, fn: fn}
+}
+
+// Delete deletes a cancel func from the collection given an id.
+func (d *Deadlines) Delete(id string) {
+	d.update <- deadline{id: id, fn: nil}
+}
+
+type deadline struct {
+	id string
+	dl time.Time
+	fn context.CancelFunc
+}
+
+// insertDeadline inserts a deadline into a given sorted list of deadlines.
+func insertDeadline(dls []deadline, dl deadline) (res []deadline) {
+	if len(dls) == 0 {
+		res = append(dls, dl)
+	} else {
+		var i int
+		for i = 0; i < len(dls); i++ {
+			if dls[i].dl.After(dl.dl) {
+				break
+			}
+		}
+		res = append(dls, dl)
+		copy(res[i+1:], res[i:])
+		res[i] = dl
+	}
+	return
+}
+
+// removeDeadline removes a deadline (by ID) from a given sorted list of deadlines.
+func removeDeadline(dls []deadline, dl deadline) (res []deadline) {
+	for i, dl2 := range dls {
+		if dl2.id == dl.id {
+			res = append(dls[:i], dls[i+1:]...)
+			break
+		}
+	}
+	return
+}
+
 // Cancelations is a collection that holds cancel functions for all active tasks.
 //
-// Cancelations are safe for concurrent use by multiple goroutines.
+// Cancelations is safe for concurrent use by multiple goroutines.
 type Cancelations struct {
 	mu          sync.Mutex
 	cancelFuncs map[string]context.CancelFunc
@@ -697,6 +789,11 @@ type PubSub interface {
 	Channel() <-chan interface{}
 }
 
+// QueueReadyFunc checks if the given queue is ready for processing a new task from the queue.
+// If the queue is ready, returns a cleanup function that should be called only if the new task will not be processed.
+// Otherwise, returns nil.
+type QueueReadyFunc func(string) func()
+
 // Broker is a message broker that supports operations to manage task queues.
 //
 // See rdb.RDB as a reference implementation.
@@ -719,9 +816,10 @@ type Broker interface {
 	// Dequeue skips a queue if the queue is paused.
 	// If all queues are empty, ErrNoProcessableTask error is returned.
 	// - qnames are the queues to process
+	// - qready is a function called before a task is popped from a given queue to check if the queue is ready.
 	// - serverID is used the ID of the processor/server processing Dequeue and
 	//   is used to select tasks with server affinity.
-	Dequeue(serverID string, qnames ...string) (*TaskMessage, time.Time, error)
+	Dequeue(serverID string, qready QueueReadyFunc, qnames ...string) (*TaskMessage, time.Time, error)
 	// Done removes the task from active queue to mark the task as done.
 	// It removes a uniqueness lock acquired by the task, if any.
 	// ServerID is the ID of the server that processed the task (used for server affinity)

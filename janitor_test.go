@@ -33,7 +33,7 @@ func TestJanitor(t *testing.T) {
 	janitor := newJanitor(janitorParams{
 		logger:   testLogger,
 		broker:   broker,
-		queues:   (&QueuesConfig{Queues: map[string]int{"default": 1, "custom": 1}}).configure(),
+		queues:   (&QueuesConfig{Queues: map[string]interface{}{"default": 1, "custom": 1}}),
 		interval: interval,
 	})
 

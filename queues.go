@@ -20,11 +20,8 @@ const (
 var _ = Lenient
 
 var (
-	defaultQueues = map[string]int{
-		base.DefaultQueueName: 1,
-	}
 	defaultQueuesConfig = &QueuesConfig{
-		Queues:   defaultQueues,
+		Queues:   map[string]interface{}{base.DefaultQueueName: QueueConfig{Priority: 1}},
 		Priority: Lenient,
 	}
 )
@@ -33,18 +30,46 @@ type Queues interface {
 	Names() []string
 	Configure() error
 	Priorities() map[string]int
+	Concurrencies() map[string]int
 	StrictPriority() bool
 }
 
+type QueueConfig struct {
+	Priority    int `json:"priority"`
+	Concurrency int `json:"concurrency"`
+}
+
 type QueuesConfig struct {
-	// List of queues to process with given priority value. Keys are the names of the
-	// queues and values are associated priority value.
+	// List of queues to process with given attributes or priority value (for backwards
+	// compatibility). Keys are the names of the queues and values are associated priority
+	// value.
 	//
 	// If set to nil or not specified, the server will process only the "default" queue.
 	//
-	// Priority is treated as follows to avoid starving low priority queues.
+	// If a queue has a zero or negative attribute value, the queue will be ignored. As an
+	// exception, if a queue has a zero concurrency value, the concurrency value will
+    // default to the global concurrency value.
 	//
 	// Example:
+	//
+	//     Queues: map[string]QueueConfig{
+	//         "critical": {
+	//             Priority:    6,
+	//             Concurrency: 10,
+	//         },
+	//         "default": {
+	//             Priority:    3,
+	//             Concurrency: 5,
+	//         },
+	//         "low": {
+	//             Priority:    1,
+	//             Concurrency: 1,
+	//         },
+	//     }
+	//
+	// Priority is treated as follows to avoid starving low priority queues.
+	//
+	// Priority Example:
 	//
 	//     Queues: map[string]int{
 	//         "critical": 6,
@@ -55,9 +80,7 @@ type QueuesConfig struct {
 	// With the above config and given that all queues are not empty, the tasks
 	// in "critical", "default", "low" should be processed 60%, 30%, 10% of
 	// the time respectively.
-	//
-	// If a queue has a zero or negative priority value, the queue will be ignored.
-	Queues map[string]int `json:"queues"`
+	Queues map[string]interface{} `json:"queues"`
 
 	// Priority indicates whether the queue priority should be treated strictly.
 	//
@@ -67,7 +90,7 @@ type QueuesConfig struct {
 	Priority Priority `json:"priority"`
 
 	mu          sync.Mutex
-	queueConfig map[string]int
+	queueConfig map[string]QueueConfig
 
 	// orderedQueues is set only in strict-priority mode.
 	orderedQueues []string
@@ -90,17 +113,24 @@ func (p *QueuesConfig) configure() *QueuesConfig {
 		return p
 	}
 
-	queues := map[string]int{}
-	for qname, p := range p.Queues {
+	queues := map[string]QueueConfig{}
+	for qname, val := range p.Queues {
 		if err := base.ValidateQueueName(qname); err != nil {
 			continue // ignore invalid queue names
 		}
-		if p > 0 {
-			queues[qname] = p
+		switch v := val.(type) {
+		case int:
+			if v > 0 {
+				queues[qname] = QueueConfig{Priority: v}
+			}
+		case QueueConfig:
+			if v.Priority > 0 && v.Concurrency >= 0 {
+				queues[qname] = v
+			}
 		}
 	}
 	if len(queues) == 0 {
-		queues = defaultQueues
+		queues = map[string]QueueConfig{base.DefaultQueueName: {Priority: 1}}
 	}
 
 	p.orderedQueues = nil
@@ -118,7 +148,27 @@ func (p *QueuesConfig) StrictPriority() bool {
 func (p *QueuesConfig) Priorities() map[string]int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.queueConfig
+	if p.queueConfig == nil {
+		p.configure()
+	}
+	res := map[string]int{}
+	for qname, v := range p.queueConfig {
+		res[qname] = v.Priority
+	}
+	return res
+}
+
+func (p *QueuesConfig) Concurrencies() map[string]int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.queueConfig == nil {
+		p.configure()
+	}
+	res := map[string]int{}
+	for qname, v := range p.queueConfig {
+		res[qname] = v.Concurrency
+	}
+	return res
 }
 
 // Names returns the list of queues to query.
@@ -144,8 +194,8 @@ func (p *QueuesConfig) Names() []string {
 		return p.orderedQueues
 	}
 	var names []string
-	for qname, priority := range p.queueConfig {
-		for i := 0; i < priority; i++ {
+	for qname, v := range p.queueConfig {
+		for i := 0; i < v.Priority; i++ {
 			names = append(names, qname)
 		}
 	}
@@ -154,7 +204,7 @@ func (p *QueuesConfig) Names() []string {
 	return uniq(names, len(p.queueConfig))
 }
 
-func (p *QueuesConfig) UpdateQueues(queues map[string]int) error {
+func (p *QueuesConfig) UpdateQueues(queues map[string]interface{}) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.Queues = queues
@@ -181,10 +231,10 @@ func uniq(names []string, l int) []string {
 
 // sortByPriority returns a list of queue names sorted by
 // their priority level in descending order.
-func sortByPriority(qcfg map[string]int) []string {
+func sortByPriority(qcfg map[string]QueueConfig) []string {
 	var queues []*queue
-	for qname, n := range qcfg {
-		queues = append(queues, &queue{qname, n})
+	for qname, v := range qcfg {
+		queues = append(queues, &queue{qname, v.Priority})
 	}
 	sort.Sort(sort.Reverse(byPriority(queues)))
 	var res []string
@@ -206,15 +256,15 @@ func (x byPriority) Less(i, j int) bool { return x[i].priority < x[j].priority }
 func (x byPriority) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
 
 // normalizeQueues divides priority numbers by their greatest common divisor.
-func normalizeQueues(queues map[string]int) map[string]int {
+func normalizeQueues(queues map[string]QueueConfig) map[string]QueueConfig {
 	var xs []int
-	for _, x := range queues {
-		xs = append(xs, x)
+	for _, v := range queues {
+		xs = append(xs, v.Priority)
 	}
 	d := gcd(xs...)
-	res := make(map[string]int)
-	for q, x := range queues {
-		res[q] = x / d
+	res := make(map[string]QueueConfig)
+	for q, v := range queues {
+		res[q] = QueueConfig{Priority: v.Priority / d, Concurrency: v.Concurrency}
 	}
 	return res
 }
