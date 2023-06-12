@@ -48,7 +48,7 @@ type QueuesConfig struct {
 	//
 	// If a queue has a zero or negative attribute value, the queue will be ignored. As an
 	// exception, if a queue has a zero concurrency value, the concurrency value will
-    // default to the global concurrency value.
+	// default to the global concurrency value.
 	//
 	// Example:
 	//

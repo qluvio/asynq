@@ -17,8 +17,8 @@ import (
 	asynqcontext "github.com/hibiken/asynq/internal/context"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
-	"golang.org/x/time/rate"
 	"go.uber.org/atomic"
+	"golang.org/x/time/rate"
 )
 
 // SkipRetry is used as a return value from Handler.ProcessTask to indicate that
@@ -58,7 +58,7 @@ type processor struct {
 
 	// sema is a counting semaphore to ensure the number of active workers
 	// does not exceed the limit.
-	sema chan struct{}
+	sema  chan struct{}
 	qsema map[string]chan struct{} // queue string -> chan
 
 	// channel to communicate back to the long running "processor" goroutine.
@@ -74,7 +74,7 @@ type processor struct {
 	abortNow chan struct{}
 
 	// tasks is a set of active tasks.
-	tasks map[string]*processorTask // task id -> task info
+	tasks      map[string]*processorTask // task id -> task info
 	tasksMutex sync.Mutex
 
 	// results channel streams task results to fini() to finish processing tasks.
@@ -274,7 +274,7 @@ func (p *processor) exec() {
 				p.deadlines.Delete(msg.ID)
 				p.finished <- msg
 				<-p.qsema[msg.Queue] // release queue token
-				<-p.sema // release token
+				<-p.sema             // release token
 			}
 
 			ptask := &processorTask{ctx: ctx, msg: msg, done: atomic.NewBool(false), cleanup: cleanup}

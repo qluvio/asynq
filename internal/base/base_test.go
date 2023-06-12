@@ -587,7 +587,7 @@ func testDeadlinesToString(dls []deadline) string {
 func TestInsertDeadline(t *testing.T) {
 	now := time.Now()
 	dl := func(n int) deadline {
-		return deadline{strconv.Itoa(n), now.Add(time.Second*time.Duration(n)), nil}
+		return deadline{strconv.Itoa(n), now.Add(time.Second * time.Duration(n)), nil}
 	}
 	dls := []deadline{
 		dl(2),
@@ -617,7 +617,7 @@ func TestInsertDeadline(t *testing.T) {
 func TestRemoveDeadline(t *testing.T) {
 	now := time.Now()
 	dl := func(n int) deadline {
-		return deadline{strconv.Itoa(n), now.Add(time.Second*time.Duration(n)), nil}
+		return deadline{strconv.Itoa(n), now.Add(time.Second * time.Duration(n)), nil}
 	}
 	dls := []deadline{
 		dl(1),
@@ -663,8 +663,8 @@ func TestDeadlinesConcurrentAccess(t *testing.T) {
 	d := NewDeadlines(abort, 1024)
 
 	n := atomic.NewInt32(0)
-	var deadline1, deadline2, deadline3 = time.Now().Add(time.Second), time.Now().Add(time.Second*2), time.Now().Add(time.Second*3)
-	var cancel1, cancel2, cancel3 = func() {n.Add(1)}, func() {n.Add(2)}, func() {n.Add(4)}
+	var deadline1, deadline2, deadline3 = time.Now().Add(time.Second), time.Now().Add(time.Second * 2), time.Now().Add(time.Second * 3)
+	var cancel1, cancel2, cancel3 = func() { n.Add(1) }, func() { n.Add(2) }, func() { n.Add(4) }
 	var key1, key2, key3 = "key1", "key2", "key3"
 
 	var wg sync.WaitGroup

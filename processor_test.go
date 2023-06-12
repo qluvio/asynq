@@ -911,28 +911,28 @@ func TestProcessorWithQueueConcurrency(t *testing.T) {
 		ctx    = setupTestContext(t)
 		client = NewClient(getClientConnOpt(t))
 
-		m1 = h.NewTaskMessage("task1", nil)
-		m2 = h.NewTaskMessage("task2", nil)
-		m3 = h.NewTaskMessageWithQueue("task3", nil, "high")
-		m4 = h.NewTaskMessageWithQueue("task4", nil, "low")
-		m5 = h.NewTaskMessage("task5", nil)
-		m6 = h.NewTaskMessage("task6", nil)
-		m7 = h.NewTaskMessageWithQueue("task7", nil, "high")
-		m8 = h.NewTaskMessageWithQueue("task8", nil, "low")
-		m9 = h.NewTaskMessage("task9", nil)
+		m1  = h.NewTaskMessage("task1", nil)
+		m2  = h.NewTaskMessage("task2", nil)
+		m3  = h.NewTaskMessageWithQueue("task3", nil, "high")
+		m4  = h.NewTaskMessageWithQueue("task4", nil, "low")
+		m5  = h.NewTaskMessage("task5", nil)
+		m6  = h.NewTaskMessage("task6", nil)
+		m7  = h.NewTaskMessageWithQueue("task7", nil, "high")
+		m8  = h.NewTaskMessageWithQueue("task8", nil, "low")
+		m9  = h.NewTaskMessage("task9", nil)
 		m10 = h.NewTaskMessage("task10", nil)
 		m11 = h.NewTaskMessageWithQueue("task11", nil, "high")
 		m12 = h.NewTaskMessageWithQueue("task12", nil, "low")
 
-		t1 = NewTask(m1.Type, m1.Payload)
-		t2 = NewTask(m2.Type, m2.Payload)
-		t3 = NewTask(m3.Type, m3.Payload)
-		t4 = NewTask(m4.Type, m4.Payload)
-		t5 = NewTask(m5.Type, m5.Payload)
-		t6 = NewTask(m6.Type, m6.Payload)
-		t7 = NewTask(m7.Type, m7.Payload)
-		t8 = NewTask(m8.Type, m8.Payload)
-		t9 = NewTask(m9.Type, m9.Payload)
+		t1  = NewTask(m1.Type, m1.Payload)
+		t2  = NewTask(m2.Type, m2.Payload)
+		t3  = NewTask(m3.Type, m3.Payload)
+		t4  = NewTask(m4.Type, m4.Payload)
+		t5  = NewTask(m5.Type, m5.Payload)
+		t6  = NewTask(m6.Type, m6.Payload)
+		t7  = NewTask(m7.Type, m7.Payload)
+		t8  = NewTask(m8.Type, m8.Payload)
+		t9  = NewTask(m9.Type, m9.Payload)
 		t10 = NewTask(m10.Type, m10.Payload)
 		t11 = NewTask(m11.Type, m11.Payload)
 		t12 = NewTask(m12.Type, m12.Payload)
@@ -980,15 +980,15 @@ func TestProcessorWithQueueConcurrency(t *testing.T) {
 				Priority: Lenient,
 				Queues: map[string]interface{}{
 					"default": QueueConfig{
-						Priority: 2,
+						Priority:    2,
 						Concurrency: tc.queues["default"],
 					},
 					"high": QueueConfig{
-						Priority: 3,
+						Priority:    3,
 						Concurrency: tc.queues["high"],
 					},
 					"low": QueueConfig{
-						Priority: 1,
+						Priority:    1,
 						Concurrency: tc.queues["low"],
 					},
 				},
@@ -1117,29 +1117,29 @@ func TestNormalizeQueues(t *testing.T) {
 		{
 			input: map[string]QueueConfig{
 				"high": {
-					Priority: 100,
+					Priority:    100,
 					Concurrency: 10,
 				},
 				"default": {
-					Priority: 20,
+					Priority:    20,
 					Concurrency: 5,
 				},
 				"low": {
-					Priority: 5,
+					Priority:    5,
 					Concurrency: 1,
 				},
 			},
 			want: map[string]QueueConfig{
 				"high": {
-					Priority: 20,
+					Priority:    20,
 					Concurrency: 10,
 				},
 				"default": {
-					Priority: 4,
+					Priority:    4,
 					Concurrency: 5,
 				},
 				"low": {
-					Priority: 1,
+					Priority:    1,
 					Concurrency: 1,
 				},
 			},
@@ -1198,7 +1198,6 @@ func TestNormalizeQueues(t *testing.T) {
 				},
 			},
 		},
-
 	}
 
 	for _, tc := range tests {
