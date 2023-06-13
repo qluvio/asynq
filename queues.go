@@ -52,7 +52,7 @@ type QueuesConfig struct {
 	//
 	// Example:
 	//
-	//     Queues: map[string]QueueConfig{
+	//     Queues: map[string]interface{}{
 	//         "critical": {
 	//             Priority:    6,
 	//             Concurrency: 10,
@@ -71,7 +71,7 @@ type QueuesConfig struct {
 	//
 	// Priority Example:
 	//
-	//     Queues: map[string]int{
+	//     Queues: map[string]interface{}{
 	//         "critical": 6,
 	//         "default":  3,
 	//         "low":      1,
