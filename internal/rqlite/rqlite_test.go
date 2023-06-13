@@ -52,7 +52,7 @@ func TestBasicEnqueueDequeue(t *testing.T) {
 	}
 
 	for _, q := range []string{"csv", "low", base.DefaultQueueName} {
-		msg, deadline, err := r.Dequeue("", q)
+		msg, deadline, err := r.Dequeue("", base.DefaultQueueReadyFunc, q)
 		require.NoError(t, err)
 		require.NotNil(t, msg)
 		require.NotZero(t, deadline)
@@ -72,7 +72,7 @@ func TestBasicEnqueueDequeue(t *testing.T) {
 	}
 
 	for _, q := range []string{"csv", "low", base.DefaultQueueName} {
-		_, _, err := r.Dequeue("", q)
+		_, _, err := r.Dequeue("", base.DefaultQueueReadyFunc, q)
 		require.Error(t, err)
 		require.True(t, errors.Is(err, errors.ErrNoProcessableTask))
 	}
@@ -224,32 +224,32 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 		// initial dequeue
 		err := r.EnqueueUnique(ctx, tc.msg, ttl)
 		require.NoError(t, err)
-		_, _, err = r.Dequeue("", tc.msg.Queue)
+		_, _, err = r.Dequeue("", base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.NoError(t, err)
 
 		// re-queuing with no server id: can be dequeued
 		err = r.Requeue("", tc.msg, false)
 		require.NoError(t, err)
-		_, _, err = r.Dequeue("", tc.msg.Queue)
+		_, _, err = r.Dequeue("", base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.NoError(t, err)
 
 		err = r.Requeue("", tc.msg, false)
 		require.NoError(t, err)
-		_, _, err = r.Dequeue(serverID, tc.msg.Queue)
+		_, _, err = r.Dequeue(serverID, base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.NoError(t, err)
 
 		// re-queueing with the same server id: can be dequeued only by this server
 		err = r.Requeue(serverID, tc.msg, false)
 		require.NoError(t, err)
 		// not available for other servers
-		_, _, err = r.Dequeue("", tc.msg.Queue)
+		_, _, err = r.Dequeue("", base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.Error(t, err)
 		require.True(t, errors.Is(err, errors.ErrNoProcessableTask), err)
-		_, _, err = r.Dequeue("inod222", tc.msg.Queue)
+		_, _, err = r.Dequeue("inod222", base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.Error(t, err)
 		require.True(t, errors.Is(err, errors.ErrNoProcessableTask), err)
 
-		m, _, err := r.Dequeue(serverID, tc.msg.Queue)
+		m, _, err := r.Dequeue(serverID, base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.NoError(t, err)
 		require.Equal(t, tc.msg, m)
 
@@ -264,7 +264,7 @@ func TestEnqueueWithServerAffinity(t *testing.T) {
 		// after the server affinity elapsed, another server can dequeue it
 		now = now.Add(time.Second * time.Duration(tc.msg.ServerAffinity))
 		r.MockNow(now)
-		m, _, err = r.Dequeue("", tc.msg.Queue)
+		m, _, err = r.Dequeue("", base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.NoError(t, err)
 		require.Equal(t, tc.msg, m)
 
@@ -313,21 +313,21 @@ func TestEnqueueWithServerAffinityAfterError(t *testing.T) {
 		// initial dequeue
 		err := r.EnqueueUnique(ctx, tc.msg, ttl)
 		require.NoError(t, err)
-		_, _, err = r.Dequeue(serverID, tc.msg.Queue)
+		_, _, err = r.Dequeue(serverID, base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.NoError(t, err)
 
 		// re-queueing with a server id: can be dequeued only by this server
 		err = r.Requeue(serverID, tc.msg, false)
 		require.NoError(t, err)
 		// not available for other servers
-		_, _, err = r.Dequeue("", tc.msg.Queue)
+		_, _, err = r.Dequeue("", base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.Error(t, err)
 		require.True(t, errors.Is(err, errors.ErrNoProcessableTask), err)
-		_, _, err = r.Dequeue(serverID2, tc.msg.Queue)
+		_, _, err = r.Dequeue(serverID2, base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.Error(t, err)
 		require.True(t, errors.Is(err, errors.ErrNoProcessableTask), err)
 
-		m, _, err := r.Dequeue(serverID, tc.msg.Queue)
+		m, _, err := r.Dequeue(serverID, base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.NoError(t, err)
 		require.Equal(t, tc.msg, m)
 
@@ -338,12 +338,12 @@ func TestEnqueueWithServerAffinityAfterError(t *testing.T) {
 		require.NoError(t, err)
 
 		// the server cannot take it right away
-		m, _, err = r.Dequeue(serverID, tc.msg.Queue)
+		m, _, err = r.Dequeue(serverID, base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.Error(t, err)
 		require.True(t, errors.Is(err, errors.ErrNoProcessableTask), err)
 
 		// but another one can
-		m, _, err = r.Dequeue(serverID2, tc.msg.Queue)
+		m, _, err = r.Dequeue(serverID2, base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.NoError(t, err)
 		err = r.Archive(tc.msg, "there was an error")
 		require.NoError(t, err)
@@ -354,7 +354,7 @@ func TestEnqueueWithServerAffinityAfterError(t *testing.T) {
 		// after server affinity elapsed, the same server can take it again
 		now = now.Add(time.Second * time.Duration(tc.msg.ServerAffinity))
 		r.MockNow(now)
-		m, _, err = r.Dequeue(serverID2, tc.msg.Queue)
+		m, _, err = r.Dequeue(serverID2, base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.NoError(t, err)
 
 	}
@@ -411,7 +411,7 @@ func TestRequeueScheduled(t *testing.T) {
 			err = r.Enqueue(context.Background(), tc.msg)
 		}
 		require.NoError(t, err)
-		_, _, err = r.Dequeue(tc.serverID, tc.msg.Queue)
+		_, _, err = r.Dequeue(tc.serverID, base.DefaultQueueReadyFunc, tc.msg.Queue)
 		require.NoError(t, err)
 
 		// re-queue
@@ -548,7 +548,7 @@ func TestDequeue(t *testing.T) {
 		FlushDB(t, r.conn)
 		SeedAllPendingQueues(t, r, tc.pending)
 
-		gotMsg, gotDeadline, err := r.Dequeue("", tc.args...)
+		gotMsg, gotDeadline, err := r.Dequeue("", base.DefaultQueueReadyFunc, tc.args...)
 		require.NoError(t, err, "(*RQLite.Dequeue(%v) returned error %v", tc.args, err)
 
 		if !cmp.Equal(gotMsg, tc.wantMsg) {
@@ -643,7 +643,7 @@ func TestDequeueError(t *testing.T) {
 		FlushDB(t, r.conn)
 		SeedAllPendingQueues(t, r, tc.pending)
 
-		gotMsg, gotDeadline, gotErr := r.Dequeue("", tc.args...)
+		gotMsg, gotDeadline, gotErr := r.Dequeue("", base.DefaultQueueReadyFunc, tc.args...)
 		if !errors.Is(gotErr, tc.wantErr) {
 			t.Errorf("(*RQLite).Dequeue(%v) returned error %v; want %v",
 				tc.args, gotErr, tc.wantErr)
@@ -775,7 +775,7 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 			}
 		}
 
-		got, _, err := r.Dequeue("", tc.args...)
+		got, _, err := r.Dequeue("", base.DefaultQueueReadyFunc, tc.args...)
 		if !cmp.Equal(got, tc.wantMsg) || !errors.Is(err, tc.wantErr) {
 			t.Errorf("Dequeue(%v) = %v, %v; want %v, %v",
 				tc.args, got, err, tc.wantMsg, tc.wantErr)

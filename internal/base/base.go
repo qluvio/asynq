@@ -794,6 +794,10 @@ type PubSub interface {
 // Otherwise, returns nil.
 type QueueReadyFunc func(string) func()
 
+var DefaultQueueReadyFunc = func(_ string) func() {
+	return func() {}
+}
+
 // Broker is a message broker that supports operations to manage task queues.
 //
 // See rdb.RDB as a reference implementation.
