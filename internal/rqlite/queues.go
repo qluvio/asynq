@@ -93,6 +93,7 @@ func (conn *Connection) removeQueue(queue string, force bool) (int64, error) {
 		queue,
 		queue)
 	if force {
+		// fail if there's still any active task
 		st = Statement(
 			"DELETE FROM "+conn.table(QueuesTable)+
 				" WHERE queue_name=? AND (SELECT COUNT(*) FROM "+conn.table(TasksTable)+

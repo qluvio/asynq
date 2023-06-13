@@ -130,6 +130,21 @@ func (conn *Connection) listTasksPaged(queue string, state string, page *base.Pa
 	return parseTaskRows(qrs[0])
 }
 
+// listAllTasks is a debug function to list all tasks in the given queue
+func (conn *Connection) listAllTasks(queue string) ([]*taskRow, error) {
+	op := errors.Op("listAllTasks")
+	st := Statement(
+		selectTaskRow+
+			" FROM "+conn.table(TasksTable)+
+			" WHERE queue_name=? ORDER BY 'ndx'",
+		queue)
+	qrs, err := conn.QueryStmt(conn.ctx(), st)
+	if err != nil {
+		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
+	}
+	return parseTaskRows(qrs[0])
+}
+
 func (conn *Connection) getTask(queue string, id string) (*taskRow, error) {
 	op := errors.Op("rqlite.getTask")
 	st := Statement(
@@ -202,6 +217,7 @@ func (conn *Connection) getPending(now time.Time, serverID string, queue string)
 			" INNER JOIN "+conn.table(QueuesTable)+
 			" ON "+conn.table(QueuesTable)+".queue_name="+conn.table(TasksTable)+".queue_name"+
 			" WHERE "+conn.table(QueuesTable)+".queue_name=? "+
+			" AND "+conn.table(TasksTable)+".state='pending' "+
 			" AND pndx=(SELECT COALESCE(MIN(pndx),0) FROM "+conn.table(TasksTable)+" WHERE state='pending' AND queue_name=?)"+
 			" AND "+conn.table(QueuesTable)+".state='active'",
 		queue,
