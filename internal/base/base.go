@@ -668,8 +668,6 @@ type Deadlines struct {
 func NewDeadlines(abort chan struct{}, size int) *Deadlines {
 	d := &Deadlines{update: make(chan deadline, size)}
 	go func() {
-		fmt.Println("NewDeadlines start")
-		defer fmt.Println("NewDeadlines stop")
 		dls := []deadline{}
 		for {
 			if func() bool {

@@ -793,7 +793,7 @@ func TestProcessorQueues(t *testing.T) {
 				t.Errorf("with queue config: %v\n(*processor).queues() = %v, want %v\n(-want,+got):\n%s",
 					tc.queueCfg, got, tc.want, diff)
 			}
-			close(p.abort)
+			close(p.abortNow)
 		})
 	}
 }
@@ -1084,7 +1084,7 @@ func TestProcessorPerform(t *testing.T) {
 		}
 	}
 
-	close(p.abort)
+	close(p.abortNow)
 }
 
 func TestGCD(t *testing.T) {
