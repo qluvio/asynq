@@ -295,9 +295,11 @@ func (r *RQLite) Dequeue(serverID string, qready base.QueueReadyFunc, qnames ...
 
 		q, err := r.getQueue(qname)
 		if err != nil {
+			qcleanup()
 			return nil, time.Time{}, errors.E(op, fmt.Sprintf("get queue error: %v", err))
 		}
 		if q == nil || q.state == paused {
+			qcleanup()
 			continue
 		}
 
@@ -305,9 +307,11 @@ func (r *RQLite) Dequeue(serverID string, qready base.QueueReadyFunc, qnames ...
 		data, err := conn.dequeueMessage(r.Now(), serverID, qname)
 
 		if err != nil {
+			qcleanup()
 			return nil, time.Time{}, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
 		}
 		if data == nil {
+			qcleanup()
 			continue
 		}
 		return data.msg, time.Unix(data.deadline, 0), nil
