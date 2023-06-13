@@ -671,6 +671,8 @@ func TestProcessorNilRetry(t *testing.T) {
 	d := s.processor.retryDelay.RetryDelay(1, nil, task)
 
 	require.True(t, d > 0)
+
+	close(s.processor.abortNow)
 }
 
 func TestProcessorMarkAsComplete(t *testing.T) {
