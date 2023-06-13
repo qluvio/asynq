@@ -134,7 +134,7 @@ func newProcessor(params processorParams) *processor {
 		}
 		qsema[q] = make(chan struct{}, c)
 	}
-	abort := make(chan struct{})
+	abortNow := make(chan struct{})
 	return &processor{
 		logger:          params.logger,
 		serverID:        params.serverID,
@@ -150,11 +150,11 @@ func newProcessor(params processorParams) *processor {
 		qsema:           qsema,
 		done:            make(chan struct{}),
 		quit:            make(chan struct{}),
-		abort:           abort,
-		abortNow:        make(chan struct{}),
+		abort:           make(chan struct{}),
+		abortNow:        abortNow,
 		tasks:           make(map[string]*processorTask),
 		results:         make(chan processorResult, params.concurrency),
-		deadlines:       base.NewDeadlines(abort, params.concurrency),
+		deadlines:       base.NewDeadlines(abortNow, params.concurrency),
 		errHandler:      params.errHandler,
 		handler:         HandlerFunc(func(ctx context.Context, t *Task) error { return fmt.Errorf("handler not set") }),
 		shutdownTimeout: params.shutdownTimeout,
@@ -195,6 +195,9 @@ func (p *processor) shutdownNow(immediately bool) {
 		for i := 0; i < cap(p.sema); i++ {
 			p.sema <- struct{}{}
 		}
+
+		// should be no work left to wait for; abort processes
+		close(p.abortNow)
 	}
 
 	if !immediately {
