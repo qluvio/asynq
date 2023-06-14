@@ -3,10 +3,8 @@ package rqlite
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
-	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/sqlite3"
 )
 
@@ -174,25 +172,30 @@ func (conn *Connection) table(name string) string {
 
 // CreateTablesIfNotExist returns true if tables were created, false if they were not.
 func (conn *Connection) CreateTablesIfNotExist() (bool, error) {
-	op := errors.Op("CreateTablesIfNotExist")
 
-	get := Statement("SELECT COUNT(*) FROM " + conn.table(VersionTable))
-	qrs, err := conn.QueryStmt(conn.ctx(), get)
-	if err != nil {
-		if len(qrs) == 0 {
-			return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
-		}
-		if qrs[0].Err() == nil || !strings.Contains(qrs[0].Err().Error(), "no such table:") {
-			return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
-		}
-	}
-	if len(qrs) == 0 {
-		return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, nil, []*sqlite3.Statement{get}))
-	}
-	if qrs[0].NumRows() > 0 {
-		return false, nil
-	}
-	err = conn.CreateTables()
+	//
+	// commented until a migration strategy is in place
+	//
+
+	//op := errors.Op("CreateTablesIfNotExist")
+
+	//get := Statement("SELECT COUNT(*) FROM " + conn.table(VersionTable))
+	//qrs, err := conn.QueryStmt(conn.ctx(), get)
+	//if err != nil {
+	//	if len(qrs) == 0 {
+	//		return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
+	//	}
+	//	if qrs[0].Err() == nil || !strings.Contains(qrs[0].Err().Error(), "no such table:") {
+	//		return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
+	//	}
+	//}
+	//if len(qrs) == 0 {
+	//	return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, nil, []*sqlite3.Statement{get}))
+	//}
+	//if qrs[0].NumRows() > 0 {
+	//	return false, nil
+	//}
+	err := conn.CreateTables()
 	if err != nil {
 		return false, err
 	}
