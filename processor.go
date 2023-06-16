@@ -93,6 +93,7 @@ type processor struct {
 	finished chan<- *base.TaskMessage
 
 	emptyQSleep time.Duration
+	lastEmptyQ  time.Time
 }
 
 type processorParams struct {
@@ -249,7 +250,10 @@ func (p *processor) exec() {
 		msg, deadline, err := p.broker.Dequeue(p.serverID, qready, qnames...)
 		switch {
 		case errors.Is(err, errors.ErrNoProcessableTask):
-			p.logger.Debug("All queues are empty and/or concurrency limits reached")
+			if p.lastEmptyQ.IsZero() || time.Since(p.lastEmptyQ) >= time.Minute {
+				p.lastEmptyQ = time.Now()
+				p.logger.Debug("All queues are empty and/or concurrency limits reached")
+			}
 			// Queues are empty and/or concurrency limits reached, this is a normal behavior.
 			// Sleep to avoid slamming redis and let scheduler move tasks into queues.
 			// Note: We are not using blocking pop operation and polling queues instead.
@@ -258,6 +262,7 @@ func (p *processor) exec() {
 			<-p.sema // release token
 			return
 		case err != nil:
+			p.lastEmptyQ = time.Time{}
 			if p.errLogLimiter.Allow() {
 				p.logger.Errorf("Dequeue error: %v", err)
 			}
@@ -266,10 +271,12 @@ func (p *processor) exec() {
 			<-p.sema // release token
 			return
 		}
+		p.lastEmptyQ = time.Time{}
 		p.logger.Debugf("dequeued %s -> %v", msg.ID, deadline)
 
-		p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
 		go func() {
+			p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
+
 			ctx, cancel := asynqcontext.New(msg, deadline)
 			cleanup := func() {
 				cancel()

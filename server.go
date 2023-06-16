@@ -382,9 +382,9 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	}
 	logger.SetLevel(toInternalLogLevel(loglevel))
 
-	starting := make(chan *workerInfo)
-	finished := make(chan *base.TaskMessage)
-	syncCh := make(chan *syncRequest)
+	starting := make(chan *workerInfo, n)
+	finished := make(chan *base.TaskMessage, n)
+	syncCh := make(chan *syncRequest, n)
 	state := base.NewServerState()
 	cancels := base.NewCancelations()
 	afterTasks := base.NewAfterTasks()
