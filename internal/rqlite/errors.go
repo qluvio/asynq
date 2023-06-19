@@ -83,6 +83,22 @@ func NewRqliteRsError(op errors.Op, qrs []sqlite3.QueryResult, err error, stmts 
 	}
 }
 
+func NewRqliteRqError(op errors.Op, qrs []sqlite3.RequestResult, err error, stmts []*sqlite3.Statement) error {
+	statements := make([]StatementError, 0)
+	caller := caller(1)
+	for ndx, qr := range qrs {
+		if qr.Err != nil {
+			statements = append(statements, StatementError{Error: qr.Err, Statement: stmts[ndx]})
+		}
+	}
+	return &RqliteError{
+		Op:         op,
+		Caller:     caller,
+		Err:        err,
+		Statements: statements,
+	}
+}
+
 // expectQueryResultCount returns an error if the expected count does not match
 // with the returned result
 func expectQueryResultCount(op errors.Op, expectedCount int, qrs []sqlite3.QueryResult) error {

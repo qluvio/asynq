@@ -37,15 +37,16 @@ func (c *SQLiteConnection) Close() {
 func newRequest(stmts []*Statement) *command.Request {
 	statements := make([]*command.Statement, 0, len(stmts))
 	for _, st := range stmts {
-		params := make([]*command.Parameter, 0, len(st.Parameters))
-		for _, p := range st.Parameters {
+		params := make([]*command.Parameter, 0, len(st.Arguments))
+		for _, p := range st.Arguments {
 			params = append(params, &command.Parameter{
 				Value: p,
 			})
 		}
 		statements = append(statements, &command.Statement{
-			Sql:        st.Sql,
+			Sql:        st.Query,
 			Parameters: params,
+			Returning:  st.Returning,
 		})
 	}
 	return &command.Request{
@@ -136,5 +137,93 @@ func (c *SQLiteConnection) WriteStmt(ctx context.Context, stmts ...*Statement) (
 			LastInsertID: wr.LastInsertId,
 		}
 	}
+	return ret, nil
+}
+
+func (c *SQLiteConnection) RequestContext(ctx context.Context, req *command.Request, xTime bool) ([]*command.ExecuteQueryResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	attempt := 0
+	// uncomment for troubleshooting
+	//t0 := time.Now()
+
+	// We are protected by taking the lock for concurrent calls using this
+	// connection, but not against concurrent calls made with another connection.
+	// Hence, retry write attempts that failed with error: SQLITE_BUSY - 05, with
+	// message 'database is locked'.
+	//
+	// Note that all constructors of db.DB open their internal write connections
+	// with option '_txlock=immediate' which is expected to provide a failure
+	// upfront (and not after executing some statements). Also function newRequest
+	// (in this file) always uses Transaction: true
+
+	for {
+		attempt++
+		eqrs, err := c.db.RequestContext(ctx, req, xTime)
+		if sqliteErr, ok := err.(sqlite3.Error); ok &&
+			sqliteErr.Code == sqlite3.ErrBusy &&
+			attempt <= 20 &&
+			c.retryBusy {
+			// 99% of errors (in a unit-test) were eliminated with a 5ms delay
+			// but half of them required 5 retries or more.
+			// Also: using an exponential backoff did not help at all.
+			time.Sleep(time.Millisecond * 5)
+			continue
+		}
+		// uncomment for troubleshooting
+		//if attempt > 1 {
+		//	fmt.Println("ExecuteContext", "attempt", attempt, "d", time.Now().Sub(t0), "err", err)
+		//}
+		return eqrs, err
+	}
+}
+
+func (c *SQLiteConnection) RequestStmt(ctx context.Context, stmts ...*Statement) ([]RequestResult, error) {
+	req := newRequest(stmts)
+	eqrs, err := c.RequestContext(ctx, req, true)
+	if err != nil {
+		return nil, err
+	}
+
+	ret := make([]RequestResult, len(eqrs))
+	for j, eqr := range eqrs {
+		if eqr.GetError() != "" {
+			ret[j] = RequestResult{
+				Err: errors.New(eqr.GetError()),
+			}
+			continue
+		}
+		if eqr.GetE() == nil && eqr.GetQ() == nil {
+			ret[j] = RequestResult{
+				Err: errors.New("no result (internal error)"),
+			}
+			continue
+		}
+		if eqr.GetE() != nil {
+			wr := eqr.GetE()
+			var err error
+			if wr.Error != "" { // should not happen (should have been reported on RequestResult.Err)
+				err = errors.New(wr.Error)
+			}
+			ret[j] = RequestResult{
+				Write: WriteResult{
+					Err:          err,
+					Timing:       wr.Time,
+					RowsAffected: wr.RowsAffected,
+					LastInsertID: wr.LastInsertId,
+				},
+			}
+		} else {
+			rows, err := encoding.NewRowsFromQueryRows(eqr.GetQ())
+			if err != nil {
+				return nil, err
+			}
+			ret[j] = RequestResult{
+				Query: newQueryResult(rows),
+			}
+		}
+	}
+
 	return ret, nil
 }

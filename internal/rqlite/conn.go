@@ -12,6 +12,7 @@ import (
 type DbConnection interface {
 	QueryStmt(ctx context.Context, sqlStatements ...*sqlite3.Statement) (results []sqlite3.QueryResult, err error)
 	WriteStmt(ctx context.Context, sqlStatements ...*sqlite3.Statement) (results []sqlite3.WriteResult, err error)
+	RequestStmt(ctx context.Context, sqlStatements ...*sqlite3.Statement) (results []sqlite3.RequestResult, err error)
 	PingContext(ctx context.Context) error
 	Close()
 }

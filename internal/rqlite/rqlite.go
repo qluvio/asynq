@@ -296,7 +296,9 @@ func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessa
 			continue
 		}
 
+		// here we would use dequeueMessage0 to perform dequeue in 2 steps
 		data, err := conn.dequeueMessage(r.Now(), serverID, qname)
+
 		if err != nil {
 			return nil, time.Time{}, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
 		}

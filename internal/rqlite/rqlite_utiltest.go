@@ -77,7 +77,7 @@ func getMessages(tb testing.TB, r *RQLite, queue string, state string) []*base.T
 	qr := qrs[0]
 	ret := make([]*base.TaskMessage, 0)
 	for qr.Next() {
-		deq := &dequeueRow{}
+		deq := &dequeueRow0{}
 		err = qr.Scan(&deq.ndx, &deq.pndx, &deq.taskMsg, &deq.timeout, &deq.deadline)
 		require.NoError(tb, err)
 		msg, err := decodeMessage([]byte(deq.taskMsg))

@@ -3,9 +3,16 @@ package encoding
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/hibiken/asynq/internal/sqlite3/command"
+)
+
+var (
+	// ErrTypesColumnsLengthViolation is returned when a results
+	// object doesn't have the same number of types and columns
+	ErrTypesColumnsLengthViolation = errors.New("types and columns are different lengths")
 )
 
 // Result represents the outcome of an operation that changes rows.
@@ -25,6 +32,56 @@ type Rows struct {
 	Time    float64         `json:"time,omitempty"`
 }
 
+// AssociativeRows represents the outcome of an operation that returns query data.
+type AssociativeRows struct {
+	Types map[string]string        `json:"types,omitempty"`
+	Rows  []map[string]interface{} `json:"rows"`
+	Error string                   `json:"error,omitempty"`
+	Time  float64                  `json:"time,omitempty"`
+}
+
+// ResultWithRows represents the outcome of an operation that changes rows, but also
+// includes an nil rows object, so clients can distinguish between a query and execute
+// result.
+type ResultWithRows struct {
+	Result
+	Rows []map[string]interface{} `json:"rows"`
+}
+
+// NewResultRowsFromExecuteQueryResponse returns an API object from an
+// ExecuteQueryResponse.
+func NewResultRowsFromExecuteQueryResponse(e *command.ExecuteQueryResponse) (interface{}, error) {
+	if er := e.GetE(); er != nil {
+		return NewResultFromExecuteResult(er)
+	} else if qr := e.GetQ(); qr != nil {
+		return NewRowsFromQueryRows(qr)
+	} else if err := e.GetError(); err != "" {
+		return map[string]string{
+			"error": err,
+		}, nil
+	}
+	return nil, errors.New("no ExecuteResult, QueryRows, or Error")
+}
+
+func NewAssociativeResultRowsFromExecuteQueryResponse(e *command.ExecuteQueryResponse) (interface{}, error) {
+	if er := e.GetE(); er != nil {
+		r, err := NewResultFromExecuteResult(er)
+		if err != nil {
+			return nil, err
+		}
+		return &ResultWithRows{
+			Result: *r,
+		}, nil
+	} else if qr := e.GetQ(); qr != nil {
+		return NewAssociativeRowsFromQueryRows(qr)
+	} else if err := e.GetError(); err != "" {
+		return map[string]string{
+			"error": err,
+		}, nil
+	}
+	return nil, errors.New("no ExecuteResult, QueryRows, or Error")
+}
+
 // NewResultFromExecuteResult returns an API Result object from an ExecuteResult.
 func NewResultFromExecuteResult(e *command.ExecuteResult) (*Result, error) {
 	return &Result{
@@ -37,6 +94,10 @@ func NewResultFromExecuteResult(e *command.ExecuteResult) (*Result, error) {
 
 // NewRowsFromQueryRows returns an API Rows object from a QueryRows
 func NewRowsFromQueryRows(q *command.QueryRows) (*Rows, error) {
+	if len(q.Columns) != len(q.Types) {
+		return nil, ErrTypesColumnsLengthViolation
+	}
+
 	values := make([][]interface{}, len(q.Values))
 	if err := NewValuesFromQueryValues(values, q.Values); err != nil {
 		return nil, err
@@ -47,6 +108,39 @@ func NewRowsFromQueryRows(q *command.QueryRows) (*Rows, error) {
 		Values:  values,
 		Error:   q.Error,
 		Time:    q.Time,
+	}, nil
+}
+
+// NewAssociativeRowsFromQueryRows returns an associative API object from a QueryRows
+func NewAssociativeRowsFromQueryRows(q *command.QueryRows) (*AssociativeRows, error) {
+	if len(q.Columns) != len(q.Types) {
+		return nil, ErrTypesColumnsLengthViolation
+	}
+
+	values := make([][]interface{}, len(q.Values))
+	if err := NewValuesFromQueryValues(values, q.Values); err != nil {
+		return nil, err
+	}
+
+	rows := make([]map[string]interface{}, len(values))
+	for i := range rows {
+		m := make(map[string]interface{})
+		for ii, c := range q.Columns {
+			m[c] = values[i][ii]
+		}
+		rows[i] = m
+	}
+
+	types := make(map[string]string)
+	for i := range q.Types {
+		types[q.Columns[i]] = q.Types[i]
+	}
+
+	return &AssociativeRows{
+		Types: types,
+		Rows:  rows,
+		Error: q.Error,
+		Time:  q.Time,
 	}, nil
 }
 
@@ -82,14 +176,19 @@ func NewValuesFromQueryValues(dest [][]interface{}, v []*command.Values) error {
 	return nil
 }
 
-// JSONMarshal serializes Execute and Query results to JSON API format.
-func JSONMarshal(i interface{}) ([]byte, error) {
-	return jsonMarshal(i, noEscapeEncode)
+// Encoder is used to JSON marshal ExecuteResults, QueryRows
+// and ExecuteQueryRequests.
+type Encoder struct {
+	Associative bool
 }
 
-// JSONMarshalIndent serializes Execute and Query results to JSON API format,
-// but also applies indent to the output.
-func JSONMarshalIndent(i interface{}, prefix, indent string) ([]byte, error) {
+// JSONMarshal implements the marshal interface
+func (e *Encoder) JSONMarshal(i interface{}) ([]byte, error) {
+	return jsonMarshal(i, noEscapeEncode, e.Associative)
+}
+
+// JSONMarshalIndent implements the marshal indent interface
+func (e *Encoder) JSONMarshalIndent(i interface{}, prefix, indent string) ([]byte, error) {
 	f := func(i interface{}) ([]byte, error) {
 		b, err := noEscapeEncode(i)
 		if err != nil {
@@ -99,7 +198,7 @@ func JSONMarshalIndent(i interface{}, prefix, indent string) ([]byte, error) {
 		_ = json.Indent(&out, b, prefix, indent)
 		return out.Bytes(), nil
 	}
-	return jsonMarshal(i, f)
+	return jsonMarshal(i, f, e.Associative)
 }
 
 func noEscapeEncode(i interface{}) ([]byte, error) {
@@ -112,7 +211,7 @@ func noEscapeEncode(i interface{}) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
-func jsonMarshal(i interface{}, f func(i interface{}) ([]byte, error)) ([]byte, error) {
+func jsonMarshal(i interface{}, f func(i interface{}) ([]byte, error), assoc bool) ([]byte, error) {
 	switch v := i.(type) {
 	case *command.ExecuteResult:
 		r, err := NewResultFromExecuteResult(v)
@@ -131,21 +230,69 @@ func jsonMarshal(i interface{}, f func(i interface{}) ([]byte, error)) ([]byte, 
 		}
 		return f(results)
 	case *command.QueryRows:
-		r, err := NewRowsFromQueryRows(v)
+		if assoc {
+			r, err := NewAssociativeRowsFromQueryRows(v)
+			if err != nil {
+				return nil, err
+			}
+			return f(r)
+		} else {
+			r, err := NewRowsFromQueryRows(v)
+			if err != nil {
+				return nil, err
+			}
+			return f(r)
+		}
+	case *command.ExecuteQueryResponse:
+		r, err := NewResultRowsFromExecuteQueryResponse(v)
 		if err != nil {
 			return nil, err
 		}
 		return f(r)
 	case []*command.QueryRows:
 		var err error
-		rows := make([]*Rows, len(v))
-		for j := range v {
-			rows[j], err = NewRowsFromQueryRows(v[j])
-			if err != nil {
-				return nil, err
+
+		if assoc {
+			rows := make([]*AssociativeRows, len(v))
+			for j := range v {
+				rows[j], err = NewAssociativeRowsFromQueryRows(v[j])
+				if err != nil {
+					return nil, err
+				}
 			}
+			return f(rows)
+		} else {
+			rows := make([]*Rows, len(v))
+			for j := range v {
+				rows[j], err = NewRowsFromQueryRows(v[j])
+				if err != nil {
+					return nil, err
+				}
+			}
+			return f(rows)
 		}
-		return f(rows)
+	case []*command.ExecuteQueryResponse:
+		if assoc {
+			res := make([]interface{}, len(v))
+			for j := range v {
+				r, err := NewAssociativeResultRowsFromExecuteQueryResponse(v[j])
+				if err != nil {
+					return nil, err
+				}
+				res[j] = r
+			}
+			return f(res)
+		} else {
+			res := make([]interface{}, len(v))
+			for j := range v {
+				r, err := NewResultRowsFromExecuteQueryResponse(v[j])
+				if err != nil {
+					return nil, err
+				}
+				res[j] = r
+			}
+			return f(res)
+		}
 	case []*command.Values:
 		values := make([][]interface{}, len(v))
 		if err := NewValuesFromQueryValues(values, v); err != nil {

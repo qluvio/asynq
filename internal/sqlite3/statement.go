@@ -21,26 +21,31 @@ import (
 // Statement is structurally identical to *gorqlite.Statement in order to be
 // usable with the gorqlite library as well as the sqlite3 package.
 type Statement struct {
-	Sql        string
-	Parameters []interface{}
-	Warning    string // unused but left for compatibility with *gorqlite.Statement
+	Query     string
+	Arguments []interface{}
+	Returning bool
 }
 
 func NewStatement(sql string, params ...interface{}) *Statement {
 	return &Statement{
-		Sql:        sql,
-		Parameters: params,
+		Query:     sql,
+		Arguments: params,
 	}
+}
+
+func (s *Statement) WithReturning(b bool) *Statement {
+	s.Returning = b
+	return s
 }
 
 // Check returns an error is the count of parameters does not match the count of
 // '?' in the SQL string.
 func (s *Statement) Check() error {
-	paramsCount := strings.Count(s.Sql, "?")
-	if paramsCount != len(s.Parameters) {
+	paramsCount := strings.Count(s.Query, "?")
+	if paramsCount != len(s.Arguments) {
 		return errors.New(
 			fmt.Sprintf("Unexpected parameters count: %d, expected: %d",
-				len(s.Parameters),
+				len(s.Arguments),
 				paramsCount))
 	}
 	return nil
@@ -49,20 +54,36 @@ func (s *Statement) Check() error {
 // Append appends the given sql string and parameters to the current and returns
 // the modified statement.
 func (s *Statement) Append(sql string, params ...interface{}) *Statement {
-	s.Sql += sql
-	s.Parameters = append(s.Parameters, params...)
+	s.Query += sql
+	s.Arguments = append(s.Arguments, params...)
 	return s
 }
 
 // String reconstructs the sql request without parsing (as best effort).
 // Use it for debug.
 func (s *Statement) String() string {
-	sql := strings.ReplaceAll(s.Sql, "?", "%v")
-	return fmt.Sprintf(sql, s.Parameters...)
+	sql := strings.ReplaceAll(s.Query, "?", "%v")
+	params := make([]interface{}, 0, len(s.Arguments))
+	for _, p := range s.Arguments {
+		s, ok := p.(string)
+		if ok {
+			params = append(params, fmt.Sprintf("'%s'", s))
+		} else {
+			params = append(params, p)
+		}
+	}
+	return fmt.Sprintf(sql, params...)
 }
 
 func (s *Statement) MarshalJSON() ([]byte, error) {
-	all := make([]interface{}, 0, len(s.Parameters)+1)
-	all = append(append(all, s.Sql), s.Parameters...)
+	length := len(s.Arguments) + 1
+	if s.Returning {
+		length++
+	}
+	all := make([]interface{}, 0, length)
+	if s.Returning {
+		all = append(all, true)
+	}
+	all = append(append(all, s.Query), s.Arguments...)
 	return json.Marshal(all)
 }

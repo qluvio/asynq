@@ -529,7 +529,7 @@ func (p *processor) markAsDone(ctx context.Context, msg *base.TaskMessage) {
 }
 
 func (p *processor) handleFailedMessage(ctx context.Context, msg *base.TaskMessage, reason string, err error) {
-	p.logger.Debugf("Retry or archive (%s) task id=%s error:%s", reason, msg.ID, err)
+	p.logger.Debugf("Retry or archive (%s) task id=%s error:%v", reason, msg.ID, err)
 	if p.errHandler != nil {
 		p.errHandler.HandleError(ctx, NewTask(msg.Type, msg.Payload), err)
 	}

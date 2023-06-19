@@ -10,6 +10,14 @@ import (
 	"github.com/hibiken/asynq/internal/sqlite3/encoding"
 )
 
+// RequestResult represents the result of a request.
+// When Err is nil, only one of Write or Query will be non nil
+type RequestResult struct {
+	Err   error // don't trust the rest if this isn't nil
+	Write WriteResult
+	Query QueryResult
+}
+
 // QueryResult type holds the results of a call to Query() in a rowset manner.
 // So if you were to query:
 //
@@ -17,6 +25,7 @@ import (
 //
 // then a QueryResult would hold any errors from that query, a list of columns and types, and the actual row values.
 type QueryResult interface {
+	IsZero() bool
 	Err() error
 	Columns() []string
 	Types() []string
@@ -33,6 +42,10 @@ type WriteResult struct {
 	Timing       float64 // request execution duration in seconds
 	RowsAffected int64   // affected by the change
 	LastInsertID int64   // if relevant, otherwise zero value
+}
+
+func (w *WriteResult) IsZero() bool {
+	return w.Timing == 0 && w.RowsAffected == 0 && w.LastInsertID == 0 && w.Err == nil
 }
 
 var _ QueryResult = (*queryResult)(nil)
@@ -53,6 +66,11 @@ func newQueryResult(rows *encoding.Rows) QueryResult {
 		rowNumber: -1,
 		err:       err,
 	}
+}
+
+func (qr *queryResult) IsZero() bool {
+	return qr.err == nil && (qr.Rows == nil ||
+		(len(qr.Columns()) == 0 && len(qr.Types()) == 0 && qr.NumRows() == 0))
 }
 
 func (qr *queryResult) Err() error {

@@ -14,34 +14,35 @@ import (
 )
 
 type taskRow struct {
-	ndx               int64
-	queueName         string
-	typeName          string
-	taskUuid          string
-	uniqueKey         string
-	uniqueKeyDeadline int64
-	taskMsg           string
-	taskTimeout       int64
-	taskDeadline      int64
-	pndx              int64
-	state             string
-	scheduledAt       int64
-	deadline          int64
-	retryAt           int64
-	doneAt            int64
-	failed            bool
-	archivedAt        int64
-	cleanupAt         int64
-	retainUntil       int64
-	sid               string
-	affinityTimeout   int64
-	recurrent         bool
-	result            string
-	pendingSince      int64
-	msg               *base.TaskMessage
+	ndx                int64
+	queueName          string
+	typeName           string
+	taskUuid           string
+	uniqueKey          string
+	uniqueKeyDeadline  int64
+	taskMsg            string
+	taskTimeout        int64
+	taskDeadline       int64
+	srvAffinityTimeout int64
+	pndx               int64
+	state              string
+	scheduledAt        int64
+	deadline           int64
+	retryAt            int64
+	doneAt             int64
+	failed             bool
+	archivedAt         int64
+	cleanupAt          int64
+	retainUntil        int64
+	sid                string
+	affinityTimeout    int64
+	recurrent          bool
+	result             string
+	pendingSince       int64
+	msg                *base.TaskMessage
 }
 
-const selectTaskRow = "SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, retain_until, sid, affinity_timeout, recurrent, result, pending_since "
+const selectTaskRow = "SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, server_affinity, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, retain_until, sid, affinity_timeout, recurrent, result, pending_since "
 
 func parseTaskRows(qr sqlite3.QueryResult) ([]*taskRow, error) {
 	op := errors.Op("rqlite.parseTaskRows")
@@ -64,6 +65,7 @@ func parseTaskRows(qr sqlite3.QueryResult) ([]*taskRow, error) {
 			&s.taskMsg,
 			&s.taskTimeout,
 			&s.taskDeadline,
+			&s.srvAffinityTimeout,
 			&s.pndx,
 			&s.state,
 			&s.scheduledAt,
@@ -195,82 +197,6 @@ func (conn *Connection) getTaskCount(queue string, andWhere, whereValue string) 
 		return 0, errors.E(op, errors.Internal, err)
 	}
 	return count, nil
-}
-
-type dequeueRow struct {
-	uuid     string
-	ndx      int64
-	pndx     int64
-	taskMsg  string
-	timeout  int64
-	deadline int64
-	msg      *base.TaskMessage
-}
-
-// We cannot issue a select and an update in the same transaction with rqlite
-// Thus we first get the index of the row, then try update this row
-func (conn *Connection) getPending(now time.Time, serverID string, queue string) (*dequeueRow, error) {
-	op := errors.Op("rqlite.getPending")
-
-	st := Statement(
-		"SELECT task_uuid,ndx,pndx,task_msg,task_timeout,task_deadline FROM "+conn.table(TasksTable)+
-			" INNER JOIN "+conn.table(QueuesTable)+
-			" ON "+conn.table(QueuesTable)+".queue_name="+conn.table(TasksTable)+".queue_name"+
-			" WHERE "+conn.table(QueuesTable)+".queue_name=? "+
-			" AND "+conn.table(TasksTable)+".state='pending' "+
-			" AND pndx=(SELECT COALESCE(MIN(pndx),0) FROM "+conn.table(TasksTable)+" WHERE state='pending' AND queue_name=?)"+
-			" AND "+conn.table(QueuesTable)+".state='active'",
-		queue,
-		queue)
-
-	st.Append(" AND ("+
-		""+conn.table(TasksTable)+".sid IS NULL "+
-		"OR ("+conn.table(TasksTable)+".sid=?"+
-		"  AND ("+conn.table(TasksTable)+".affinity_timeout>=0 "+
-		"    OR ("+conn.table(TasksTable)+".affinity_timeout<0 AND ("+
-		"        "+conn.table(TasksTable)+".archived_at-"+conn.table(TasksTable)+".affinity_timeout)<=?))) "+
-		"OR (("+conn.table(TasksTable)+".done_at+"+conn.table(TasksTable)+".affinity_timeout)<=? "+
-		"   AND "+conn.table(TasksTable)+".sid!=?)"+
-		")",
-		serverID,
-		now.Unix(),
-		now.Unix(),
-		serverID)
-
-	qrs, err := conn.QueryStmt(conn.ctx(), st)
-	if err != nil {
-		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
-	}
-
-	if len(qrs) == 0 || qrs[0].NumRows() == 0 {
-		// no row
-		return nil, nil
-	}
-
-	qr := qrs[0]
-	if qr.NumRows() > 1 {
-		// PENDING(GIL): take the first anyway because once we're in this state
-		//               this cannot change anymore !
-		//return nil, errors.E(op, errors.Internal, fmt.Sprintf("rqlite - more than one row selected: %d", qr.NumRows()))
-		if slog != nil {
-			slog.Warn(op, "rqlite - more than one row selected: ", qr.NumRows())
-		} else {
-			fmt.Println(op, "rqlite - more than one row selected: ", qr.NumRows())
-		}
-	}
-
-	qr.Next()
-	deq := &dequeueRow{}
-	err = qr.Scan(&deq.uuid, &deq.ndx, &deq.pndx, &deq.taskMsg, &deq.timeout, &deq.deadline)
-	if err != nil {
-		return nil, errors.E(op, errors.Internal, fmt.Sprintf("rqlite scan error: %v", err))
-	}
-	deq.msg, err = decodeMessage([]byte(deq.taskMsg))
-	if err != nil {
-		return nil, errors.E(op, errors.Internal, fmt.Sprintf("cannot decode message: %v", err))
-	}
-
-	return deq, nil
 }
 
 func (conn *Connection) deleteTasks(queue string, state string) (int64, error) {
@@ -433,8 +359,8 @@ func (conn *Connection) enqueueMessages(ctx context.Context, now time.Time, msgs
 		}
 		msgNdx = append(msgNdx, len(stmts))
 		stmts = append(stmts, Statement(
-			"INSERT INTO "+conn.table(TasksTable)+"(queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, recurrent, pndx, state, pending_since) "+
-				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?, ?)",
+			"INSERT INTO "+conn.table(TasksTable)+"(queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, server_affinity, recurrent, pndx, state, pending_since) "+
+				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?, ?)",
 			msg.Queue,
 			msg.Type,
 			msg.ID,
@@ -442,6 +368,7 @@ func (conn *Connection) enqueueMessages(ctx context.Context, now time.Time, msgs
 			encoded,
 			msg.Timeout,
 			msg.Deadline,
+			msg.ServerAffinity,
 			msg.Recurrent,
 			pending,
 			now.UnixNano())) // pending_since is unix nano (whereas all other time fields are unix)
@@ -526,8 +453,8 @@ func (conn *Connection) enqueueUniqueMessages(ctx context.Context, now time.Time
 		// if the unique_key_deadline is expired we ignore the constraint
 		// https://www.sqlite.org/lang_UPSERT.html
 		stmts = append(stmts, Statement(
-			"INSERT INTO "+conn.table(TasksTable)+" (queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, unique_key_deadline, recurrent, pndx, state, pending_since)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?, ?) "+
+			"INSERT INTO "+conn.table(TasksTable)+" (queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, server_affinity, unique_key_deadline, recurrent, pndx, state, pending_since)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?, ?) "+
 				" ON CONFLICT(unique_key) DO UPDATE SET "+
 				"   queue_name=excluded.queue_name, "+
 				"   type_name=excluded.type_name, "+
@@ -536,6 +463,7 @@ func (conn *Connection) enqueueUniqueMessages(ctx context.Context, now time.Time
 				"   task_msg=excluded.task_msg, "+
 				"   task_timeout=excluded.task_timeout, "+
 				"   task_deadline=excluded.task_deadline, "+
+				"   server_affinity=excluded.server_affinity, "+
 				"   unique_key_deadline=excluded.unique_key_deadline, "+
 				"   recurrent=excluded.recurrent, "+
 				"   pndx=excluded.pndx, "+
@@ -550,6 +478,7 @@ func (conn *Connection) enqueueUniqueMessages(ctx context.Context, now time.Time
 			encoded,
 			msg.Timeout,
 			msg.Deadline,
+			msg.ServerAffinity,
 			uniqueKeyExpireAt,
 			msg.Recurrent,
 			pending,
@@ -625,89 +554,6 @@ func (conn *Connection) enqueueUniqueMessages(ctx context.Context, now time.Time
 		return err0
 	}
 	return nil
-}
-
-type dequeueResult struct {
-	taskMsg  string
-	deadline int64
-	msg      *base.TaskMessage
-}
-
-func (conn *Connection) setTaskActive(ndx int64, serverID string, serverAffinity, deadline int64) (bool, error) {
-	op := errors.Op("rqlite.setTaskActive")
-
-	var st *sqlite3.Statement
-	if len(serverID) > 0 {
-		st = Statement(
-			"UPDATE "+conn.table(TasksTable)+" SET state='active', pending_since=NULL, sid=?, affinity_timeout=?, deadline=? WHERE state='pending' AND ndx=?",
-			serverID,
-			serverAffinity,
-			deadline,
-			ndx)
-	} else {
-		// PENDING(GIL): rqlite api does not support null on insert or update with parameterized statement
-		st = Statement(
-			"UPDATE "+conn.table(TasksTable)+" SET state='active', pending_since=NULL, affinity_timeout=?, deadline=? WHERE state='pending' AND ndx=?",
-			serverAffinity,
-			deadline,
-			ndx)
-	}
-	wrs, err := conn.WriteStmt(conn.ctx(), st)
-	if err != nil {
-		return false, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
-	}
-	if len(wrs) == 0 {
-		// no row update
-		return false, nil
-	}
-	// if the row was changed (by another rqlite) no row is affected
-	return wrs[0].RowsAffected == 1, nil
-}
-
-// dequeueMessage finds a processable task in the given queue.
-// The task state is set to active and its deadline is computed by inspecting
-// Timout and Deadline fields.
-//
-// Returns nil if no processable task is found in the given queue.
-// Returns a dequeueResult instance if a task is found.
-func (conn *Connection) dequeueMessage(now time.Time, serverID string, qname string) (*dequeueResult, error) {
-
-	nowu := now.Unix()
-	for {
-		row, err := conn.getPending(now, serverID, qname)
-		if err != nil {
-			return nil, err
-		}
-
-		// no pending row
-		if row == nil {
-			return nil, nil
-		}
-
-		var score int64
-		if row.timeout != 0 && row.deadline != 0 {
-			score = int64(math.Min(float64(nowu+row.timeout), float64(row.deadline)))
-		} else if row.timeout != 0 {
-			score = nowu + row.timeout
-		} else if row.deadline != 0 {
-			score = row.deadline
-		} else {
-			return nil, errors.E(errors.Op("rqlite.dequeueMessage"), errors.Internal, "asynq internal error: both timeout and deadline are not set")
-		}
-
-		ok, err := conn.setTaskActive(row.ndx, serverID, row.msg.ServerAffinity, score)
-		if err != nil {
-			return nil, err
-		}
-
-		if ok {
-			return &dequeueResult{
-				taskMsg:  row.taskMsg,
-				deadline: score,
-				msg:      row.msg,
-			}, nil
-		}
-	}
 }
 
 // setTaskDone removes the task from active queue to mark the task as done and
@@ -997,9 +843,9 @@ func (conn *Connection) requeueTask(now time.Time, serverID string, msg *base.Ta
 
 		// insert the scheduledAt parameter if needed
 		if msg.ReprocessAfter > 0 {
-			st.Parameters = append(st.Parameters, nil /* use the zero value of the element type */)
-			copy(st.Parameters[scheduledAtPos+1:], st.Parameters[scheduledAtPos:])
-			st.Parameters[scheduledAtPos] = scheduledAt
+			st.Arguments = append(st.Arguments, nil /* use the zero value of the element type */)
+			copy(st.Arguments[scheduledAtPos+1:], st.Arguments[scheduledAtPos:])
+			st.Arguments[scheduledAtPos] = scheduledAt
 		}
 
 	}
@@ -1044,8 +890,8 @@ func (conn *Connection) scheduleTasks(ctx context.Context, msgs ...*base.Message
 		//       is put in pending state it keeps it.
 		msgNdx = append(msgNdx, len(stmts))
 		stmts = append(stmts, Statement(
-			"INSERT INTO "+conn.table(TasksTable)+"(queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, scheduled_at, affinity_timeout, recurrent, pndx, state) "+
-				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?)",
+			"INSERT INTO "+conn.table(TasksTable)+"(queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, server_affinity, scheduled_at, affinity_timeout, recurrent, pndx, state) "+
+				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?)",
 			msg.Queue,
 			msg.Type,
 			msg.ID,
@@ -1053,6 +899,7 @@ func (conn *Connection) scheduleTasks(ctx context.Context, msgs ...*base.Message
 			encoded,
 			msg.Timeout,
 			msg.Deadline,
+			msg.ServerAffinity,
 			bmsg.ProcessAt.UTC().Unix(),
 			msg.ServerAffinity,
 			msg.Recurrent,
@@ -1133,8 +980,8 @@ func (conn *Connection) scheduleUniqueTasks(ctx context.Context, now time.Time, 
 		}
 
 		stmts = append(stmts, Statement(
-			"INSERT INTO "+conn.table(TasksTable)+" (queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, unique_key_deadline, scheduled_at, affinity_timeout, recurrent, pndx, state)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?) "+
+			"INSERT INTO "+conn.table(TasksTable)+" (queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, server_affinity, unique_key_deadline, scheduled_at, affinity_timeout, recurrent, pndx, state)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?) "+
 				" ON CONFLICT(unique_key) DO UPDATE SET"+
 				"   queue_name=excluded.queue_name, "+
 				"   type_name=excluded.type_name, "+
@@ -1143,6 +990,7 @@ func (conn *Connection) scheduleUniqueTasks(ctx context.Context, now time.Time, 
 				"   task_msg=excluded.task_msg, "+
 				"   task_timeout=excluded.task_timeout, "+
 				"   task_deadline=excluded.task_deadline, "+
+				"   server_affinity=excluded.server_affinity, "+
 				"   unique_key_deadline=excluded.unique_key_deadline, "+
 				"   scheduled_at=excluded.scheduled_at, "+
 				"   affinity_timeout=excluded.affinity_timeout, "+
@@ -1158,6 +1006,7 @@ func (conn *Connection) scheduleUniqueTasks(ctx context.Context, now time.Time, 
 			encoded,
 			msg.Timeout,
 			msg.Deadline,
+			msg.ServerAffinity,
 			now.Add(bmsg.UniqueTTL).Unix(),
 			bmsg.ProcessAt.UTC().Unix(),
 			msg.ServerAffinity,
