@@ -24,10 +24,25 @@ func Test_ReturningClause(t *testing.T) {
 		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
 	}
 
-	rq, err := db.RequestStringStmt(`INSERT INTO foo(id, name) VALUES(1, "fiona") RETURNING id`)
+	rqs, err := db.Request(&command.Request{
+		Statements: []*command.Statement{
+			{
+				Sql:       `INSERT INTO foo(id, name) VALUES(1, "fiona") RETURNING id`,
+				Returning: true,
+			},
+		},
+	}, true)
 	if err != nil {
 		t.Fatalf("failed to insert record: %s", err.Error())
 	}
+	if len(rqs) != 1 {
+		t.Fatalf("expected one query response")
+	}
+	rq := rqs[0]
+	if rq.GetError() != "" {
+		t.Fatalf("expected no error, got %s", rq.GetError())
+	}
+
 	rows := rq.GetQ()
 	if rows == nil {
 		t.Fatalf("expected rows result")
