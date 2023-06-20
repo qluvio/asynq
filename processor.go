@@ -58,8 +58,8 @@ type processor struct {
 
 	// sema is a counting semaphore to ensure the number of active workers
 	// does not exceed the limit.
-	sema  chan struct{}
-	qsema map[string]chan struct{} // queue string -> chan
+	sema   chan struct{}
+	qsemas map[string]chan struct{} // queue string -> chan
 
 	// channel to communicate back to the long running "processor" goroutine.
 	// once is used to send value to the channel only once.
@@ -93,6 +93,7 @@ type processor struct {
 	finished chan<- *base.TaskMessage
 
 	emptyQSleep time.Duration
+	firstEmptyQ time.Time
 	lastEmptyQ  time.Time
 }
 
@@ -128,12 +129,12 @@ type processorResult struct {
 
 // newProcessor constructs a new processor.
 func newProcessor(params processorParams) *processor {
-	qsema := make(map[string]chan struct{})
+	qsemas := make(map[string]chan struct{})
 	for q, c := range params.queues.Concurrencies() {
 		if c <= 0 {
 			c = params.concurrency
 		}
-		qsema[q] = make(chan struct{}, c)
+		qsemas[q] = make(chan struct{}, c)
 	}
 	abortNow := make(chan struct{})
 	return &processor{
@@ -148,7 +149,7 @@ func newProcessor(params processorParams) *processor {
 		afterTasks:      params.afterTasks,
 		errLogLimiter:   rate.NewLimiter(rate.Every(3*time.Second), 1),
 		sema:            make(chan struct{}, params.concurrency),
-		qsema:           qsema,
+		qsemas:          qsemas,
 		done:            make(chan struct{}),
 		quit:            make(chan struct{}),
 		abort:           make(chan struct{}),
@@ -235,44 +236,53 @@ func (p *processor) exec() {
 	case <-p.quit:
 		return
 	case p.sema <- struct{}{}: // acquire token
-		qready := func(qname string) func() {
-			qsema := p.qsema[qname]
+		// Only attempt to dequeue a task from queues that are under their respective concurrency limits
+		qnames := []string{}
+		qsemas := make(map[string]chan struct{})
+		for _, qn := range p.queues.Names() {
+			qs := p.qsemas[qn]
 			select {
-			case qsema <- struct{}{}: // acquire queue token
-				return func() {
-					<-qsema // release queue token
-				}
+			case qs <- struct{}{}: // acquire queue token
+				qnames = append(qnames, qn)
+				qsemas[qn] = qs
 			default:
-				return nil
+				continue
 			}
 		}
-		qnames := p.queues.Names()
-		msg, deadline, err := p.broker.Dequeue(p.serverID, qready, qnames...)
+		msg, deadline, err := p.broker.Dequeue(p.serverID, qnames...)
 		switch {
 		case errors.Is(err, errors.ErrNoProcessableTask):
 			if p.lastEmptyQ.IsZero() || time.Since(p.lastEmptyQ) >= time.Minute {
 				p.lastEmptyQ = time.Now()
-				p.logger.Debug("All queues are empty and/or concurrency limits reached")
+				if p.firstEmptyQ.IsZero() {
+					p.firstEmptyQ = p.lastEmptyQ
+				}
+				p.logger.Debugf("All queues are empty and/or concurrency limits reached [%s]", time.Since(p.firstEmptyQ).String())
 			}
 			// Queues are empty and/or concurrency limits reached, this is a normal behavior.
 			// Sleep to avoid slamming redis and let scheduler move tasks into queues.
 			// Note: We are not using blocking pop operation and polling queues instead.
 			// This adds significant load to redis.
 			time.Sleep(p.emptyQSleep)
-			<-p.sema // release token
+			releaseQSemas(qsemas, "") // release queue tokens
+			<-p.sema                  // release token
 			return
 		case err != nil:
+			p.firstEmptyQ = time.Time{}
 			p.lastEmptyQ = time.Time{}
 			if p.errLogLimiter.Allow() {
 				p.logger.Errorf("Dequeue error: %v", err)
 			}
 			// also sleep, otherwise we create a busy loop until errors clear...
 			time.Sleep(p.emptyQSleep)
-			<-p.sema // release token
+			releaseQSemas(qsemas, "") // release queue tokens
+			<-p.sema                  // release token
 			return
 		}
+		p.firstEmptyQ = time.Time{}
 		p.lastEmptyQ = time.Time{}
 		p.logger.Debugf("dequeued %s -> %v", msg.ID, deadline)
+		qsema := releaseQSemas(qsemas, msg.Queue) // release unused queue tokens
 
 		go func() {
 			p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
@@ -283,8 +293,8 @@ func (p *processor) exec() {
 				p.cancelations.Delete(msg.ID)
 				p.deadlines.Delete(msg.ID)
 				p.finished <- msg
-				<-p.qsema[msg.Queue] // release queue token
-				<-p.sema             // release token
+				<-qsema  // release queue token
+				<-p.sema // release token
 			}
 
 			ptask := &processorTask{ctx: ctx, msg: msg, done: atomic.NewBool(false), cleanup: cleanup}
@@ -582,4 +592,18 @@ func (p *processor) perform(ctx context.Context, task *Task) (err error) {
 		}
 	}()
 	return p.handler.ProcessTask(ctx, task)
+}
+
+// releaseQSemas releases the given queue tokens, except for the queue token associated with skipQueues, if specified.
+// Returns the qsema for the skipped queue
+func releaseQSemas(qsemas map[string]chan struct{}, skipQueue string) chan struct{} {
+	var ret chan struct{}
+	for qname, qsema := range qsemas {
+		if qname == skipQueue {
+			ret = qsema
+			continue
+		}
+		<-qsema
+	}
+	return ret
 }

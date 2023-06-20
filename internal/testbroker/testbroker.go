@@ -72,13 +72,13 @@ func (tb *TestBroker) EnqueueUnique(ctx context.Context, msg *base.TaskMessage, 
 	return tb.real.EnqueueUnique(ctx, msg, ttl, forceUnique...)
 }
 
-func (tb *TestBroker) Dequeue(serverID string, qready base.QueueReadyFunc, qnames ...string) (*base.TaskMessage, time.Time, error) {
+func (tb *TestBroker) Dequeue(serverID string, qnames ...string) (*base.TaskMessage, time.Time, error) {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
 		return nil, time.Time{}, errRedisDown
 	}
-	return tb.real.Dequeue(serverID, qready, qnames...)
+	return tb.real.Dequeue(serverID, qnames...)
 }
 
 func (tb *TestBroker) Done(serverID string, msg *base.TaskMessage) error {

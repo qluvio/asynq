@@ -299,7 +299,7 @@ return nil`)
 // off a queue if one exists and returns the message and deadline.
 // Dequeue skips a queue if the queue is paused.
 // If all queues are empty, ErrNoProcessableTask error is returned.
-func (r *RDB) Dequeue(serverID string, qready base.QueueReadyFunc, qnames ...string) (msg *base.TaskMessage, deadline time.Time, err error) {
+func (r *RDB) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessage, deadline time.Time, err error) {
 	var op errors.Op = "rdb.Dequeue"
 
 	//
@@ -308,10 +308,6 @@ func (r *RDB) Dequeue(serverID string, qready base.QueueReadyFunc, qnames ...str
 	_ = serverID
 
 	for _, qname := range qnames {
-		qcleanup := qready(qname)
-		if qcleanup == nil {
-			continue
-		}
 		keys := []string{
 			base.PendingKey(qname),
 			base.PausedKey(qname),
@@ -324,33 +320,26 @@ func (r *RDB) Dequeue(serverID string, qready base.QueueReadyFunc, qnames ...str
 		}
 		res, err := dequeueCmd.Run(context.Background(), r.client, keys, argv...).Result()
 		if err == redis.Nil {
-			qcleanup()
 			continue
 		} else if err != nil {
-			qcleanup()
 			return nil, time.Time{}, errors.E(op, errors.Unknown, fmt.Sprintf("redis eval error: %v", err))
 		}
 		data, err := cast.ToSliceE(res)
 		if err != nil {
-			qcleanup()
 			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from Lua script: %v", res))
 		}
 		if len(data) != 2 {
-			qcleanup()
 			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("Lua script returned %d values; expected 2", len(data)))
 		}
 		encoded, err := cast.ToStringE(data[0])
 		if err != nil {
-			qcleanup()
 			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from Lua script: %v", res))
 		}
 		d, err := cast.ToInt64E(data[1])
 		if err != nil {
-			qcleanup()
 			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from Lua script: %v", res))
 		}
 		if msg, err = base.DecodeMessage([]byte(encoded)); err != nil {
-			qcleanup()
 			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cannot decode message: %v", err))
 		}
 		return msg, time.Unix(d, 0), nil

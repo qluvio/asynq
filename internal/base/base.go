@@ -789,15 +789,6 @@ type PubSub interface {
 	Channel() <-chan interface{}
 }
 
-// QueueReadyFunc checks if the given queue is ready for processing a new task from the queue.
-// If the queue is ready, returns a cleanup function that should be called only if the new task will not be processed.
-// Otherwise, returns nil.
-type QueueReadyFunc func(string) func()
-
-var DefaultQueueReadyFunc = func(_ string) func() {
-	return func() {}
-}
-
 // Broker is a message broker that supports operations to manage task queues.
 //
 // See rdb.RDB as a reference implementation.
@@ -820,10 +811,9 @@ type Broker interface {
 	// Dequeue skips a queue if the queue is paused.
 	// If all queues are empty, ErrNoProcessableTask error is returned.
 	// - qnames are the queues to process
-	// - qready is a function called before a task is popped from a given queue to check if the queue is ready.
 	// - serverID is used the ID of the processor/server processing Dequeue and
 	//   is used to select tasks with server affinity.
-	Dequeue(serverID string, qready QueueReadyFunc, qnames ...string) (*TaskMessage, time.Time, error)
+	Dequeue(serverID string, qnames ...string) (*TaskMessage, time.Time, error)
 	// Done removes the task from active queue to mark the task as done.
 	// It removes a uniqueness lock acquired by the task, if any.
 	// ServerID is the ID of the server that processed the task (used for server affinity)
