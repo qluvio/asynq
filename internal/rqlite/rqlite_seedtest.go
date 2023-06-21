@@ -30,51 +30,70 @@ func SeedPendingQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname 
 	}
 }
 
-func SeedAllCompletedQueues(tb testing.TB, r *RQLite, completed map[string][]base.Z) {
+func SeedAllCompletedQueues(tb testing.TB, r *RQLite, completed map[string][]base.Z, fn ...func(id string) error) {
 	for q, msgs := range completed {
-		SeedCompletedQueue(tb, r, msgs, q)
+		SeedCompletedQueue(tb, r, msgs, q, fn...)
 	}
 }
 
-func SeedCompletedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string) {
+func SeedCompletedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string, fns ...func(id string) error) {
 	err := r.conn.EnsureQueue(qname)
 	require.NoError(tb, err)
 
 	now := r.Now()
-	state := completed
+	var fn func(id string) error
+	if len(fns) > 0 {
+		fn = fns[0]
+	}
 
 	for _, mz := range msgs {
 		msg := mz.Message
-		retainUntil := mz.Score
 		require.Equal(tb, qname, msg.Queue)
 
 		if msg.CompletedAt == 0 {
 			msg.CompletedAt = now.Unix()
 		}
-		expireAt := msg.CompletedAt + int64(statsTTL)
+		msg.Retention = mz.Score - msg.CompletedAt
+		retainUntil := mz.Score
 		encoded, err := encodeMessage(msg)
 		require.NoError(tb, err)
 
 		SeedPendingQueue(tb, r, []*base.TaskMessage{msg}, qname)
-		//SeedActiveQueue(tb, r, []*base.TaskMessage{msg.Message}, qname, true)
-		//err = r.MarkAsComplete("", msg)
 
 		// tests insist on passing completed_at in the message + score in the Z
 		st := Statement(
 			"UPDATE "+r.conn.table(TasksTable)+" SET state=?, task_msg=?, deadline=NULL, done_at=?, cleanup_at=?, retain_until=? "+
 				"WHERE task_uuid=?",
-			state,
+			active,
 			encoded,
 			msg.CompletedAt,
-			expireAt,
+			msg.CompletedAt+int64(statsTTL),
 			retainUntil,
 			msg.ID)
+		//st := Statement(
+		//	"INSERT INTO "+r.conn.table(CompletedTasksTable)+
+		//		" (queue_name, type_name, task_uuid, task_msg, done_at, retain_until) "+
+		//		" VALUES (?, ?, ?, ?, ?, ?)",
+		//	qname,
+		//	msg.Type,
+		//	msg.ID,
+		//	encoded,
+		//	msg.CompletedAt,
+		//	retainUntil)
 		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 
-		st = r.conn.processedStatsStatement(time.Unix(msg.CompletedAt, 0), msg.Queue)
-		wrs, err = r.conn.WriteStmt(r.conn.ctx(), st)
+		if fn != nil {
+			err = fn(msg.ID)
+			require.NoError(tb, err)
+		}
+
+		err = r.conn.setTaskCompleted(time.Time{}, "", msg)
 		require.NoError(tb, err)
+
+		//st = r.conn.processedStatsStatement(time.Unix(msg.CompletedAt, 0), msg.Queue)
+		//wrs, err = r.conn.WriteStmt(r.conn.ctx(), st)
+		//require.NoError(tb, err)
 	}
 }
 

@@ -99,6 +99,11 @@ func (conn *Connection) listTasks(queue string, state string) ([]*taskRow, error
 }
 
 func (conn *Connection) listTasksPaged(queue string, state string, page *base.Pagination, orderBy string) ([]*taskRow, error) {
+
+	if state == completed {
+		return conn.listCompletedTasksPaged(queue, page, orderBy)
+	}
+
 	op := errors.Op("listTasks")
 	st := Statement(
 		selectTaskRow+
@@ -201,6 +206,10 @@ func (conn *Connection) getTaskCount(queue string, andWhere, whereValue string) 
 
 func (conn *Connection) deleteTasks(queue string, state string) (int64, error) {
 	op := errors.Op("rqlite.deleteTasks")
+
+	if state == completed {
+		return conn.deleteCompletedTasks(queue)
+	}
 
 	st := Statement(
 		"DELETE FROM "+conn.table(TasksTable)+" WHERE queue_name=? AND state=?",
@@ -583,115 +592,6 @@ func (conn *Connection) setTaskDone(now time.Time, serverID string, msg *base.Ta
 	err = expectOneRowUpdated(op, wrs, 1, stmts[1], len(msg.UniqueKey) == 0)
 	if err != nil {
 		return err
-	}
-	return nil
-}
-
-// setTaskCompleted removes the task from active queue to mark the task as done and
-// set its state to 'completed'.
-// It removes a uniqueness lock acquired by the task, if any.
-func (conn *Connection) setTaskCompleted(now time.Time, serverID string, msg *base.TaskMessage) error {
-	op := errors.Op("rqlite.setTaskCompleted")
-	state := completed
-
-	msg.CompletedAt = now.Unix()
-
-	expireAt := now.Add(statsTTL)
-	retainUntil := now.Add(time.Second * time.Duration(msg.Retention))
-	// re-encode message to have completedAt
-	encoded, err := encodeMessage(msg)
-	if err != nil {
-		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode message: %v", err))
-	}
-
-	var st *sqlite3.Statement
-	if len(msg.UniqueKey) > 0 {
-		if len(serverID) > 0 {
-			st = Statement(
-				"UPDATE "+conn.table(TasksTable)+" SET state=?, task_msg=?, deadline=NULL, unique_key_deadline=NULL, sid=?, done_at=?, cleanup_at=?, retain_until=?, unique_key=? "+
-					"WHERE task_uuid=? AND state='active'",
-				state,
-				encoded,
-				serverID,
-				now.Unix(),
-				expireAt.Unix(),
-				retainUntil.Unix(),
-				msg.ID,
-				msg.ID)
-		} else {
-			st = Statement(
-				"UPDATE "+conn.table(TasksTable)+" SET state=?, task_msg=?, deadline=NULL, unique_key_deadline=NULL, done_at=?, cleanup_at=?, retain_until=?, unique_key=? "+
-					"WHERE task_uuid=? AND state='active'",
-				state,
-				encoded,
-				now.Unix(),
-				expireAt.Unix(),
-				retainUntil.Unix(),
-				msg.ID,
-				msg.ID)
-		}
-	} else {
-		if len(serverID) > 0 {
-			st = Statement(
-				"UPDATE "+conn.table(TasksTable)+" SET state=?, task_msg=?, deadline=NULL, sid=?, done_at=?, cleanup_at=?, retain_until=? "+
-					"WHERE task_uuid=? AND state='active'",
-				state,
-				encoded,
-				serverID,
-				now.Unix(),
-				expireAt.Unix(),
-				retainUntil.Unix(),
-				msg.ID)
-		} else {
-			st = Statement(
-				"UPDATE "+conn.table(TasksTable)+" SET state=?, task_msg=?, deadline=NULL, done_at=?, cleanup_at=?, retain_until=? "+
-					"WHERE task_uuid=? AND state='active'",
-				state,
-				encoded,
-				now.Unix(),
-				expireAt.Unix(),
-				retainUntil.Unix(),
-				msg.ID)
-		}
-	}
-
-	stmts := []*sqlite3.Statement{
-		st,
-		conn.processedStatsStatement(now, msg.Queue),
-	}
-
-	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
-	if err != nil {
-		return NewRqliteWsError(op, wrs, err, stmts)
-	}
-	// with uniqueKey the unique lock may have been forced to put the task
-	// again in state 'pending' - see enqueueUniqueMessages
-	err = expectOneRowUpdated(op, wrs, 0, stmts[0], len(msg.UniqueKey) == 0)
-	if err != nil {
-		return err
-	}
-	err = expectOneRowUpdated(op, wrs, 1, stmts[1], true)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// deleteExpiredCompletedTasks deletes completed tasks whose retention period
-// expired to the archived set.
-func (conn *Connection) deleteExpiredCompletedTasks(now time.Time, qname string) error {
-	op := errors.Op("rqlite.deleteExpiredCompletedTasks")
-	state := completed
-
-	stmt := Statement(
-		"DELETE FROM "+conn.table(TasksTable)+
-			" WHERE queue_name=? AND state=? AND retain_until<?",
-		qname,
-		state,
-		now.Unix())
-	wrs, err := conn.WriteStmt(conn.ctx(), stmt)
-	if err != nil {
-		return NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{stmt})
 	}
 	return nil
 }

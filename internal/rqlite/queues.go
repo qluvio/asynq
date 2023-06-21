@@ -252,10 +252,18 @@ func (conn *Connection) getTaskInfo(now time.Time, qname string, taskid string) 
 	var op errors.Op = "getTaskInfo"
 
 	tr, err := conn.getTask(qname, taskid)
-	if err != nil {
+	if err == nil {
+		return getTaskInfo(op, now, tr)
+	} else if !errors.IsTaskNotFound(err) {
 		return nil, errors.E(op, errors.Internal, err)
 	}
-	return getTaskInfo(op, now, tr)
+	// fall back to completed if not found
+	ret, err2 := conn.getCompletedTaskInfo(now, qname, taskid)
+	if err2 != nil {
+		// return the initial 'not found' error
+		return nil, errors.E(op, errors.Internal, err)
+	}
+	return ret, nil
 }
 
 func getTaskInfo(op errors.Op, now time.Time, tr *taskRow) (*base.TaskInfo, error) {

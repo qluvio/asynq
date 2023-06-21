@@ -11,6 +11,7 @@ import (
 var AllTables = map[string]string{
 	QueuesTable:           CreateQueuesTableFmt,
 	TasksTable:            CreateTasksTableFmt,
+	CompletedTasksTable:   CreateCompletedTasksTableFmt,
 	ServersTable:          CreateServersTableFmt,
 	WorkersTable:          CreateWorkersTableFmt,
 	SchedulersTable:       CreateSchedulersTableFmt,
@@ -26,7 +27,8 @@ type IndexCtor struct {
 }
 
 var AllIndexes = map[string][]IndexCtor{
-	TasksTable: {CreateTasksIndexesFmt},
+	TasksTable:          {CreateTasksIndexesFmt},
+	CompletedTasksTable: {CreateCompletedTasksIndexesFmt},
 }
 
 const (
@@ -54,7 +56,7 @@ const (
 
 	TasksTable          = "asynq_tasks"
 	CreateTasksTableFmt = `CREATE TABLE IF NOT EXISTS %s (
-	ndx                     integer not null primary key,
+	ndx                     integer not null primary key AUTOINCREMENT,
 	queue_name              text not null,
 	type_name               text not null,
 	task_uuid               text not null unique,
@@ -79,6 +81,20 @@ const (
 	recurrent               boolean,
 	result                  text,
 	pending_since           integer 
+)`
+
+	CompletedTasksTable          = "completed_asynq_tasks"
+	CreateCompletedTasksTableFmt = `CREATE TABLE IF NOT EXISTS %s (
+	ndx                     integer not null primary key,
+	queue_name              text not null,
+	type_name               text not null,
+	task_uuid               text not null,
+	task_msg                text,
+	deadline                integer,
+	done_at                 integer,
+	retain_until            integer,
+	sid                     text,
+	result                  text
 )`
 
 	ServersTable          = "asynq_servers"
@@ -133,6 +149,10 @@ var (
 	CreateTasksIndexesFmt = IndexCtor{
 		Name:   "idx_%s_queue_and_state",
 		Format: `CREATE INDEX IF NOT EXISTS %s ON %s (queue_name,state);`,
+	}
+	CreateCompletedTasksIndexesFmt = IndexCtor{
+		Name:   "idx_%s_queue_and_uuid",
+		Format: `CREATE INDEX IF NOT EXISTS %s ON %s (queue_name,task_uuid);`,
 	}
 )
 

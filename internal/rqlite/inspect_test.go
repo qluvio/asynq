@@ -366,9 +366,10 @@ func TestGetTaskInfo(t *testing.T) {
 	SeedAllScheduledQueues(t, r, fixtures.scheduled)
 	SeedAllRetryQueues(t, r, fixtures.retry)
 	SeedAllArchivedQueues(t, r, fixtures.archived)
-	SeedAllCompletedQueues(t, r, fixtures.completed)
-	_, err := r.conn.writeTaskResult(m6.Queue, m6.ID, []byte("foobar"), false)
-	require.NoError(t, err)
+	SeedAllCompletedQueues(t, r, fixtures.completed, func(id string) error {
+		_, err := r.conn.writeTaskResult(m6.Queue, m6.ID, []byte("foobar"), false)
+		return err
+	})
 
 	tests := []struct {
 		qname string

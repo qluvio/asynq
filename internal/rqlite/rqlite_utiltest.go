@@ -60,7 +60,7 @@ func GetScheduledMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMe
 }
 
 func GetCompletedMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMessage {
-	return getMessages(tb, r, queue, completed)
+	return getCompletedMessages(tb, r, queue)
 }
 
 func getMessages(tb testing.TB, r *RQLite, queue string, state string) []*base.TaskMessage {
@@ -79,6 +79,28 @@ func getMessages(tb testing.TB, r *RQLite, queue string, state string) []*base.T
 	for qr.Next() {
 		deq := &dequeueRow0{}
 		err = qr.Scan(&deq.ndx, &deq.pndx, &deq.taskMsg, &deq.timeout, &deq.deadline)
+		require.NoError(tb, err)
+		msg, err := decodeMessage([]byte(deq.taskMsg))
+		require.NoError(tb, err)
+		ret = append(ret, msg)
+	}
+	return ret
+}
+
+func getCompletedMessages(tb testing.TB, r *RQLite, queue string) []*base.TaskMessage {
+	require.NotNil(tb, r.conn)
+	st := Statement(
+		"SELECT ndx,task_msg FROM "+r.conn.table(CompletedTasksTable)+
+			" WHERE "+r.conn.table(CompletedTasksTable)+".queue_name=? ",
+		queue)
+	qrs, err := r.conn.QueryStmt(r.conn.ctx(), st)
+	require.NoError(tb, err)
+
+	qr := qrs[0]
+	ret := make([]*base.TaskMessage, 0)
+	for qr.Next() {
+		deq := &dequeueRow0{}
+		err = qr.Scan(&deq.ndx, &deq.taskMsg)
 		require.NoError(tb, err)
 		msg, err := decodeMessage([]byte(deq.taskMsg))
 		require.NoError(tb, err)
