@@ -237,6 +237,14 @@ func (conn *Connection) deleteTask(queue string, taskid string) (int64, error) {
 	}
 	ret := wrs[0].RowsAffected
 
+	if ret == 0 {
+		// look into completed
+		ret2, err2 := conn.deleteCompletedTask(queue, taskid)
+		if ret2 == 1 && err2 == nil {
+			ret = 1
+		}
+	}
+
 	// enforce conventional return values for inspector
 	if ret == 0 {
 		qs, err := conn.getTask(queue, taskid)

@@ -177,6 +177,10 @@ func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, 
 			selectTaskRow+
 				" FROM "+conn.table(TasksTable)+
 				" WHERE queue_name=? ", queue),
+		Statement(
+			"SELECT COUNT(*)"+
+				" FROM "+conn.table(CompletedTasksTable)+
+				" WHERE queue_name=? ", queue),
 		conn.queueDayStatsStatement(queue, now),
 	}
 
@@ -184,7 +188,7 @@ func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, 
 	if err != nil {
 		return nil, NewRqliteRsError(op, qrs, err, stmts)
 	}
-	err = expectQueryResultCount(op, 3, qrs)
+	err = expectQueryResultCount(op, 4, qrs)
 	if err != nil {
 		return nil, err
 	}
@@ -228,10 +232,20 @@ func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, 
 			}
 		}
 		ret.Latency = now.Sub(time.Unix(0, oldestPending))
+
+		if qrs[2].Next() {
+			completed := 0
+			err := qrs[2].Scan(&completed)
+			if err != nil {
+				return nil, err
+			}
+			ret.Completed += completed
+		}
+
 		// processed are not included in size
 		ret.Size = ret.Pending + ret.Active + ret.Scheduled + ret.Retry + ret.Archived + ret.Completed
 
-		ds, err := parseDailyStatsRow(qrs[2])
+		ds, err := parseDailyStatsRow(qrs[3])
 		ret.Processed = ds.Processed
 		ret.Failed = ds.Failed
 
