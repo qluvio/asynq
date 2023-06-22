@@ -251,7 +251,7 @@ func (p *processor) exec() {
 		}
 		t := time.Now()
 		msg, deadline, err := p.broker.Dequeue(p.serverID, qnames...)
-		p.logger.Debugf("Dequeue [%s], qnames=%v, msg=%v, err=%s", time.Since(t).String(), qnames, msg, err.Error())
+		p.logger.Debugf("Dequeue [%s], qnames=%v, msg=%v, err=%v", time.Since(t).String(), qnames, msg, err)
 		switch {
 		case errors.Is(err, errors.ErrNoProcessableTask):
 			if p.lastEmptyQ.IsZero() || time.Since(p.lastEmptyQ) >= time.Minute {
