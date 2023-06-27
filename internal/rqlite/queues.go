@@ -88,7 +88,7 @@ func (conn *Connection) removeQueue(queue string, force bool) (int64, error) {
 
 	st := Statement(
 		"DELETE FROM "+conn.table(QueuesTable)+
-			" WHERE queue_name=? AND (SELECT COUNT(*) FROM "+conn.table(conn.table(TasksTable))+
+			" WHERE queue_name=? AND (SELECT COUNT(*) FROM "+conn.table(TasksTable)+
 			" WHERE "+conn.table(TasksTable)+".queue_name=?)=0",
 		queue,
 		queue)
