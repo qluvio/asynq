@@ -1316,3 +1316,245 @@ func TestClientEnqueueBatchError(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateTask(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	inspector := newInspector(client.rdb)
+	srv := newServer(client.rdb, Config{
+		Concurrency: 1,
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
+			return time.Second
+		}),
+		LogLevel: testLogLevel, //DebugLevel,
+	})
+	defer func() {
+		srv.Shutdown()
+		_ = client.Close()
+	}()
+
+	wgActive := sync.WaitGroup{}
+	wg := sync.WaitGroup{}
+	handler := func(ctx context.Context, task *Task) error {
+		wgActive.Done()
+		task.CallAfter(func(string, error, bool) {
+			defer wg.Done()
+		})
+		time.Sleep(time.Millisecond * 300)
+		return nil
+	}
+	_ = srv.Start(HandlerFunc(handler))
+
+	ctx.FlushDB()
+	{
+		//
+		// retention and update while task is active
+		//
+		const taskID = "custom_id"
+		task := NewTask("foo", nil)
+		now := time.Now().UTC()
+		deadline := now.Add(time.Hour).Truncate(time.Second)
+
+		wgActive.Add(1)
+		wg.Add(1)
+		opts := []Option{
+			Retention(time.Hour * 2),
+			Deadline(deadline),
+			TaskID(taskID),
+		}
+		eti, err := client.Enqueue(task, opts...)
+		if err != nil {
+			t.Fatalf("Enqueue failed: %v", err)
+		}
+		wgActive.Wait()
+		ah := srv.AsynchronousHandler()
+		uti, dl, err := ah.UpdateTask(eti.Queue, eti.ID, []byte("azerty"))
+		if err != nil {
+			t.Fatalf("UpdateTask failed: %v", err)
+		}
+		if !dl.Equal(deadline) {
+			t.Fatalf("deadline failed, expected: %v, actual:%v", deadline, dl)
+		}
+		if string(uti.Result) != "azerty" {
+			t.Fatalf("update result failed, expected: %v, actual:%v", "azerty", string(uti.Result))
+		}
+		wg.Wait()
+
+		ti, err := inspector.GetTaskInfo(eti.Queue, eti.ID)
+		if err != nil {
+			t.Fatalf("GetTaskInfo failed: %v", err)
+		}
+		if ti.State != TaskStateCompleted {
+			t.Fatalf("GetTaskInfo state: expected 'completed', got %v", ti.State.String())
+		}
+		if string(ti.Result) != "azerty" {
+			t.Fatalf("update result failed, expected: %v, actual:%v", "azerty", string(uti.Result))
+		}
+	}
+	{
+		//
+		// retention and update after task has completed (should fail ?)
+		//
+		const taskID = "custom_id2"
+		task := NewTask("foo", nil)
+		now := time.Now().UTC()
+		deadline := now.Add(time.Hour).Truncate(time.Second)
+
+		wgActive.Add(1)
+		wg.Add(1)
+		opts := []Option{
+			Retention(time.Hour * 2),
+			Deadline(deadline),
+			TaskID(taskID),
+		}
+		eti, err := client.Enqueue(task, opts...)
+		if err != nil {
+			t.Fatalf("Enqueue failed: %v", err)
+		}
+		wgActive.Wait()
+		wg.Wait()
+
+		ah := srv.AsynchronousHandler()
+		uti, dl, err := ah.UpdateTask(eti.Queue, eti.ID, []byte("pompom"))
+		if err != nil {
+			t.Fatalf("UpdateTask failed: %v", err)
+		}
+		if uti.State != TaskStateCompleted {
+			t.Fatalf("UpdateTask state: expected 'completed', got %v", uti.State.String())
+		}
+		if dl.Unix() != 0 {
+			t.Fatalf("deadline failed, expected zero, actual:%v", dl)
+		}
+		if string(uti.Result) != "pompom" {
+			t.Fatalf("update result failed, expected: %v, actual:%v", "azerty", string(uti.Result))
+		}
+
+		ti, err := inspector.GetTaskInfo(eti.Queue, eti.ID)
+		if err != nil {
+			t.Fatalf("GetTaskInfo failed: %v", err)
+		}
+		if ti.State != TaskStateCompleted {
+			t.Fatalf("GetTaskInfo state: expected 'completed', got %v", ti.State.String())
+		}
+		if string(ti.Result) != "pompom" {
+			t.Fatalf("update result failed, expected: %v, actual:%v", "azerty", string(uti.Result))
+		}
+	}
+	{
+		//
+		// no retention: update should fail
+		//
+		const taskID = "custom_id3"
+		task := NewTask("foo", nil)
+		now := time.Now().UTC()
+		deadline := now.Add(time.Hour).Truncate(time.Second)
+
+		wgActive.Add(1)
+		wg.Add(1)
+		opts := []Option{
+			Deadline(deadline),
+			TaskID(taskID),
+		}
+		eti, err := client.Enqueue(task, opts...)
+		if err != nil {
+			t.Fatalf("Enqueue failed: %v", err)
+		}
+		wgActive.Wait()
+		wg.Wait()
+
+		ah := srv.AsynchronousHandler()
+		_, _, err = ah.UpdateTask(eti.Queue, eti.ID, []byte("qwerty"))
+		if err == nil {
+			t.Fatalf("UpdateTask did not fail")
+		}
+
+		_, err = inspector.GetTaskInfo(eti.Queue, eti.ID)
+		if err == nil {
+			t.Fatalf("GetTaskInfo did not fail")
+		}
+	}
+
+}
+
+func TestFailOrSucceedCompletedTask(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	inspector := newInspector(client.rdb)
+	srv := newServer(client.rdb, Config{
+		Concurrency: 1,
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
+			return time.Second
+		}),
+		LogLevel: testLogLevel, //DebugLevel,
+	})
+	defer func() {
+		srv.Shutdown()
+		_ = client.Close()
+	}()
+
+	wg := sync.WaitGroup{}
+	handler := func(ctx context.Context, task *Task) error {
+		task.CallAfter(func(string, error, bool) {
+			defer wg.Done()
+		})
+		return nil
+	}
+	_ = srv.Start(HandlerFunc(handler))
+
+	ctx.FlushDB()
+	{
+		//
+		// call 'failed', then success after task execution
+		//
+		const taskID = "custom_id"
+		task := NewTask("foo", nil)
+		now := time.Now().UTC()
+		deadline := now.Add(time.Hour).Truncate(time.Second)
+
+		wg.Add(1)
+		opts := []Option{
+			Retention(time.Hour * 2),
+			Deadline(deadline),
+			TaskID(taskID),
+		}
+		eti, err := client.Enqueue(task, opts...)
+		if err != nil {
+			t.Fatalf("Enqueue failed: %v", err)
+		}
+		wg.Wait()
+		ah := srv.AsynchronousHandler()
+		err = ah.Failed(eti.Queue, eti.ID, []byte("azerty"), errors.New("test"))
+		if err != nil {
+			t.Fatalf("Failed failed: %v", err)
+		}
+
+		assertTask := func(result string) {
+			ti, err := inspector.GetTaskInfo(eti.Queue, eti.ID)
+			if err != nil {
+				t.Fatalf("GetTaskInfo failed: %v", err)
+			}
+			if ti.State != TaskStateCompleted {
+				t.Fatalf("GetTaskInfo state: expected 'completed', got %v", ti.State.String())
+			}
+			if string(ti.Result) != result {
+				t.Fatalf("update result failed, expected: %v, actual:%v", "azerty", string(ti.Result))
+			}
+			// PENDING(GIL): result is updated BUT NOT last error (since message is not re-encoded)
+			if ti.LastErr != "" {
+				t.Fatalf("expected no last error, got %s", ti.LastErr)
+			}
+		}
+		assertTask("azerty")
+
+		err = ah.Succeeded(eti.Queue, eti.ID, []byte("qwerty"))
+		if err != nil {
+			t.Fatalf("Succeeded failed: %v", err)
+		}
+		assertTask("qwerty")
+
+	}
+}

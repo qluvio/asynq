@@ -433,7 +433,12 @@ func (r *RQLite) WriteResult(qname, id string, data []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return conn.writeTaskResult(qname, id, data, true)
+	return conn.writeTaskResult(qname, id, data, false)
+}
+
+func (r *RQLite) UpdateTask(qname, id string, data []byte) (*base.TaskInfo, time.Time, error) {
+	conn, _ := r.Client()
+	return conn.updateTask(r.clock.Now(), qname, id, false, data)
 }
 
 // ForwardIfReady checks scheduled and retry sets of the given queues

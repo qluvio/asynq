@@ -60,8 +60,8 @@ func (t *Task) AsyncProcessor() *AsyncProcessor { return t.p }
 // changed in the broker database.
 // Function parameter:
 // string: task id
-// error: is the error returned by task execution.
-// bool: indicates if the error - if not nil - was considered as an actual error
+// error:  the error returned by task execution.
+// bool:   indicates if the error - if not nil - was considered as an actual error
 func (t *Task) CallAfter(fn func(string, error, bool)) {
 	if t.callAfter != nil {
 		t.callAfter(fn)

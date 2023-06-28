@@ -1328,3 +1328,30 @@ func (r *RDB) WriteResult(qname, taskID string, data []byte) (int, error) {
 	}
 	return len(data), nil
 }
+
+func (r *RDB) UpdateTask(qname, id string, data []byte) (*base.TaskInfo, time.Time, error) {
+	var op errors.Op = "rdb.UpdateTask"
+	deadline := time.Time{}
+
+	_, err := r.WriteResult(qname, id, data)
+	if err != nil {
+		return nil, deadline, err
+	}
+
+	ctx := context.Background()
+	zm := r.client.ZMScore(ctx, base.DeadlinesKey(qname), id)
+	if zm.Err() != nil {
+		return nil, deadline, zm.Err()
+	}
+
+	if len(zm.Val()) > 0 {
+		d, err := cast.ToInt64E(zm.Val()[0])
+		if err != nil {
+			return nil, deadline, errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from script: %v", zm.Val()[0]))
+		}
+		deadline = time.Unix(d, 0).UTC()
+	}
+
+	ret, err := r.GetTaskInfo(qname, id)
+	return ret, deadline, err
+}

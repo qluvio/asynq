@@ -34,6 +34,19 @@ var TaskCanceled = errors.New("task canceled")
 // worker goroutine.
 var AsynchronousTask = errors.New("task is processing asynchronously")
 
+type AsynchronousHandler interface {
+	// UpdateTask updates the task in the given queue with the given data and returns
+	// the corresponding task info and the actual deadline of the task or an error if
+	// the operation failed.
+	UpdateTask(queueName, taskId string, data []byte) (*TaskInfo, time.Time, error)
+	// Failed updates the task in the given queue with the given data and marks it as failed with the given error.
+	// Returns an error if the operation failed.
+	Failed(queueName, taskId string, result []byte, err error) error
+	// Succeeded updates the task in the given queue with the given data and marks it as succeeded.
+	// Returns an error if the operation failed.
+	Succeeded(queueName, taskId string, result []byte) error
+}
+
 type processor struct {
 	logger   *log.Logger
 	serverID string
@@ -86,7 +99,9 @@ type processor struct {
 	starting chan<- *workerInfo
 	finished chan<- *base.TaskMessage
 
-	emptyQSleep time.Duration
+	emptyQSleep      time.Duration
+	asynchronousOnce sync.Once
+	asynchronous     *asynchronousHandler
 }
 
 type processorParams struct {
@@ -316,6 +331,10 @@ func (p *processor) fini() {
 				default:
 					p.waitMu.Lock()
 					if !p.waitClosed {
+						// PENDING(GIL) - TODO
+						//p.broker.MarkAsynchronous(p.serverID, t.msg)
+
+						p.afterTasks.Delete(t.msg.ID)
 						// wait again for async task to complete; do not cleanup
 						p.wait <- t
 					}
@@ -636,4 +655,69 @@ func (p *processor) perform(ctx context.Context, task *Task) (err error) {
 		}
 	}()
 	return p.handler.ProcessTask(ctx, task)
+}
+
+func (p *processor) asynchronousHandler() AsynchronousHandler {
+	p.asynchronousOnce.Do(func() {
+		if p.asynchronous == nil {
+			p.asynchronous = &asynchronousHandler{p: p}
+		}
+	})
+	return p.asynchronous
+}
+
+type asynchronousHandler struct {
+	p *processor
+}
+
+func (a *asynchronousHandler) UpdateTask(queueName, taskId string, data []byte) (*TaskInfo, time.Time, error) {
+
+	info, dl, err := a.updateTask(queueName, taskId, data)
+	if err != nil {
+		return nil, dl, err
+	}
+	return newTaskInfo(info.Message, info.State, info.NextProcessAt, info.Result), dl, nil
+}
+
+func (a *asynchronousHandler) updateTask(queueName, taskId string, data []byte) (*base.TaskInfo, time.Time, error) {
+	// PENDING(GIL): TODO : Fail ?
+	//  - if not AsynchronousTask
+	//  - if not active
+	deadline := time.Time{}
+	ti, deadline, err := a.p.broker.UpdateTask(queueName, taskId, data)
+
+	switch {
+	case errors.IsQueueNotFound(err):
+		return nil, deadline, fmt.Errorf("asynq: %w", ErrQueueNotFound)
+	case errors.IsTaskNotFound(err):
+		return nil, deadline, fmt.Errorf("asynq: %w", ErrTaskNotFound)
+	case err != nil:
+		return nil, deadline, fmt.Errorf("asynq: %v", err)
+	}
+
+	return ti, deadline, nil
+}
+
+func (a *asynchronousHandler) Failed(queueName, taskId string, data []byte, err error) error {
+	ti, dl, uerr := a.updateTask(queueName, taskId, data)
+	if uerr != nil {
+		return uerr
+	}
+
+	ctx, cnc := context.WithDeadline(context.Background(), dl)
+	defer cnc()
+	a.p.handleFailedMessage(ctx, ti.Message, "asynchronous-failed", err)
+	return nil
+}
+
+func (a *asynchronousHandler) Succeeded(queueName, taskId string, data []byte) error {
+	ti, dl, err := a.updateTask(queueName, taskId, data)
+	if err != nil {
+		return err
+	}
+
+	ctx, cnc := context.WithDeadline(context.Background(), dl)
+	defer cnc()
+	a.p.handleSucceededMessage(ctx, ti.Message)
+	return nil
 }

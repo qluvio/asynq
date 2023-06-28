@@ -2634,3 +2634,51 @@ func TestWriteResult(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateTask(t *testing.T) {
+	r := setup(t)
+	defer r.Close()
+
+	t1 := &base.TaskMessage{
+		ID:      uuid.NewString(),
+		Type:    "send_email",
+		Payload: nil,
+		Queue:   "default",
+		Retry:   25,
+		Retried: 25,
+		Timeout: 3600,
+	}
+
+	tests := []struct {
+		data   []byte
+		active *base.TaskMessage
+	}{
+		{
+			data:   []byte("hello"),
+			active: t1,
+		},
+	}
+
+	for _, tc := range tests {
+		h.FlushDB(t, r.client)
+		qname := tc.active.Queue
+		active := map[string][]*base.TaskMessage{qname: {tc.active}}
+		h.SeedAllPendingQueues(t, r.client, active)
+		_, dl0, err := r.Dequeue("", qname)
+
+		ti, dl, err := r.UpdateTask(qname, tc.active.ID, tc.data)
+		if err != nil || ti == nil {
+			t.Errorf("UpdateTask failed: %v", err)
+			continue
+		}
+		if !dl0.Equal(dl) {
+			t.Errorf("Unexpected deadline, expected %v, actual: %v", dl0, dl)
+		}
+
+		taskKey := base.TaskKey(qname, tc.active.ID)
+		got := r.client.HGet(context.Background(), taskKey, "result").Val()
+		if got != string(tc.data) {
+			t.Errorf("`result` field under %q key is set to %q, want %q", taskKey, got, string(tc.data))
+		}
+	}
+}

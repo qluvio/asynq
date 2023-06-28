@@ -2,6 +2,11 @@
 
 ## Task state 
 
+color legend
+
+* gray: actual asynq states reflected in the DB of the broker
+* lightblue: internal states not reflected in the DB of the broker
+
 ![Task state](task_state.png)
 
 ## Server components

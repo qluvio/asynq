@@ -2479,13 +2479,20 @@ func TestWriteResult(t *testing.T) {
 
 	for _, tc := range tests {
 		FlushDB(t, r.conn)
-		SeedActiveQueue(t, r, []*base.TaskMessage{
+		SeedPendingQueue(t, r, []*base.TaskMessage{
 			{
 				Type:  "x",
 				ID:    tc.taskID,
 				Queue: tc.qname,
 			},
-		}, tc.qname, true)
+		}, tc.qname)
+		//SeedActiveQueue(t, r, []*base.TaskMessage{
+		//	{
+		//		Type:  "x",
+		//		ID:    tc.taskID,
+		//		Queue: tc.qname,
+		//	},
+		//}, tc.qname, true)
 
 		n, err := r.WriteResult(tc.qname, tc.taskID, tc.data)
 		if err != nil {
@@ -2505,6 +2512,58 @@ func TestWriteResult(t *testing.T) {
 		if string(ti.Result) != string(tc.data) {
 			t.Errorf("`result` field under queue %s, taks %s is set to %q, want %q",
 				tc.qname, tc.taskID, string(ti.Result), string(tc.data))
+		}
+	}
+}
+
+func TestUpdateTask(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	t1 := &base.TaskMessage{
+		ID:      uuid.NewString(),
+		Type:    "send_email",
+		Payload: nil,
+		Queue:   "default",
+		Retry:   25,
+		Retried: 25,
+		Timeout: 3600,
+	}
+
+	tests := []struct {
+		data   []byte
+		active *base.TaskMessage
+	}{
+		{
+			data:   []byte("hello"),
+			active: t1,
+		},
+	}
+
+	for _, tc := range tests {
+		FlushDB(t, r.conn)
+		qname := tc.active.Queue
+
+		err := r.conn.EnsureQueue(qname)
+		if err != nil {
+			t.Fatalf("could not initialize all queue set: %v", err)
+		}
+
+		active := map[string][]*base.TaskMessage{qname: {tc.active}}
+		SeedAllPendingQueues(t, r, active)
+		_, dl0, err := r.Dequeue("", qname)
+
+		ti, dl, err := r.UpdateTask(qname, tc.active.ID, tc.data)
+		if err != nil || ti == nil {
+			t.Errorf("UpdateTask failed: %v", err)
+			continue
+		}
+		if !dl0.Equal(dl) {
+			t.Errorf("Unexpected deadline, expected %v, actual: %v", dl0, dl)
+		}
+		if string(ti.Result) != string(tc.data) {
+			t.Errorf("`result` field under queue %s, taks %s is set to %q, want %q",
+				qname, tc.active.ID, string(ti.Result), string(tc.data))
 		}
 	}
 }

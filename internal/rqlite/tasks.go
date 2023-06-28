@@ -42,13 +42,16 @@ type taskRow struct {
 	msg                *base.TaskMessage
 }
 
-const selectTaskRow = "SELECT ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, server_affinity, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, retain_until, sid, affinity_timeout, recurrent, result, pending_since "
+const (
+	TaskRow       = " ndx, queue_name, type_name, task_uuid, unique_key, unique_key_deadline, task_msg, task_timeout, task_deadline, server_affinity, pndx, state, scheduled_at, deadline, retry_at, done_at, failed, archived_at, cleanup_at, retain_until, sid, affinity_timeout, recurrent, result, pending_since "
+	selectTaskRow = "SELECT" + TaskRow
+)
 
 func parseTaskRows(qr sqlite3.QueryResult) ([]*taskRow, error) {
 	op := errors.Op("rqlite.parseTaskRows")
 
 	// no row
-	if qr.NumRows() == 0 {
+	if qr == nil || qr.NumRows() == 0 {
 		return nil, nil
 	}
 	ret := make([]*taskRow, 0)
@@ -109,9 +112,11 @@ func (conn *Connection) listTasksPaged(queue string, state string, page *base.Pa
 		selectTaskRow+
 			" FROM "+conn.table(TasksTable)+
 			" WHERE queue_name=? "+
-			" AND state=? ",
+			" AND state=? "+
+			" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?)",
 		queue,
-		state)
+		state,
+		queue)
 	if page != nil {
 		if len(orderBy) == 0 || page.StartAfterUuid != "" {
 			// if option startAfter is used we order by insertion order
@@ -158,9 +163,11 @@ func (conn *Connection) getTask(queue string, id string) (*taskRow, error) {
 		selectTaskRow+
 			" FROM "+conn.table(TasksTable)+
 			" WHERE queue_name=? "+
-			" AND task_uuid=?",
+			" AND task_uuid=?"+
+			" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?)",
 		queue,
-		id)
+		id,
+		queue)
 	qrs, err := conn.QueryStmt(conn.ctx(), st)
 	if err != nil {
 		return nil, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{st})
@@ -171,6 +178,10 @@ func (conn *Connection) getTask(queue string, id string) (*taskRow, error) {
 	}
 	switch len(rows) {
 	case 0:
+		q, err := conn.GetQueue(queue)
+		if err == nil && q == nil {
+			return nil, errors.E(op, errors.NotFound, &errors.QueueNotFoundError{Queue: queue})
+		}
 		return nil, errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: queue, ID: id})
 	case 1:
 		return rows[0], nil
@@ -178,6 +189,134 @@ func (conn *Connection) getTask(queue string, id string) (*taskRow, error) {
 		return nil, errors.E(op, errors.Internal,
 			fmt.Sprintf("unexpected result count: %d (expected 1), statement: %s", len(rows), st))
 	}
+}
+
+func (conn *Connection) getTaskInfo(now time.Time, qname string, taskid string) (*base.TaskInfo, error) {
+	var op errors.Op = "getTaskInfo"
+
+	tr, err := conn.getTask(qname, taskid)
+	if err == nil {
+		return getTaskInfo(op, now, tr)
+	} else if !errors.IsTaskNotFound(err) {
+		return nil, errors.E(op, errors.Internal, err)
+	}
+	// fall back to completed if not found
+	ret, err2 := conn.getCompletedTaskInfo(now, qname, taskid)
+	if err2 != nil {
+		if errors.IsTaskNotFound(err2) {
+			// return the initial 'not found' error
+			return nil, errors.E(op, errors.Internal, err)
+		}
+		// last error is more exotic: return it
+		return nil, errors.E(op, errors.Internal, err2)
+	}
+	return ret, nil
+}
+
+func (conn *Connection) updateTask(now time.Time, qname string, taskID string, activeOnly bool, data []byte) (*base.TaskInfo, time.Time, error) {
+	op := errors.Op("rqlite.updateTask")
+
+	andState := " AND state='active' "
+	if !activeOnly {
+		// for tests
+		andState = ""
+	}
+	returning := "RETURNING " + TaskRow
+
+	var st *sqlite3.Statement
+	if len(data) == 0 {
+		st = Statement(
+			"UPDATE "+conn.table(TasksTable)+" SET result=NULL "+
+				" WHERE queue_name=?"+andState+" AND task_uuid=?"+
+				" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?) "+
+				returning,
+			qname,
+			taskID,
+			qname)
+	} else {
+		st = Statement(
+			"UPDATE "+conn.table(TasksTable)+" SET result=? "+
+				" WHERE queue_name=?"+andState+" AND task_uuid=?"+
+				" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?) "+
+				returning,
+			base64.StdEncoding.EncodeToString(data),
+			qname,
+			taskID,
+			qname)
+	}
+	st.Returning = true
+
+	deadline := time.Time{}
+	qrs, err := conn.RequestStmt(conn.ctx(), st)
+	if err != nil {
+		return nil, deadline, NewRqliteRqError(op, qrs, err, []*sqlite3.Statement{st})
+	}
+	rows, err := parseTaskRows(qrs[0].Query)
+	if err != nil {
+		return nil, deadline, errors.E(op, errors.Internal, err)
+	}
+	switch len(rows) {
+	case 0:
+		q, err := conn.GetQueue(qname)
+		if err == nil && q == nil {
+			return nil, deadline, errors.E(op, errors.NotFound, &errors.QueueNotFoundError{Queue: qname})
+		}
+		if activeOnly {
+			qs, err := conn.getTask(qname, taskID)
+			if err == nil && qs != nil {
+				return nil, deadline, errors.E(op, errors.FailedPrecondition, "cannot update task not in active state.")
+			}
+		} else {
+			rows, _ = conn.updateCompletedTask(qname, taskID, data)
+		}
+		if len(rows) != 1 {
+			return nil, deadline, errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: taskID})
+		}
+	case 1:
+		// handled below
+	default:
+		return nil, deadline, errors.E(op, errors.Internal,
+			fmt.Sprintf("unexpected result count: %d (expected 1), statement: %s", len(rows), st))
+	}
+
+	deadline = time.Unix(rows[0].deadline, 0).UTC()
+	ret, err := getTaskInfo(op, now, rows[0])
+	return ret, deadline, err
+}
+
+func getTaskInfo(op errors.Op, now time.Time, tr *taskRow) (*base.TaskInfo, error) {
+
+	state, err := base.TaskStateFromString(tr.state)
+	if err != nil {
+		return nil, errors.E(op, errors.Internal, err)
+	}
+
+	nextProcessAt := time.Time{}
+	switch tr.state {
+	case pending:
+		nextProcessAt = now
+	case scheduled:
+		nextProcessAt = time.Unix(tr.scheduledAt, 0).UTC()
+	case retry:
+		nextProcessAt = time.Unix(tr.retryAt, 0).UTC()
+	}
+	nextProcessAt = nextProcessAt.UTC()
+
+	var result []byte
+	if tr.result != "" {
+		var err error
+		result, err = base64.StdEncoding.DecodeString(tr.result)
+		if err != nil {
+			return nil, errors.E(op, errors.Internal, err)
+		}
+	}
+
+	return &base.TaskInfo{
+		Message:       tr.msg,
+		State:         state,
+		NextProcessAt: nextProcessAt,
+		Result:        result,
+	}, nil
 }
 
 func (conn *Connection) getTaskCount(queue string, andWhere, whereValue string) (int64, error) {
@@ -212,14 +351,24 @@ func (conn *Connection) deleteTasks(queue string, state string) (int64, error) {
 	}
 
 	st := Statement(
-		"DELETE FROM "+conn.table(TasksTable)+" WHERE queue_name=? AND state=?",
+		"DELETE FROM "+conn.table(TasksTable)+
+			" WHERE queue_name=? AND state=?"+
+			" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?)",
 		queue,
-		state)
+		state,
+		queue)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
 
+	ret := wrs[0].RowsAffected
+	if ret == 0 {
+		q, err := conn.GetQueue(queue)
+		if err == nil && q == nil {
+			return 0, errors.E(op, errors.NotFound, &errors.QueueNotFoundError{Queue: queue})
+		}
+	}
 	return wrs[0].RowsAffected, nil
 }
 
@@ -260,9 +409,11 @@ func (conn *Connection) setTaskPending(queue string, taskid string) (int64, erro
 	op := errors.Op("rqlite.setTaskPending")
 	st := Statement(
 		"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=NULL "+
-			" WHERE queue_name=? AND task_uuid=? AND state != 'pending' AND state!='active'",
+			" WHERE queue_name=? AND task_uuid=? AND state != 'pending' AND state!='active'"+
+			" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?)",
 		queue,
-		taskid)
+		taskid,
+		queue)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
@@ -272,7 +423,10 @@ func (conn *Connection) setTaskPending(queue string, taskid string) (int64, erro
 	// enforce conventional return values for inspector
 	if ret == 0 {
 		qs, err := conn.getTask(queue, taskid)
-		if err == nil && qs != nil {
+		if err != nil {
+			return 0, err
+		}
+		if qs != nil {
 			switch qs.state {
 			case pending:
 				ret = -2
@@ -288,14 +442,25 @@ func (conn *Connection) setPending(queue string, state string) (int64, error) {
 	op := errors.Op("rqlite.setPending")
 	st := Statement(
 		"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=NULL "+
-			" WHERE queue_name=? AND state=?",
+			" WHERE queue_name=? AND state=?"+
+			" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?)",
 		queue,
-		state)
+		state,
+		queue)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
-	return wrs[0].RowsAffected, nil
+
+	ret := wrs[0].RowsAffected
+	if ret == 0 {
+		q, err := conn.GetQueue(queue)
+		if err == nil && q == nil {
+			return 0, errors.E(op, errors.NotFound, &errors.QueueNotFoundError{Queue: queue})
+		}
+	}
+
+	return ret, nil
 }
 
 func (conn *Connection) setArchived(now time.Time, queue string, state string) (int64, error) {
@@ -305,11 +470,13 @@ func (conn *Connection) setArchived(now time.Time, queue string, state string) (
 		"UPDATE "+conn.table(TasksTable)+" SET state='archived', "+
 			" unique_key_deadline=NULL, affinity_timeout=0, "+
 			" archived_at=?, cleanup_at=? "+
-			" WHERE queue_name=? AND state=?",
+			" WHERE queue_name=? AND state=?"+
+			" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?)",
 		now.Unix(),
 		now.AddDate(0, 0, conn.config.ArchivedExpirationInDays).Unix(),
 		queue,
-		state)
+		state,
+		queue)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
@@ -323,11 +490,13 @@ func (conn *Connection) setTaskArchived(now time.Time, queue string, taskid stri
 	st := Statement(
 		"UPDATE "+conn.table(TasksTable)+" SET state='archived', "+
 			" archived_at=?, cleanup_at=? "+
-			" WHERE queue_name=? AND task_uuid=? AND state != 'archived' AND state!='active'",
+			" WHERE queue_name=? AND task_uuid=? AND state != 'archived' AND state!='active'"+
+			" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?)",
 		now.Unix(),
 		now.AddDate(0, 0, conn.config.ArchivedExpirationInDays).Unix(),
 		queue,
-		taskid)
+		taskid,
+		queue)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
@@ -337,7 +506,10 @@ func (conn *Connection) setTaskArchived(now time.Time, queue string, taskid stri
 	// enforce conventional return values for inspector
 	if ret == 0 {
 		qs, err := conn.getTask(queue, taskid)
-		if err == nil && qs != nil {
+		if err != nil {
+			return 0, err
+		}
+		if qs != nil {
 			switch qs.state {
 			case active:
 				ret = -2
@@ -614,10 +786,10 @@ func (conn *Connection) setTaskDone(now time.Time, serverID string, msg *base.Ta
 	return nil
 }
 
-func (conn *Connection) writeTaskResult(qname, taskID string, data []byte, active bool) (int, error) {
+func (conn *Connection) writeTaskResult(qname, taskID string, data []byte, activeOnly bool) (int, error) {
 	op := errors.Op("rqlite.writeTaskResult")
 	andState := " AND state='active' "
-	if !active {
+	if !activeOnly {
 		// for tests
 		andState = ""
 	}
@@ -626,20 +798,38 @@ func (conn *Connection) writeTaskResult(qname, taskID string, data []byte, activ
 	if len(data) == 0 {
 		st = Statement(
 			"UPDATE "+conn.table(TasksTable)+" SET result=NULL "+
-				" WHERE queue_name=?"+andState+" AND task_uuid=?",
+				" WHERE queue_name=?"+andState+" AND task_uuid=?"+
+				" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?)",
 			qname,
-			taskID)
+			taskID,
+			qname)
 	} else {
 		st = Statement(
 			"UPDATE "+conn.table(TasksTable)+" SET result=? "+
-				" WHERE queue_name=?"+andState+" AND task_uuid=?",
+				" WHERE queue_name=?"+andState+" AND task_uuid=?"+
+				" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?)",
 			base64.StdEncoding.EncodeToString(data),
 			qname,
-			taskID)
+			taskID,
+			qname)
 	}
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
+	}
+
+	if len(wrs) == 0 {
+		q, err := conn.GetQueue(qname)
+		if err == nil && q == nil {
+			return 0, errors.E(op, errors.NotFound, &errors.QueueNotFoundError{Queue: qname})
+		}
+		if activeOnly {
+			qs, err := conn.getTask(qname, taskID)
+			if err == nil && qs != nil {
+				return 0, errors.E(op, errors.FailedPrecondition, "cannot write result of task not in active state.")
+			}
+		}
+		return 0, errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: taskID})
 	}
 
 	err = expectOneRowUpdated(op, wrs, 0, st, true)

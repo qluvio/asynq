@@ -1,6 +1,7 @@
 package rqlite
 
 import (
+	"encoding/base64"
 	"fmt"
 	"time"
 
@@ -9,13 +10,16 @@ import (
 	"github.com/hibiken/asynq/internal/sqlite3"
 )
 
-const selectCompletedTaskRow = "SELECT ndx, queue_name, type_name, task_uuid, task_msg, deadline, done_at, retain_until, sid, result "
+const (
+	CompletedTaskRow       = " ndx, queue_name, type_name, task_uuid, task_msg, deadline, done_at, retain_until, sid, result "
+	selectCompletedTaskRow = "SELECT " + CompletedTaskRow
+)
 
 func parseCompletedTaskRows(qr sqlite3.QueryResult) ([]*taskRow, error) {
 	op := errors.Op("rqlite.parseCompletedTaskRows")
 
 	// no row
-	if qr.NumRows() == 0 {
+	if qr == nil || qr.NumRows() == 0 {
 		return nil, nil
 	}
 	ret := make([]*taskRow, 0)
@@ -149,6 +153,10 @@ func (conn *Connection) getCompletedTask(queue string, id string) (*taskRow, err
 	}
 	switch len(rows) {
 	case 0:
+		q, err := conn.GetQueue(queue)
+		if err == nil && q == nil {
+			return nil, errors.E(op, errors.NotFound, &errors.QueueNotFoundError{Queue: queue})
+		}
 		return nil, errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: queue, ID: id})
 	case 1:
 		return rows[0], nil
@@ -164,6 +172,7 @@ func (conn *Connection) getCompletedTaskInfo(now time.Time, qname string, taskId
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}
+
 	return getTaskInfo(op, now, tr)
 }
 
@@ -247,4 +256,46 @@ func (conn *Connection) setTaskCompleted(now time.Time, serverID string, msg *ba
 		return err
 	}
 	return nil
+}
+
+func (conn *Connection) updateCompletedTask(qname string, taskID string, data []byte) ([]*taskRow, error) {
+	op := errors.Op("rqlite.updateCompletedTask")
+
+	returning := "RETURNING " + CompletedTaskRow
+
+	var st *sqlite3.Statement
+	if len(data) == 0 {
+		st = Statement(
+			"UPDATE "+conn.table(CompletedTasksTable)+" SET result=NULL "+
+				" WHERE queue_name=? AND task_uuid=?"+
+				" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?) "+
+				returning,
+			qname,
+			taskID,
+			qname)
+	} else {
+		st = Statement(
+			"UPDATE "+conn.table(CompletedTasksTable)+" SET result=? "+
+				" WHERE queue_name=? AND task_uuid=?"+
+				" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?) "+
+				returning,
+			base64.StdEncoding.EncodeToString(data),
+			qname,
+			taskID,
+			qname)
+	}
+	st.Returning = true
+
+	qrs, err := conn.RequestStmt(conn.ctx(), st)
+	if err != nil {
+		return nil, NewRqliteRqError(op, qrs, err, []*sqlite3.Statement{st})
+	}
+	rows, err := parseCompletedTaskRows(qrs[0].Query)
+	if err != nil {
+		return nil, errors.E(op, errors.Internal, err)
+	}
+	if len(rows) > 0 {
+		rows[0].deadline = 0 // ignore deadline for completed tasks
+	}
+	return rows, nil
 }

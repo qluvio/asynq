@@ -216,6 +216,15 @@ func (tb *TestBroker) WriteResult(qname, id string, data []byte) (int, error) {
 	return tb.real.WriteResult(qname, id, data)
 }
 
+func (tb *TestBroker) UpdateTask(qname, id string, data []byte) (*base.TaskInfo, time.Time, error) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return nil, time.Time{}, errRedisDown
+	}
+	return tb.real.UpdateTask(qname, id, data)
+}
+
 func (tb *TestBroker) Ping() error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()

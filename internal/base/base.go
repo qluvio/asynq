@@ -761,8 +761,10 @@ type Broker interface {
 	// PublishCancelation publish cancelation message to all subscribers.
 	// The message is the ID for the task to be canceled.
 	PublishCancelation(id string) error
-	// WriteResult
+	// WriteResult updates the result data of the given task and returns the count of bytes written
 	WriteResult(qname, taskID string, data []byte) (n int, err error)
+	// UpdateTask updates the result data of the given task and returns the updated task info and its actual deadline
+	UpdateTask(qname, id string, data []byte) (*TaskInfo, time.Time, error)
 	// Close closes the connection with the store server.
 	Close() error
 	// ListServers returns the list of server info.
