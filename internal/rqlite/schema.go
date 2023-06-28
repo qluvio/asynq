@@ -135,9 +135,13 @@ var (
 		NameFmt:   "idx_%s_queue_and_state",
 		CreateFmt: `CREATE INDEX IF NOT EXISTS %s ON %s (queue_name,state);`,
 	}
-	CreateCompletedTasksIndexesFmt = IndexCtor{
+	CreateCompletedTasksQueueUuidIndexesFmt = IndexCtor{
 		NameFmt:   "idx_%s_queue_and_uuid",
 		CreateFmt: `CREATE INDEX IF NOT EXISTS %s ON %s (queue_name,task_uuid);`,
+	}
+	CreateCompletedTasksUuidIndexesFmt = IndexCtor{
+		NameFmt:   "idx_%s_uuid",
+		CreateFmt: `CREATE INDEX IF NOT EXISTS %s ON %s (task_uuid);`,
 	}
 
 	AllTables = map[string]TableCtor{
@@ -153,7 +157,7 @@ var (
 		CompletedTasksTable: {
 			NameFmt:   "%s_%s",
 			CreateFmt: CreateCompletedTasksTableFmt,
-			Indexes:   []IndexCtor{CreateCompletedTasksIndexesFmt},
+			Indexes:   []IndexCtor{CreateCompletedTasksQueueUuidIndexesFmt, CreateCompletedTasksUuidIndexesFmt},
 		},
 		ServersTable: {
 			NameFmt:   "%s_%s",

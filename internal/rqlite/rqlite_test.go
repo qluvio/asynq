@@ -1147,7 +1147,7 @@ func TestScheduleUnique(t *testing.T) {
 		Queue:     base.DefaultQueueName,
 		UniqueKey: base.UniqueKey(base.DefaultQueueName, "email", h.JSON(map[string]interface{}{"user_id": 123})),
 	}
-	now := time.Now()
+	now := r.clock.Now()
 
 	tests := []struct {
 		msg       *base.TaskMessage

@@ -377,9 +377,12 @@ func (conn *Connection) enqueueMessages(ctx context.Context, now time.Time, msgs
 		msgNdx = append(msgNdx, len(stmts))
 		stmts = append(stmts, Statement(
 			"INSERT INTO "+conn.table(TasksTable)+"(queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, server_affinity, recurrent, pndx, state, pending_since) "+
-				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?, ?)",
+				"VALUES (?, ?, "+
+				"CASE WHEN EXISTS(SELECT task_uuid FROM "+conn.table(CompletedTasksTable)+" WHERE "+conn.table(CompletedTasksTable)+".task_uuid=?) THEN NULL ELSE ? END, "+
+				"?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?, ?)",
 			msg.Queue,
 			msg.Type,
+			msg.ID,
 			msg.ID,
 			msg.ID,
 			encoded,
@@ -408,7 +411,9 @@ func (conn *Connection) enqueueMessages(ctx context.Context, now time.Time, msgs
 	allErrors := make(map[int]error)
 	for i, ndx := range msgNdx {
 		if wrs[ndx].RowsAffected == 0 {
-			if wrs[ndx].Err != nil && strings.Contains(wrs[ndx].Err.Error(), "UNIQUE constraint failed") {
+			if wrs[ndx].Err != nil && (strings.Contains(wrs[ndx].Err.Error(), "UNIQUE constraint failed") ||
+				strings.Contains(wrs[ndx].Err.Error(), "NOT NULL constraint failed")) {
+				// 'NOT NULL constraint failed' is raised when a task with same uuid exists in completed tasks
 				err = errors.E(op, errors.AlreadyExists, errors.ErrTaskIdConflict)
 			} else {
 				err = errors.E(op, errors.AlreadyExists, errors.ErrDuplicateTask)
@@ -471,7 +476,9 @@ func (conn *Connection) enqueueUniqueMessages(ctx context.Context, now time.Time
 		// https://www.sqlite.org/lang_UPSERT.html
 		stmts = append(stmts, Statement(
 			"INSERT INTO "+conn.table(TasksTable)+" (queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, server_affinity, unique_key_deadline, recurrent, pndx, state, pending_since)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?, ?) "+
+				" VALUES (?, ?, "+
+				"CASE WHEN EXISTS(SELECT task_uuid FROM "+conn.table(CompletedTasksTable)+" WHERE "+conn.table(CompletedTasksTable)+".task_uuid=?) THEN NULL ELSE ? END, "+
+				"?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?, ?) "+
 				" ON CONFLICT(unique_key) DO UPDATE SET "+
 				"   queue_name=excluded.queue_name, "+
 				"   type_name=excluded.type_name, "+
@@ -490,6 +497,7 @@ func (conn *Connection) enqueueUniqueMessages(ctx context.Context, now time.Time
 				"    OR "+conn.table(TasksTable)+".unique_key_deadline IS NULL)",
 			msg.Queue,
 			msg.Type,
+			msg.ID,
 			msg.ID,
 			msg.UniqueKey,
 			encoded,
@@ -551,7 +559,9 @@ func (conn *Connection) enqueueUniqueMessages(ctx context.Context, now time.Time
 	allErrors := make(map[int]error)
 	for i, ndx := range msgNdx {
 		if wrs[ndx].RowsAffected == 0 {
-			if wrs[ndx].Err != nil && strings.Contains(wrs[ndx].Err.Error(), "UNIQUE constraint failed") {
+			if wrs[ndx].Err != nil && (strings.Contains(wrs[ndx].Err.Error(), "UNIQUE constraint failed") ||
+				strings.Contains(wrs[ndx].Err.Error(), "NOT NULL constraint failed")) {
+				// 'NOT NULL constraint failed' is raised when a task with same uuid exists in completed tasks
 				err = errors.E(op, errors.AlreadyExists, errors.ErrTaskIdConflict)
 			} else {
 				err = errors.E(op, errors.AlreadyExists, errors.ErrDuplicateTask)
@@ -799,9 +809,12 @@ func (conn *Connection) scheduleTasks(ctx context.Context, msgs ...*base.Message
 		msgNdx = append(msgNdx, len(stmts))
 		stmts = append(stmts, Statement(
 			"INSERT INTO "+conn.table(TasksTable)+"(queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, server_affinity, scheduled_at, affinity_timeout, recurrent, pndx, state) "+
-				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?)",
+				"VALUES (?, ?, "+
+				"CASE WHEN EXISTS(SELECT task_uuid FROM "+conn.table(CompletedTasksTable)+" WHERE "+conn.table(CompletedTasksTable)+".task_uuid=?) THEN NULL ELSE ? END, "+
+				"?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?)",
 			msg.Queue,
 			msg.Type,
+			msg.ID,
 			msg.ID,
 			msg.ID,
 			encoded,
@@ -831,7 +844,9 @@ func (conn *Connection) scheduleTasks(ctx context.Context, msgs ...*base.Message
 	allErrors := make(map[int]error)
 	for i, ndx := range msgNdx {
 		if wrs[ndx].RowsAffected == 0 {
-			if wrs[ndx].Err != nil && strings.Contains(wrs[ndx].Err.Error(), "UNIQUE constraint failed") {
+			if wrs[ndx].Err != nil && (strings.Contains(wrs[ndx].Err.Error(), "UNIQUE constraint failed") ||
+				strings.Contains(wrs[ndx].Err.Error(), "NOT NULL constraint failed")) {
+				// 'NOT NULL constraint failed' is raised when a task with same uuid exists in completed tasks
 				err = errors.E(op, errors.AlreadyExists, errors.ErrTaskIdConflict)
 			} else {
 				err = errors.E(op, errors.AlreadyExists, errors.ErrDuplicateTask)
@@ -889,7 +904,9 @@ func (conn *Connection) scheduleUniqueTasks(ctx context.Context, now time.Time, 
 
 		stmts = append(stmts, Statement(
 			"INSERT INTO "+conn.table(TasksTable)+" (queue_name, type_name, task_uuid, unique_key, task_msg, task_timeout, task_deadline, server_affinity, unique_key_deadline, scheduled_at, affinity_timeout, recurrent, pndx, state)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?) "+
+				" VALUES (?, ?, "+
+				"CASE WHEN EXISTS(SELECT task_uuid FROM "+conn.table(CompletedTasksTable)+" WHERE "+conn.table(CompletedTasksTable)+".task_uuid=?) THEN NULL ELSE ? END, "+
+				"?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(pndx),0) FROM "+conn.table(TasksTable)+")+1, ?) "+
 				" ON CONFLICT(unique_key) DO UPDATE SET"+
 				"   queue_name=excluded.queue_name, "+
 				"   type_name=excluded.type_name, "+
@@ -909,6 +926,7 @@ func (conn *Connection) scheduleUniqueTasks(ctx context.Context, now time.Time, 
 				"    OR "+conn.table(TasksTable)+".unique_key_deadline IS NULL)",
 			msg.Queue,
 			msg.Type,
+			msg.ID,
 			msg.ID,
 			msg.UniqueKey,
 			encoded,
@@ -940,7 +958,9 @@ func (conn *Connection) scheduleUniqueTasks(ctx context.Context, now time.Time, 
 	allErrors := make(map[int]error)
 	for i, ndx := range msgNdx {
 		if wrs[ndx].RowsAffected == 0 {
-			if wrs[ndx].Err != nil && strings.Contains(wrs[ndx].Err.Error(), "UNIQUE constraint failed") {
+			if wrs[ndx].Err != nil && (strings.Contains(wrs[ndx].Err.Error(), "UNIQUE constraint failed") ||
+				strings.Contains(wrs[ndx].Err.Error(), "NOT NULL constraint failed")) {
+				// 'NOT NULL constraint failed' is raised when a task with same uuid exists in completed tasks
 				err = errors.E(op, errors.AlreadyExists, errors.ErrTaskIdConflict)
 			} else {
 				err = errors.E(op, errors.AlreadyExists, errors.ErrDuplicateTask)

@@ -5,7 +5,9 @@
 package asynq
 
 import (
-	"errors"
+	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/timeutil"
 	"github.com/stretchr/testify/require"
 )
@@ -579,6 +582,111 @@ func TestClientEnqueueWithConflictingTaskID(t *testing.T) {
 	_, err := client.Enqueue(task, TaskID(taskID))
 	if !errors.Is(err, ErrTaskIDConflict) {
 		t.Errorf("Second task: Enqueue returned %v, want %v", err, ErrTaskIDConflict)
+	}
+}
+
+func TestClientEnqueueTaskIDConflictingWithCompleted(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	inspector := newInspector(client.rdb)
+	srv := newServer(client.rdb, Config{
+		Concurrency: 1,
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
+			return time.Second
+		}),
+		LogLevel: testLogLevel, //DebugLevel,
+	})
+	defer func() {
+		srv.Shutdown()
+		_ = client.Close()
+	}()
+
+	wg := sync.WaitGroup{}
+	handler := func(ctx context.Context, task *Task) error {
+		//fmt.Println("handled", "task", task.Type())
+		task.CallAfter(func(string, error, bool) {
+			defer wg.Done()
+		})
+		return nil
+	}
+	_ = srv.Start(HandlerFunc(handler))
+
+	const taskID = "custom_id"
+	type testCase struct {
+		retention time.Duration
+		taskId    string
+		unique    time.Duration
+		schedule  bool
+	}
+
+	for i, tc := range []*testCase{
+		{retention: 0, taskId: taskID},
+		{retention: time.Hour, taskId: taskID},
+		{unique: 0},
+		{unique: time.Hour},
+		{retention: time.Hour, unique: time.Hour},
+
+		{retention: 0, taskId: taskID, schedule: true},
+		{retention: time.Hour, taskId: taskID, schedule: true},
+		{unique: 0, schedule: true},
+		{unique: time.Hour, schedule: true},
+		{retention: time.Hour, unique: time.Hour, schedule: true},
+	} {
+		ctx.FlushDB()
+		srv.logger.Debug("test-case", " index ", i)
+
+		task := NewTask("foo", nil)
+
+		wg.Add(1)
+		opts := []Option{Retention(tc.retention)}
+		if tc.taskId != "" {
+			opts = append(opts, TaskID(tc.taskId))
+		}
+		if tc.unique > 0 {
+			opts = append(opts, Unique(tc.unique))
+		}
+		eti, err := client.Enqueue(task, opts...)
+		if err != nil {
+			t.Fatalf("First task: Enqueue failed: %v", err)
+		}
+		wg.Wait()
+
+		ti, err := inspector.GetTaskInfo("default", eti.ID)
+		if tc.retention > 0 {
+			if err != nil {
+				t.Fatalf("First task: GetTaskInfo failed: %v", err)
+			}
+			if ti.State != TaskStateCompleted {
+				t.Fatalf("First task: GetTaskInfo state: expected 'completed', got %v", ti.State.String())
+			}
+		} else if err == nil || !strings.Contains(err.Error(), "task not found") {
+			t.Fatalf("First task: GetTaskInfo expected not found, got %v", err)
+		}
+
+		opts = []Option{}
+		if tc.taskId != "" {
+			opts = append(opts, TaskID(tc.taskId))
+		}
+		if tc.unique > 0 {
+			opts = append(opts, Unique(tc.unique))
+		}
+		if tc.schedule {
+			opts = append(opts, ProcessIn(time.Hour))
+		}
+		if !tc.schedule {
+			wg.Add(1)
+		}
+		ti, err = client.Enqueue(task, opts...)
+		if err != nil && !tc.schedule {
+			wg.Done()
+		}
+		// there's a conflict with 'completed' task only with task ID
+		if tc.retention != 0 && tc.taskId != "" && !errors.Is(err, ErrTaskIDConflict) {
+			t.Errorf("Second task: Retention: %v, Enqueue returned %v, want %v", tc.retention, err, ErrTaskIDConflict)
+		}
+		wg.Wait()
 	}
 }
 
