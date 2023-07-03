@@ -7,12 +7,9 @@ package asynq_test
 import (
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
 	"time"
 
 	"github.com/hibiken/asynq"
-	"golang.org/x/sys/unix"
 )
 
 func ExampleServer_Run() {
@@ -43,10 +40,7 @@ func ExampleServer_Shutdown() {
 		log.Fatal(err)
 	}
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, unix.SIGTERM, unix.SIGINT)
-	<-sigs // wait for termination signal
-
+	srv.WaitForSignals()
 	srv.Shutdown()
 }
 
@@ -63,19 +57,7 @@ func ExampleServer_Stop() {
 		log.Fatal(err)
 	}
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, unix.SIGTERM, unix.SIGINT, unix.SIGTSTP)
-	// Handle SIGTERM, SIGINT to exit the program.
-	// Handle SIGTSTP to stop processing new tasks.
-	for {
-		s := <-sigs
-		if s == unix.SIGTSTP {
-			srv.Stop() // stop processing new tasks
-			continue
-		}
-		break // received SIGTERM or SIGINT signal
-	}
-
+	srv.WaitForSignals()
 	srv.Shutdown()
 }
 
