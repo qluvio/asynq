@@ -42,6 +42,10 @@ func (tb *TestBroker) SetClock(c timeutil.Clock) {
 	tb.real.SetClock(c)
 }
 
+func (tb *TestBroker) Now() time.Time {
+	return tb.real.Now()
+}
+
 func (tb *TestBroker) Sleep() {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
@@ -286,4 +290,8 @@ func (tb *TestBroker) ScheduleUniqueBatch(ctx context.Context, msgs ...*base.Mes
 		return errRedisDown
 	}
 	return tb.real.ScheduleUniqueBatch(ctx, msgs...)
+}
+
+func (tb *TestBroker) MoveToQueue(fromQueue string, msg *base.TaskMessage, processAt time.Time, active bool) (base.TaskState, error) {
+	return tb.real.MoveToQueue(fromQueue, msg, processAt, active)
 }

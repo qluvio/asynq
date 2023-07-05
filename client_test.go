@@ -1395,7 +1395,7 @@ func TestUpdateTask(t *testing.T) {
 	}
 	{
 		//
-		// retention and update after task has completed (should fail ?)
+		// retention and update after task has completed
 		//
 		const taskID = "custom_id2"
 		task := NewTask("foo", nil)
@@ -1478,12 +1478,11 @@ func TestUpdateTask(t *testing.T) {
 
 }
 
-func TestFailOrSucceedCompletedTask(t *testing.T) {
+func TestUpdateFailedTask(t *testing.T) {
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()
 
 	client := NewClient(getClientConnOpt(t))
-	inspector := newInspector(client.rdb)
 	srv := newServer(client.rdb, Config{
 		Concurrency: 1,
 		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
@@ -1501,7 +1500,7 @@ func TestFailOrSucceedCompletedTask(t *testing.T) {
 		task.CallAfter(func(string, error, bool) {
 			defer wg.Done()
 		})
-		return nil
+		return errors.New("test")
 	}
 	_ = srv.Start(HandlerFunc(handler))
 
@@ -1520,6 +1519,7 @@ func TestFailOrSucceedCompletedTask(t *testing.T) {
 			Retention(time.Hour * 2),
 			Deadline(deadline),
 			TaskID(taskID),
+			MaxRetry(0),
 		}
 		eti, err := client.Enqueue(task, opts...)
 		if err != nil {
@@ -1527,34 +1527,29 @@ func TestFailOrSucceedCompletedTask(t *testing.T) {
 		}
 		wg.Wait()
 		ah := srv.AsynchronousHandler()
-		err = ah.Failed(eti.Queue, eti.ID, []byte("azerty"), errors.New("test"))
+		ti, _, err := ah.UpdateTask(eti.Queue, eti.ID, []byte("azerty"))
 		if err != nil {
 			t.Fatalf("Failed failed: %v", err)
 		}
 
-		assertTask := func(result string) {
-			ti, err := inspector.GetTaskInfo(eti.Queue, eti.ID)
-			if err != nil {
-				t.Fatalf("GetTaskInfo failed: %v", err)
-			}
-			if ti.State != TaskStateCompleted {
-				t.Fatalf("GetTaskInfo state: expected 'completed', got %v", ti.State.String())
+		assertTask := func(ti *TaskInfo, result string) {
+			if ti.State != TaskStateArchived {
+				t.Fatalf("GetTaskInfo state: expected 'archived', got %v", ti.State.String())
 			}
 			if string(ti.Result) != result {
 				t.Fatalf("update result failed, expected: %v, actual:%v", "azerty", string(ti.Result))
 			}
-			// PENDING(GIL): result is updated BUT NOT last error (since message is not re-encoded)
-			if ti.LastErr != "" {
-				t.Fatalf("expected no last error, got %s", ti.LastErr)
+			// last error is still there
+			if ti.LastErr != "test" {
+				t.Fatalf("expected 'test' last error, got '%s'", ti.LastErr)
 			}
 		}
-		assertTask("azerty")
+		assertTask(ti, "azerty")
 
-		err = ah.Succeeded(eti.Queue, eti.ID, []byte("qwerty"))
+		ti, _, err = ah.UpdateTask(eti.Queue, eti.ID, []byte("qwerty"))
 		if err != nil {
 			t.Fatalf("Succeeded failed: %v", err)
 		}
-		assertTask("qwerty")
-
+		assertTask(ti, "qwerty")
 	}
 }

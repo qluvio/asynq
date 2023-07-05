@@ -6,6 +6,7 @@ package asynq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -34,7 +35,7 @@ type Task struct {
 	w *ResultWriter
 
 	// p is the AsyncProcessor for the task.
-	p *AsyncProcessor
+	p AsyncProcessor
 
 	// callAfter lets task processing schedule a function call after task execution
 	callAfter func(fn func(string, error, bool))
@@ -49,11 +50,10 @@ func (t *Task) Payload() []byte { return t.payload }
 // Only the tasks passed to Handler.ProcessTask have a valid ResultWriter pointer.
 func (t *Task) ResultWriter() *ResultWriter { return t.w }
 
-// AsyncProcessor returns a pointer to the AsyncProcessor associated with the task.
+// AsyncProcessor returns the AsyncProcessor associated with the task.
 //
-// Nil pointer is returned if called on a newly created task (i.e. task created by calling NewTask).
-// Only the tasks passed to Handler.ProcessTask have a valid AsyncProcessor pointer.
-func (t *Task) AsyncProcessor() *AsyncProcessor { return t.p }
+// Only the tasks passed to Handler.ProcessTask have a valid AsyncProcessor.
+func (t *Task) AsyncProcessor() AsyncProcessor { return t.p }
 
 // CallAfter enables task processing to schedule execution of a function after the
 // task execution. The function is guaranteed to be called once the task state has
@@ -74,12 +74,13 @@ func NewTask(typename string, payload []byte, opts ...Option) *Task {
 	return &Task{
 		typename: typename,
 		payload:  payload,
+		p:        invalidAsyncProcessor,
 		opts:     opts,
 	}
 }
 
 // newTask creates a task with the given typename, payload, ResultWriter, and AsyncProcessor.
-func newTask(typename string, payload []byte, w *ResultWriter, p *AsyncProcessor, ca func(fn func(string, error, bool))) *Task {
+func newTask(typename string, payload []byte, w *ResultWriter, p *asyncProcessor, ca func(fn func(string, error, bool))) *Task {
 	return &Task{
 		typename:  typename,
 		payload:   payload,
@@ -115,7 +116,7 @@ type TaskInfo struct {
 	// LastErr is the error message from the last failure.
 	LastErr string
 
-	// LastFailedAt is the time time of the last failure if any.
+	// LastFailedAt is the time of the last failure if any.
 	// If the task has no failures, LastFailedAt is zero time (i.e. time.Time{}).
 	LastFailedAt time.Time
 
@@ -252,11 +253,11 @@ type ClientConnOpt interface {
 }
 
 // ResultWriter is a client interface to write result data for a task.
-// It writes the data to the redis instance the server is connected to.
+// It writes the data to the broker instance the server is connected to.
 type ResultWriter struct {
-	id     string // task ID this writer is responsible for
-	qname  string // queue name the task belongs to
-	broker base.Broker
+	id     string          // task ID this writer is responsible for
+	qname  string          // queue name the task belongs to
+	broker base.Broker     // the broker
 	ctx    context.Context // context associated with the task
 }
 
@@ -275,32 +276,126 @@ func (w *ResultWriter) TaskID() string {
 	return w.id
 }
 
-// AsyncProcessor updates the final state of an asynchronous task.
-// TaskCompleted/TaskFailed will block until the task worker goroutine returns; this means that the worker goroutine
-// should not make these calls, as would normally be the case for asynchronous tasks.
-// Only the first TaskCompleted/TaskFailed call will update the task status; all subsequent calls will have no effect.
-type AsyncProcessor struct {
-	resCh chan error
-	mutex sync.Mutex
-	done  bool
+// AsyncProcessor is the interface provided to active tasks.
+//
+// Asynchronous tasks (doing their process asynchronously) return AsynchronousTask as result and
+// terminate by calling one of the TaskXX function that update the final state of an asynchronous task.
+// - TaskCompleted/TaskFailed/TaskTransition will block until the task worker goroutine returns; this means that the worker
+// goroutine should not make these calls, as would normally be the case for asynchronous tasks.
+// - Only the first TaskCompleted/TaskFailed/TaskTransition call will update the task status; all subsequent calls will
+// have no effect and return an error.
+//
+// MoveToQueue can be used from the worker goroutine (synchronous tasks).
+// It returns a TaskTransitionDone error that should be used as result of execution.
+type AsyncProcessor interface {
+	// TaskCompleted indicates that the task has completed successfully.
+	TaskCompleted() error
+
+	// TaskFailed indicates that the task has failed, with the given error.
+	TaskFailed(err error) error
+
+	// TaskTransition moves the task to a new queue and send a TaskTransitionDone as a result of execution.
+	// Another error is returned if the transition failed (and the caller can call TaskFailed).
+	TaskTransition(newQueue, typename string, opts ...Option) error
+
+	// MoveToQueue moves the executing 'active' task to a new queue.
+	// After a successful call:
+	// - the task is either in pending or scheduled state in newQueue.
+	// - the function returns the new state AND error TaskTransitionDone
+	// otherwise it returns zero and the error.
+	MoveToQueue(newQueue, typename string, opts ...Option) (TaskState, error)
+}
+
+var (
+	_                          AsyncProcessor = (*voidAsyncProcessor)(nil)
+	invalidAsyncProcessor                     = &voidAsyncProcessor{}
+	invalidAsyncProcessorError                = errors.New("invalid async processor")
+)
+
+type voidAsyncProcessor struct{}
+
+func (v *voidAsyncProcessor) TaskCompleted() error {
+	return invalidAsyncProcessorError
+}
+
+func (v *voidAsyncProcessor) TaskFailed(error) error {
+	return invalidAsyncProcessorError
+}
+
+func (v *voidAsyncProcessor) TaskTransition(string, string, ...Option) error {
+	return invalidAsyncProcessorError
+}
+
+func (v *voidAsyncProcessor) MoveToQueue(string, string, ...Option) (TaskState, error) {
+	return 0, invalidAsyncProcessorError
+}
+
+var _ AsyncProcessor = (*asyncProcessor)(nil)
+
+// asyncProcessor updates the final state of an asynchronous task.
+// TaskCompleted/TaskFailed/TaskTransition will block until the task worker goroutine returns; this means that the
+// worker goroutine should not make these calls, as would normally be the case for asynchronous tasks.
+// Only the first TaskCompleted/TaskFailed/TaskTransition call will update the task status; all subsequent calls will
+// have no effect and return an error.
+type asyncProcessor struct {
+	msg       *base.TaskMessage
+	processor *processor
+	resCh     chan error
+	mutex     sync.Mutex
+	done      bool
 }
 
 // TaskCompleted indicates that the task has completed successfully.
-func (p *AsyncProcessor) TaskCompleted() {
+func (p *asyncProcessor) TaskCompleted() error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	if !p.done {
 		p.resCh <- nil
 		p.done = true
+		return nil
 	}
+	return TaskTransitionAlreadyDone
 }
 
 // TaskFailed indicates that the task has failed, with the given error.
-func (p *AsyncProcessor) TaskFailed(err error) {
+func (p *asyncProcessor) TaskFailed(err error) error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	if !p.done {
 		p.resCh <- err
 		p.done = true
+		return nil
 	}
+	return TaskTransitionAlreadyDone
+}
+
+// TaskTransition moves the task to a new queue and send a TaskTransitionDone as
+// a result of execution.
+// An error is returned if the transition failed.
+func (p *asyncProcessor) TaskTransition(newQueue, typename string, opts ...Option) error {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	if !p.done {
+		_, err := p.MoveToQueue(newQueue, typename, opts...)
+		if err != nil && err != TaskTransitionDone {
+			return err
+		}
+		p.resCh <- TaskTransitionDone
+		p.done = true
+		return nil
+	}
+	return TaskTransitionAlreadyDone
+}
+
+// MoveToQueue moves the executing 'active' task to a new queue.
+//
+// After the call the task is either in pending or scheduled state in newQueue.
+// When successful, the function returns the new state AND error TaskTransitionDone
+// otherwise it returns zero and the error.
+func (p *asyncProcessor) MoveToQueue(newQueue, typename string, opts ...Option) (TaskState, error) {
+	ret, err := p.processor.moveToQueue(p.msg, newQueue, typename, true, opts...)
+	if err != nil {
+		return 0, err
+	}
+	return ret.State, TaskTransitionDone
 }

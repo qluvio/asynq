@@ -58,6 +58,10 @@ func (r *RDB) SetClock(c timeutil.Clock) {
 	r.clock = c
 }
 
+func (r *RDB) Now() time.Time {
+	return r.clock.Now()
+}
+
 // Ping checks the connection with redis server.
 func (r *RDB) Ping() error {
 	return r.client.Ping(context.Background()).Err()
@@ -556,7 +560,7 @@ redis.call("HSET", KEYS[4], "state", "pending")
 redis.call("SET", KEYS[5], ARGV[1], "EX", ARGV[2])
 return redis.status_reply("OK")`)
 
-// Requeue moves the task from active queue to the specified queue.
+// Requeue moves the task from active state to pending in the queue of the message.
 func (r *RDB) Requeue(serverID string, msg *base.TaskMessage, aborted bool) error {
 	//
 	// PENDING(GIL): serverID (used to support server affinity) is ignored on redis.
@@ -579,6 +583,10 @@ func (r *RDB) Requeue(serverID string, msg *base.TaskMessage, aborted bool) erro
 		msg.ID,
 		int(msg.UniqueKeyTTL),
 	})
+}
+
+func (r *RDB) MoveToQueue(fromQueue string, msg *base.TaskMessage, processAt time.Time, active bool) (base.TaskState, error) {
+	panic("not implemented")
 }
 
 // KEYS[1] -> asynq:{<qname>}:t:<task_id>

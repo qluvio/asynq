@@ -322,14 +322,14 @@ type option struct {
 // and returns the composed option.
 // It also validates the user provided options and returns an error if any of
 // the user provided options fail the validations.
-func composeOptions(opts ...Option) (option, error) {
+func composeOptions(now time.Time, opts ...Option) (option, error) {
 	res := option{
 		retry:     defaultMaxRetry,
 		queue:     base.DefaultQueueName,
 		taskID:    uuid.NewString(),
 		timeout:   0, // do not set to defaultTimeout here
 		deadline:  time.Time{},
-		processAt: time.Now(),
+		processAt: now,
 	}
 	for _, opt := range opts {
 		switch opt := opt.(type) {
@@ -360,7 +360,7 @@ func composeOptions(opts ...Option) (option, error) {
 		case processAtOption:
 			res.processAt = time.Time(opt)
 		case processInOption:
-			res.processAt = time.Now().Add(time.Duration(opt))
+			res.processAt = now.Add(time.Duration(opt))
 		case forceUniqueOption:
 			res.forceUnique = bool(opt)
 		case recurrentOption:
@@ -443,7 +443,7 @@ func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option)
 	}
 	// merge task options with the options provided at enqueue time.
 	opts = append(task.opts, opts...)
-	opt, err := composeOptions(opts...)
+	opt, err := composeOptions(c.rdb.Now(), opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -484,7 +484,7 @@ func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option)
 		Retention:      int64(opt.retention.Seconds()),
 	}
 
-	now := time.Now()
+	now := c.rdb.Now()
 	var state base.TaskState
 	if opt.processAt.Before(now) || opt.processAt.Equal(now) {
 		opt.processAt = now
@@ -521,7 +521,7 @@ func (c *Client) enqueue(ctx context.Context, msg *base.TaskMessage, uniqueTTL t
 
 func (c *Client) schedule(ctx context.Context, msg *base.TaskMessage, t time.Time, uniqueTTL time.Duration, forceUnique bool) error {
 	if uniqueTTL > 0 {
-		ttl := t.Add(uniqueTTL).Sub(time.Now())
+		ttl := t.Add(uniqueTTL).Sub(c.rdb.Now())
 		return c.rdb.ScheduleUnique(ctx, msg, t, ttl, forceUnique)
 	}
 	return c.rdb.Schedule(ctx, msg, t)
@@ -556,7 +556,7 @@ func (c *Client) EnqueueBatchContext(ctx context.Context, tasks []*Task, opts ..
 		for _, task := range tasks {
 			// merge task options with the options provided at enqueue time.
 			opts = append(task.opts, opts...)
-			opt, err = composeOptions(opts...)
+			opt, err = composeOptions(c.rdb.Now(), opts...)
 			if err != nil {
 				break
 			}
@@ -578,7 +578,7 @@ func (c *Client) EnqueueBatchContext(ctx context.Context, tasks []*Task, opts ..
 	enqueueUnique := make([]*base.MessageBatch, 0, len(tasks))
 	schedule := make([]*base.MessageBatch, 0, len(tasks))
 	scheduleUnique := make([]*base.MessageBatch, 0, len(tasks))
-	now := time.Now()
+	now := c.rdb.Now()
 
 	for i, task := range tasks {
 		opt := tasksOpts[i]

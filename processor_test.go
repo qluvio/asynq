@@ -290,9 +290,9 @@ func TestProcessorSuccessWithAsyncTasks(t *testing.T) {
 					defer mu.Unlock()
 					processed = append(processed, task)
 					if rand.Intn(100)%2 == 0 {
-						task.AsyncProcessor().TaskCompleted()
+						_ = task.AsyncProcessor().TaskCompleted()
 					} else {
-						task.AsyncProcessor().TaskFailed(errors.New("failed"))
+						_ = task.AsyncProcessor().TaskFailed(errors.New("failed"))
 					}
 				}()
 				return AsynchronousTask

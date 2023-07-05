@@ -7,6 +7,7 @@ package asynq
 import (
 	"context"
 	"fmt"
+	"github.com/hibiken/asynq/internal/rdb"
 	"reflect"
 	"runtime"
 	"runtime/debug"
@@ -34,17 +35,21 @@ var TaskCanceled = errors.New("task canceled")
 // worker goroutine.
 var AsynchronousTask = errors.New("task is processing asynchronously")
 
+// TaskTransitionDone is used as a return value from Handler.ProcessTask to
+// indicate that the task was transitioned to another queue.
+var TaskTransitionDone = errors.New("task transitioned to another queue")
+var TaskTransitionAlreadyDone = errors.New("asyncProcessor already done")
+
 type AsynchronousHandler interface {
-	// UpdateTask updates the task in the given queue with the given data and returns
-	// the corresponding task info and the actual deadline of the task or an error if
-	// the operation failed.
+	// UpdateTask updates the task in the given queue with the given data and
+	// returns the corresponding task info and the actual deadline of the task
+	// or an error if the operation failed.
 	UpdateTask(queueName, taskId string, data []byte) (*TaskInfo, time.Time, error)
-	// Failed updates the task in the given queue with the given data and marks it as failed with the given error.
-	// Returns an error if the operation failed.
-	Failed(queueName, taskId string, result []byte, err error) error
-	// Succeeded updates the task in the given queue with the given data and marks it as succeeded.
-	// Returns an error if the operation failed.
-	Succeeded(queueName, taskId string, result []byte) error
+
+	// MoveToQueue moves the task with the given taskId in the given queue to target queue.
+	// The task is enqueued or scheduled with the given 'typeName' task type and the given options.
+	// This call will fail if the task is in active state.
+	MoveToQueue(queue, taskId, targetQueue, typeName string, opts ...Option) (*TaskInfo, error)
 }
 
 type processor struct {
@@ -278,7 +283,11 @@ func (p *processor) exec() {
 			}
 
 			rw := &ResultWriter{id: msg.ID, qname: msg.Queue, broker: p.broker, ctx: ctx}
-			ap := &AsyncProcessor{resCh: resCh}
+			ap := &asyncProcessor{
+				msg:       msg,
+				processor: p,
+				resCh:     resCh,
+			}
 			// hold mutex until worker goroutine returns; ensures that AsyncProcessor does not send to resCh first
 			ap.mutex.Lock()
 			go func() {
@@ -322,6 +331,7 @@ func (p *processor) fini() {
 			case nil:
 				resErr = nil
 			}
+
 			if resErr == AsynchronousTask {
 				// task worker goroutine marked self as asynchronous task
 				// check res again in case task already completed
@@ -342,15 +352,18 @@ func (p *processor) fini() {
 					return
 				}
 			}
-			if resErr != nil {
+
+			switch resErr {
+			case nil:
+				if !t.msg.Recurrent {
+					p.handleSucceededMessage(t.ctx, t.msg)
+				} else {
+					p.requeue(t.ctx, t.msg)
+				}
+			case TaskTransitionDone:
+				// nothing to do: just cleanup
+			default:
 				p.handleFailedMessage(t.ctx, t.msg, "errored", resErr)
-				t.cleanup()
-				return
-			}
-			if !t.msg.Recurrent {
-				p.handleSucceededMessage(t.ctx, t.msg)
-			} else {
-				p.requeue(t.ctx, t.msg)
 			}
 			t.cleanup()
 			return
@@ -657,6 +670,78 @@ func (p *processor) perform(ctx context.Context, task *Task) (err error) {
 	return p.handler.ProcessTask(ctx, task)
 }
 
+func (p *processor) moveToQueue(msg *base.TaskMessage, newQueue, typename string, active bool, opts ...Option) (*TaskInfo, error) {
+	newQueue = strings.TrimSpace(newQueue)
+	if newQueue == "" {
+		return nil, errors.New("queue name cannot be empty")
+	}
+	if newQueue == msg.Queue {
+		return nil, errors.New("new queue name equals existing queue")
+	}
+	pmsg := *msg
+
+	newMsg := &pmsg
+	if typename != "" {
+		newMsg.Type = typename
+	}
+	newMsg.Retried = 0
+	newMsg.ErrorMsg = ""
+	newMsg.Queue = newQueue
+
+	processAt := time.Time{}
+	now := p.broker.Now()
+
+	for _, opt := range opts {
+		switch opt := opt.(type) {
+		case retryOption:
+			newMsg.Retry = int(opt)
+		case queueOption:
+			qname := strings.TrimSpace(string(opt))
+			if qname != newQueue {
+				return nil, errors.New("queue name specified twice")
+			}
+		case taskIDOption:
+			return nil, errors.New("task ID cannot be changed")
+		case timeoutOption:
+			newMsg.Timeout = int64(time.Duration(opt).Round(time.Second).Seconds())
+		case deadlineOption:
+			newMsg.Deadline = time.Time(opt).Unix()
+		case uniqueOption:
+			ttl := time.Duration(opt)
+			if ttl < 1*time.Second {
+				return nil, errors.New("Unique TTL cannot be less than 1s")
+			}
+			newMsg.UniqueKeyTTL = int64(ttl.Seconds())
+		case processAtOption:
+			processAt = time.Time(opt)
+		case processInOption:
+			processAt = now.Add(time.Duration(opt))
+		case forceUniqueOption:
+			// ignore
+		case recurrentOption:
+			newMsg.Recurrent = bool(opt)
+		case reprocessAfterOption:
+			newMsg.ReprocessAfter = int64(time.Duration(opt).Seconds())
+		case serverAffinityOption:
+			if _, ok := p.broker.(*rdb.RDB); ok {
+				return nil, errors.New("server affinity not supported with redis")
+			}
+			newMsg.ServerAffinity = int64(time.Duration(opt).Seconds())
+		case retentionOption:
+			newMsg.Retention = int64(time.Duration(opt).Seconds())
+		default:
+			// ignore unexpected option
+		}
+	}
+
+	state, err := p.broker.MoveToQueue(msg.Queue, newMsg, processAt, active)
+	if err != nil {
+		return nil, err
+	}
+
+	return newTaskInfo(newMsg, state, processAt, nil), nil
+}
+
 func (p *processor) asynchronousHandler() AsynchronousHandler {
 	p.asynchronousOnce.Do(func() {
 		if p.asynchronous == nil {
@@ -670,8 +755,8 @@ type asynchronousHandler struct {
 	p *processor
 }
 
+// UpdateTask updates the result of the given tasks with the given data.
 func (a *asynchronousHandler) UpdateTask(queueName, taskId string, data []byte) (*TaskInfo, time.Time, error) {
-
 	info, dl, err := a.updateTask(queueName, taskId, data)
 	if err != nil {
 		return nil, dl, err
@@ -680,9 +765,6 @@ func (a *asynchronousHandler) UpdateTask(queueName, taskId string, data []byte) 
 }
 
 func (a *asynchronousHandler) updateTask(queueName, taskId string, data []byte) (*base.TaskInfo, time.Time, error) {
-	// PENDING(GIL): TODO : Fail ?
-	//  - if not AsynchronousTask
-	//  - if not active
 	deadline := time.Time{}
 	ti, deadline, err := a.p.broker.UpdateTask(queueName, taskId, data)
 
@@ -698,26 +780,19 @@ func (a *asynchronousHandler) updateTask(queueName, taskId string, data []byte) 
 	return ti, deadline, nil
 }
 
-func (a *asynchronousHandler) Failed(queueName, taskId string, data []byte, err error) error {
-	ti, dl, uerr := a.updateTask(queueName, taskId, data)
-	if uerr != nil {
-		return uerr
-	}
-
-	ctx, cnc := context.WithDeadline(context.Background(), dl)
-	defer cnc()
-	a.p.handleFailedMessage(ctx, ti.Message, "asynchronous-failed", err)
-	return nil
-}
-
-func (a *asynchronousHandler) Succeeded(queueName, taskId string, data []byte) error {
-	ti, dl, err := a.updateTask(queueName, taskId, data)
+// MoveToQueue moves the task with the given taskId in the given queue to target queue.
+// The task is enqueued or scheduled with the given task type and options.
+// This call will fail if the task is in active state.
+func (a *asynchronousHandler) MoveToQueue(queue, taskId, targetQueue, typeName string, opts ...Option) (*TaskInfo, error) {
+	ti, err := a.p.broker.Inspector().GetTaskInfo(queue, taskId)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	ctx, cnc := context.WithDeadline(context.Background(), dl)
-	defer cnc()
-	a.p.handleSucceededMessage(ctx, ti.Message)
-	return nil
+	ret, err := a.p.moveToQueue(ti.Message, targetQueue, typeName, false, opts...)
+	if err != nil {
+		return nil, err
+	}
+	ret.Result = ti.Result
+	return ret, nil
 }

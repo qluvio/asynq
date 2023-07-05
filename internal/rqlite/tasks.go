@@ -971,6 +971,144 @@ func (conn *Connection) requeueTask(now time.Time, serverID string, msg *base.Ta
 	return nil
 }
 
+func (conn *Connection) moveToQueue(now time.Time, fromQueue string, processAt time.Time, msg *base.TaskMessage, active bool) (base.TaskState, error) {
+	op := errors.Op("rqlite.moveToQueue")
+
+	targetState := pending
+	retState := base.TaskStatePending
+	if processAt.After(now) {
+		targetState = scheduled
+		retState = base.TaskStateScheduled
+	}
+	andState := " AND state='active'"
+	if !active {
+		andState = " AND state!='active'"
+	}
+	encoded, err := encodeMessage(msg)
+	if err != nil {
+		return 0, errors.E(op, errors.Internal, fmt.Sprintf("cannot encode message: %v", err))
+	}
+
+	var st *sqlite3.Statement
+	switch targetState {
+	case pending:
+		if msg.UniqueKeyTTL > 0 {
+			st = Statement(
+				"UPDATE "+conn.table(TasksTable)+" SET queue_name=?, type_name=?, task_msg=?, "+
+					" task_timeout=?, task_deadline=?, server_affinity=?, unique_key_deadline=?, affinity_timeout=?, recurrent=?"+
+					" state=?, pending_since=? "+
+					" WHERE queue_name=?"+andState+" AND task_uuid=?"+
+					" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?) ",
+				msg.Queue,
+				msg.Type,
+				encoded,
+				msg.Timeout,
+				msg.Deadline,
+				msg.ServerAffinity,
+				msg.UniqueKeyTTL,
+				msg.ServerAffinity,
+				msg.Recurrent,
+				targetState,
+				now.UnixNano(),
+				fromQueue,
+				msg.ID,
+				msg.Queue)
+		} else {
+			st = Statement(
+				"UPDATE "+conn.table(TasksTable)+" SET queue_name=?, type_name=?, task_msg=?, "+
+					" task_timeout=?, task_deadline=?, server_affinity=?, unique_key_deadline=NULL, affinity_timeout=?, recurrent=?"+
+					" state=?, pending_since=? "+
+					" WHERE queue_name=?"+andState+" AND task_uuid=?"+
+					" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?) ",
+				msg.Queue,
+				msg.Type,
+				encoded,
+				msg.Timeout,
+				msg.Deadline,
+				msg.ServerAffinity,
+				msg.ServerAffinity,
+				msg.Recurrent,
+				targetState,
+				now.UnixNano(),
+				fromQueue,
+				msg.ID,
+				msg.Queue)
+		}
+	case scheduled:
+		if msg.UniqueKeyTTL > 0 {
+			st = Statement(
+				"UPDATE "+conn.table(TasksTable)+" SET queue_name=?, type_name=?, task_msg=?, "+
+					" task_timeout=?, task_deadline=?, server_affinity=?, unique_key_deadline=?, affinity_timeout=?, recurrent=?"+
+					" state=?, scheduled_at=? "+
+					" WHERE queue_name=?"+andState+" AND task_uuid=?"+
+					" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?) ",
+				msg.Queue,
+				msg.Type,
+				encoded,
+				msg.Timeout,
+				msg.Deadline,
+				msg.ServerAffinity,
+				msg.UniqueKeyTTL,
+				msg.ServerAffinity,
+				msg.Recurrent,
+				targetState,
+				processAt.UTC().Unix(),
+				fromQueue,
+				msg.ID,
+				msg.Queue)
+		} else {
+			st = Statement(
+				"UPDATE "+conn.table(TasksTable)+" SET queue_name=?, type_name=?, task_msg=?, "+
+					" task_timeout=?, task_deadline=?, server_affinity=?, unique_key_deadline=NULL, affinity_timeout=?, recurrent=?"+
+					" state=?, scheduled_at=? "+
+					" WHERE queue_name=?"+andState+" AND task_uuid=?"+
+					" AND EXISTS (SELECT queue_name FROM "+conn.table(QueuesTable)+" WHERE queue_name=?) ",
+				msg.Queue,
+				msg.Type,
+				encoded,
+				msg.Timeout,
+				msg.Deadline,
+				msg.ServerAffinity,
+				msg.ServerAffinity,
+				msg.Recurrent,
+				targetState,
+				processAt.UTC().Unix(),
+				fromQueue,
+				msg.ID,
+				msg.Queue)
+		}
+	default:
+		return 0, errors.E(op, errors.Internal, "target state must be 'pending' or 'scheduled'")
+	}
+
+	wrs, err := conn.WriteStmt(conn.ctx(), st)
+	if err != nil {
+		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
+	}
+
+	if len(wrs) == 0 {
+		// check queue
+		q, err := conn.GetQueue(msg.Queue)
+		if err == nil && q == nil {
+			return 0, errors.E(op, errors.NotFound, &errors.QueueNotFoundError{Queue: msg.Queue})
+		}
+		// check completed tasks
+		qs, err := conn.getCompletedTask(fromQueue, msg.ID)
+		if err == nil && qs != nil {
+			return 0, errors.E(op, errors.FailedPrecondition, "cannot move to new queue an already task.")
+		}
+		// not found
+		return 0, errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: fromQueue, ID: msg.ID})
+	}
+
+	err = expectOneRowUpdated(op, wrs, 0, st, true)
+	if err != nil {
+		return 0, err
+	}
+
+	return retState, nil
+}
+
 func (conn *Connection) scheduleTasks(ctx context.Context, msgs ...*base.MessageBatch) error {
 	op := errors.Op("rqlite.scheduleTasks")
 

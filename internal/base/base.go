@@ -709,6 +709,8 @@ type Broker interface {
 	// Use this function to set the clock to SimulatedClock in tests.
 	SetClock(c timeutil.Clock)
 
+	Now() time.Time
+
 	// Enqueue adds the given task to the pending list of the queue.
 	Enqueue(ctx context.Context, msg *TaskMessage) error
 	// EnqueueUnique inserts the given task if the task's uniqueness lock can be acquired.
@@ -728,7 +730,7 @@ type Broker interface {
 	Done(serverID string, msg *TaskMessage) error
 	// MarkAsComplete marks the task as completed
 	MarkAsComplete(serverID string, msg *TaskMessage) error
-	// Requeue moves the task from active queue to the specified queue.
+	// Requeue moves the task from active state to pending in the queue of the message.
 	// ServerID is the ID of the server that processed the task (used for server affinity)
 	// aborted is true when re-queuing occurs because the server stops and false for recurrent tasks
 	Requeue(serverID string, msg *TaskMessage, aborted bool) error
@@ -765,6 +767,10 @@ type Broker interface {
 	WriteResult(qname, taskID string, data []byte) (n int, err error)
 	// UpdateTask updates the result data of the given task and returns the updated task info and its actual deadline
 	UpdateTask(qname, id string, data []byte) (*TaskInfo, time.Time, error)
+	// MoveToQueue moves the given task from fromQueue to its new queue.
+	// When active is true, the moved task must be in active state, otherwise it must not be active.
+	// The returned state is either scheduled or pending
+	MoveToQueue(fromQueue string, msg *TaskMessage, processAt time.Time, active bool) (TaskState, error)
 	// Close closes the connection with the store server.
 	Close() error
 	// ListServers returns the list of server info.

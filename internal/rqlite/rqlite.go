@@ -322,13 +322,23 @@ func (r *RQLite) Done(serverID string, msg *base.TaskMessage) error {
 	return conn.setTaskDone(r.Now(), serverID, msg)
 }
 
-// Requeue moves the task from active to pending in the specified queue.
+// Requeue moves the task from active state to pending in the queue of the message.
 func (r *RQLite) Requeue(serverID string, msg *base.TaskMessage, aborted bool) error {
 	conn, err := r.client("rqlite.Requeue")
 	if err != nil {
 		return err
 	}
 	return conn.requeueTask(r.Now(), serverID, msg, aborted)
+}
+
+// MoveToQueue moves the task from fromQueue queue to pending state in the queue of the message.
+// An error is returned if the message does not exist in 'fromQueue'.
+func (r *RQLite) MoveToQueue(fromQueue string, msg *base.TaskMessage, processAt time.Time, active bool) (base.TaskState, error) {
+	conn, err := r.client("rqlite.MoveToQueue")
+	if err != nil {
+		return 0, err
+	}
+	return conn.moveToQueue(r.Now(), fromQueue, processAt, msg, active)
 }
 
 // Schedule adds the task to the scheduled set to be processed in the future.
