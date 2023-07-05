@@ -2,6 +2,8 @@
 
 package asynq
 
+import "syscall"
+
 func kill() error {
-	return syscall.TerminateProcess(syscall.Getpid(), syscall.SIGTERM)
+	return syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 }
