@@ -22,6 +22,7 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/timeutil"
+	"github.com/stretchr/testify/require"
 )
 
 // variables used for package testing.
@@ -421,11 +422,13 @@ func TestDequeue(t *testing.T) {
 		h.FlushDB(t, r.client) // clean up db before each test case
 		h.SeedAllPendingQueues(t, r.client, tc.pending)
 
-		gotMsg, gotDeadline, err := r.Dequeue("", tc.args...)
+		deq, err := r.Dequeue("", tc.args...)
 		if err != nil {
 			t.Errorf("(*RDB).Dequeue(%v) returned error %v", tc.args, err)
 			continue
 		}
+		gotMsg := deq.Message
+		gotDeadline := deq.Deadline
 		if !cmp.Equal(gotMsg, tc.wantMsg) {
 			t.Errorf("(*RDB).Dequeue(%v) returned message %v; want %v",
 				tc.args, gotMsg, tc.wantMsg)
@@ -457,6 +460,31 @@ func TestDequeue(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestDequeueWithResult(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	t1 := &base.TaskMessage{
+		ID:       uuid.NewString(),
+		Type:     "send_email",
+		Payload:  h.JSON(map[string]interface{}{"subject": "hello!"}),
+		Queue:    "default",
+		Timeout:  1800,
+		Deadline: 0,
+	}
+	err := r.Enqueue(context.Background(), t1)
+	require.NoError(t, err)
+
+	_, err = r.WriteResult("default", t1.ID, []byte("azerty"))
+	require.NoError(t, err)
+
+	ti, err := r.Dequeue("", "default")
+	require.NoError(t, err)
+	require.Equal(t, t1.ID, ti.Message.ID)
+
+	require.Equal(t, "azerty", string(ti.Result))
 }
 
 func TestDequeueError(t *testing.T) {
@@ -517,18 +545,14 @@ func TestDequeueError(t *testing.T) {
 		h.FlushDB(t, r.client) // clean up db before each test case
 		h.SeedAllPendingQueues(t, r.client, tc.pending)
 
-		gotMsg, gotDeadline, gotErr := r.Dequeue("", tc.args...)
+		deq, gotErr := r.Dequeue("", tc.args...)
 		if !errors.Is(gotErr, tc.wantErr) {
 			t.Errorf("(*RDB).Dequeue(%v) returned error %v; want %v",
 				tc.args, gotErr, tc.wantErr)
 			continue
 		}
-		if gotMsg != nil {
-			t.Errorf("(*RDB).Dequeue(%v) returned message %v; want nil", tc.args, gotMsg)
-			continue
-		}
-		if !gotDeadline.IsZero() {
-			t.Errorf("(*RDB).Dequeue(%v) returned deadline %v; want %v", tc.args, gotDeadline, time.Time{})
+		if deq != nil {
+			t.Errorf("(*RDB).Dequeue(%v) returned message %v; want nil", tc.args, deq.Message)
 			continue
 		}
 
@@ -644,10 +668,15 @@ func TestDequeueIgnoresPausedQueues(t *testing.T) {
 		}
 		h.SeedAllPendingQueues(t, r.client, tc.pending)
 
-		got, _, err := r.Dequeue("", tc.args...)
-		if !cmp.Equal(got, tc.wantMsg) || !errors.Is(err, tc.wantErr) {
+		deq, err := r.Dequeue("", tc.args...)
+		if !errors.Is(err, tc.wantErr) {
 			t.Errorf("Dequeue(%v) = %v, %v; want %v, %v",
-				tc.args, got, err, tc.wantMsg, tc.wantErr)
+				tc.args, deq.Message, err, tc.wantMsg, tc.wantErr)
+			continue
+		}
+		if err == nil && !cmp.Equal(deq.Message, tc.wantMsg) {
+			t.Errorf("Dequeue(%v) = %v, %v; want %v, %v",
+				tc.args, deq.Message, err, tc.wantMsg, tc.wantErr)
 			continue
 		}
 
@@ -2664,15 +2693,15 @@ func TestUpdateTask(t *testing.T) {
 		qname := tc.active.Queue
 		active := map[string][]*base.TaskMessage{qname: {tc.active}}
 		h.SeedAllPendingQueues(t, r.client, active)
-		_, dl0, err := r.Dequeue("", qname)
+		deq, err := r.Dequeue("", qname)
 
-		ti, dl, err := r.UpdateTask(qname, tc.active.ID, tc.data)
+		ti, err := r.UpdateTask(qname, tc.active.ID, tc.data)
 		if err != nil || ti == nil {
 			t.Errorf("UpdateTask failed: %v", err)
 			continue
 		}
-		if !dl0.Equal(dl) {
-			t.Errorf("Unexpected deadline, expected %v, actual: %v", dl0, dl)
+		if !deq.Deadline.Equal(ti.Deadline) {
+			t.Errorf("Unexpected deadline, expected %v, actual: %v", deq.Deadline, ti.Deadline)
 		}
 
 		taskKey := base.TaskKey(qname, tc.active.ID)

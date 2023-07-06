@@ -1,6 +1,7 @@
 package rqlite
 
 import (
+	"encoding/base64"
 	"fmt"
 	"math"
 	"time"
@@ -14,6 +15,7 @@ type dequeueResult struct {
 	taskMsg  string
 	deadline int64
 	msg      *base.TaskMessage
+	result   []byte
 }
 
 /*
@@ -106,7 +108,7 @@ func (conn *Connection) dequeueMessage(now time.Time, serverID string, qname str
 		"           " + conn.table(TasksTable) + ".archived_at-" + conn.table(TasksTable) + ".affinity_timeout)<=?))) " +
 		" OR ((" + conn.table(TasksTable) + ".done_at+" + conn.table(TasksTable) + ".affinity_timeout)<=? " +
 		"     AND " + conn.table(TasksTable) + ".sid!=?)))"
-	returning := " RETURNING task_uuid,ndx,pndx,task_msg,deadline"
+	returning := " RETURNING task_uuid,ndx,pndx,task_msg,deadline,result"
 
 	if len(serverID) > 0 {
 		st = Statement(
@@ -168,7 +170,7 @@ func (conn *Connection) dequeueMessage(now time.Time, serverID string, qname str
 
 	qr.Query.Next()
 	row := &dequeueRow{}
-	err = qr.Query.Scan(&row.uuid, &row.ndx, &row.pndx, &row.taskMsg, &row.deadline)
+	err = qr.Query.Scan(&row.uuid, &row.ndx, &row.pndx, &row.taskMsg, &row.deadline, &row.result)
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, fmt.Sprintf("rqlite scan error: %v", err))
 	}
@@ -176,10 +178,20 @@ func (conn *Connection) dequeueMessage(now time.Time, serverID string, qname str
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, fmt.Sprintf("cannot decode message: %v", err))
 	}
+	var result []byte
+	if row.result != "" {
+		var err error
+		result, err = base64.StdEncoding.DecodeString(row.result)
+		if err != nil {
+			return nil, errors.E(op, errors.Internal, err)
+		}
+	}
+
 	return &dequeueResult{
 		taskMsg:  row.taskMsg,
 		deadline: row.deadline,
 		msg:      row.msg,
+		result:   result,
 	}, nil
 }
 
@@ -189,6 +201,7 @@ type dequeueRow struct {
 	pndx     int64
 	taskMsg  string
 	deadline int64
+	result   string
 	msg      *base.TaskMessage
 }
 
@@ -197,13 +210,15 @@ type dequeueRow struct {
 //
 
 type dequeueRow0 struct {
-	uuid     string
-	ndx      int64
-	pndx     int64
-	taskMsg  string
-	timeout  int64
-	deadline int64
-	msg      *base.TaskMessage
+	uuid      string
+	ndx       int64
+	pndx      int64
+	taskMsg   string
+	timeout   int64
+	deadline  int64
+	result    []byte
+	resultStr string
+	msg       *base.TaskMessage
 }
 
 // We cannot issue a select and an update in the same transaction with rqlite
@@ -212,7 +227,7 @@ func (conn *Connection) getPending(now time.Time, serverID string, queue string)
 	op := errors.Op("rqlite.getPending")
 
 	st := Statement(
-		"SELECT task_uuid,ndx,pndx,task_msg,task_timeout,task_deadline FROM "+conn.table(TasksTable)+
+		"SELECT task_uuid,ndx,pndx,task_msg,task_timeout,task_deadline,result FROM "+conn.table(TasksTable)+
 			" INNER JOIN "+conn.table(QueuesTable)+
 			" ON "+conn.table(QueuesTable)+".queue_name="+conn.table(TasksTable)+".queue_name"+
 			" WHERE "+conn.table(QueuesTable)+".queue_name=? "+
@@ -260,13 +275,20 @@ func (conn *Connection) getPending(now time.Time, serverID string, queue string)
 
 	qr.Next()
 	deq := &dequeueRow0{}
-	err = qr.Scan(&deq.uuid, &deq.ndx, &deq.pndx, &deq.taskMsg, &deq.timeout, &deq.deadline)
+	err = qr.Scan(&deq.uuid, &deq.ndx, &deq.pndx, &deq.taskMsg, &deq.timeout, &deq.deadline, &deq.resultStr)
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, fmt.Sprintf("rqlite scan error: %v", err))
 	}
 	deq.msg, err = decodeMessage([]byte(deq.taskMsg))
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, fmt.Sprintf("cannot decode message: %v", err))
+	}
+	if deq.resultStr != "" {
+		var err error
+		deq.result, err = base64.StdEncoding.DecodeString(deq.resultStr)
+		if err != nil {
+			return nil, errors.E(op, errors.Internal, err)
+		}
 	}
 
 	return deq, nil
@@ -346,6 +368,7 @@ func (conn *Connection) dequeueMessage0(now time.Time, serverID string, qname st
 				taskMsg:  row.taskMsg,
 				deadline: score,
 				msg:      row.msg,
+				result:   row.result,
 			}, nil
 		}
 	}

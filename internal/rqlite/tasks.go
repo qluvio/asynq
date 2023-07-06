@@ -213,7 +213,7 @@ func (conn *Connection) getTaskInfo(now time.Time, qname string, taskid string) 
 	return ret, nil
 }
 
-func (conn *Connection) updateTask(now time.Time, qname string, taskID string, activeOnly bool, data []byte) (*base.TaskInfo, time.Time, error) {
+func (conn *Connection) updateTask(now time.Time, qname string, taskID string, activeOnly bool, data []byte) (*base.TaskInfo, error) {
 	op := errors.Op("rqlite.updateTask")
 
 	andState := " AND state='active' "
@@ -246,42 +246,44 @@ func (conn *Connection) updateTask(now time.Time, qname string, taskID string, a
 	}
 	st.Returning = true
 
-	deadline := time.Time{}
 	qrs, err := conn.RequestStmt(conn.ctx(), st)
 	if err != nil {
-		return nil, deadline, NewRqliteRqError(op, qrs, err, []*sqlite3.Statement{st})
+		return nil, NewRqliteRqError(op, qrs, err, []*sqlite3.Statement{st})
 	}
 	rows, err := parseTaskRows(qrs[0].Query)
 	if err != nil {
-		return nil, deadline, errors.E(op, errors.Internal, err)
+		return nil, errors.E(op, errors.Internal, err)
 	}
 	switch len(rows) {
 	case 0:
 		q, err := conn.GetQueue(qname)
 		if err == nil && q == nil {
-			return nil, deadline, errors.E(op, errors.NotFound, &errors.QueueNotFoundError{Queue: qname})
+			return nil, errors.E(op, errors.NotFound, &errors.QueueNotFoundError{Queue: qname})
 		}
 		if activeOnly {
 			qs, err := conn.getTask(qname, taskID)
 			if err == nil && qs != nil {
-				return nil, deadline, errors.E(op, errors.FailedPrecondition, "cannot update task not in active state.")
+				return nil, errors.E(op, errors.FailedPrecondition, "cannot update task not in active state.")
 			}
 		} else {
 			rows, _ = conn.updateCompletedTask(qname, taskID, data)
 		}
 		if len(rows) != 1 {
-			return nil, deadline, errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: taskID})
+			return nil, errors.E(op, errors.NotFound, &errors.TaskNotFoundError{Queue: qname, ID: taskID})
 		}
 	case 1:
 		// handled below
 	default:
-		return nil, deadline, errors.E(op, errors.Internal,
+		return nil, errors.E(op, errors.Internal,
 			fmt.Sprintf("unexpected result count: %d (expected 1), statement: %s", len(rows), st))
 	}
 
-	deadline = time.Unix(rows[0].deadline, 0).UTC()
+	deadline := time.Unix(rows[0].deadline, 0).UTC()
 	ret, err := getTaskInfo(op, now, rows[0])
-	return ret, deadline, err
+	if err == nil {
+		ret.Deadline = deadline
+	}
+	return ret, err
 }
 
 func getTaskInfo(op errors.Op, now time.Time, tr *taskRow) (*base.TaskInfo, error) {

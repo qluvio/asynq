@@ -128,9 +128,9 @@ func TestMoveActiveToQueue(t *testing.T) {
 		msgs := map[string][]*base.TaskMessage{queue: {msg}}
 		SeedAllPendingQueues(t, r, msgs)
 		for _, id := range []string{customID} {
-			m, _, err := r.Dequeue("", queue)
+			deq, err := r.Dequeue("", queue)
 			require.NoError(t, err, tc.desc)
-			require.Equal(t, id, m.ID, tc.desc)
+			require.Equal(t, id, deq.Message.ID, tc.desc)
 		}
 
 		ctx := context.Background()
@@ -277,10 +277,10 @@ func TestMoveCompletedToQueue(t *testing.T) {
 		msgs := map[string][]*base.TaskMessage{queue: {msg}}
 		SeedAllPendingQueues(t, r, msgs)
 		for _, id := range []string{customID} {
-			m, _, err := r.Dequeue("", queue)
+			deq, err := r.Dequeue("", queue)
 			require.NoError(t, err, tc.desc)
-			require.Equal(t, id, m.ID, tc.desc)
-			err = r.MarkAsComplete("", m)
+			require.Equal(t, id, deq.Message.ID, tc.desc)
+			err = r.MarkAsComplete("", deq.Message)
 			require.NoError(t, err, tc.desc)
 		}
 
@@ -369,26 +369,26 @@ func TestMoveToQueueErrors(t *testing.T) {
 		case base.TaskStateActive:
 			SeedAllPendingQueues(t, r, msgs)
 			for _, id := range []string{customID1, customID2} {
-				m, _, err := r.Dequeue("", queue)
+				deq, err := r.Dequeue("", queue)
 				require.NoError(t, err)
-				require.Equal(t, id, m.ID)
+				require.Equal(t, id, deq.Message.ID)
 			}
 		case base.TaskStateRetry:
 			SeedAllPendingQueues(t, r, msgs)
 			for _, id := range []string{customID1, customID2} {
-				m, _, err := r.Dequeue("", queue)
+				deq, err := r.Dequeue("", queue)
 				require.NoError(t, err)
-				require.Equal(t, id, m.ID)
-				err = r.Retry(m, r.Now(), "", true)
+				require.Equal(t, id, deq.Message.ID)
+				err = r.Retry(deq.Message, r.Now(), "", true)
 				require.NoError(t, err)
 			}
 		case base.TaskStateCompleted:
 			SeedAllPendingQueues(t, r, msgs)
 			for _, id := range []string{customID1, customID2} {
-				m, _, err := r.Dequeue("", queue)
+				deq, err := r.Dequeue("", queue)
 				require.NoError(t, err)
-				require.Equal(t, id, m.ID)
-				err = r.MarkAsComplete("", m)
+				require.Equal(t, id, deq.Message.ID)
+				err = r.MarkAsComplete("", deq.Message)
 				require.NoError(t, err)
 			}
 		}

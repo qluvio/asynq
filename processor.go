@@ -235,7 +235,7 @@ func (p *processor) exec() {
 		return
 	case p.sema <- struct{}{}: // acquire token
 		qnames := p.queues.Names()
-		msg, deadline, err := p.broker.Dequeue(p.serverID, qnames...)
+		task, err := p.broker.Dequeue(p.serverID, qnames...)
 		switch {
 		case errors.Is(err, errors.ErrNoProcessableTask):
 			p.logger.Debug("All queues are empty")
@@ -255,6 +255,9 @@ func (p *processor) exec() {
 			<-p.sema // release token
 			return
 		}
+		msg := task.Message
+		deadline := task.Deadline
+
 		p.logger.Debugf("dequeued %s -> %v", msg.ID, deadline)
 
 		p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
@@ -293,7 +296,13 @@ func (p *processor) exec() {
 			ap.mutex.Lock()
 			go func() {
 				defer ap.mutex.Unlock()
-				task := newTask(msg.Type, msg.Payload, rw, ap, func(fn func(string, error, bool)) { p.afterTasks.Add(msg.ID, fn) })
+				task := newTask(
+					msg.Type,
+					msg.Payload,
+					task.Result,
+					rw,
+					ap,
+					func(fn func(string, error, bool)) { p.afterTasks.Add(msg.ID, fn) })
 				resCh <- p.perform(ctx, task)
 			}()
 			// finish task processing in p.fini() goroutine to allow this goroutine to end
@@ -758,27 +767,26 @@ type asynchronousHandler struct {
 
 // UpdateTask updates the result of the given tasks with the given data.
 func (a *asynchronousHandler) UpdateTask(queueName, taskId string, data []byte) (*TaskInfo, time.Time, error) {
-	info, dl, err := a.updateTask(queueName, taskId, data)
+	info, err := a.updateTask(queueName, taskId, data)
 	if err != nil {
-		return nil, dl, err
+		return nil, time.Time{}, err
 	}
-	return newTaskInfo(info.Message, info.State, info.NextProcessAt, info.Result), dl, nil
+	return newTaskInfo(info.Message, info.State, info.NextProcessAt, info.Result), info.Deadline, nil
 }
 
-func (a *asynchronousHandler) updateTask(queueName, taskId string, data []byte) (*base.TaskInfo, time.Time, error) {
-	deadline := time.Time{}
-	ti, deadline, err := a.p.broker.UpdateTask(queueName, taskId, data)
+func (a *asynchronousHandler) updateTask(queueName, taskId string, data []byte) (*base.TaskInfo, error) {
+	ti, err := a.p.broker.UpdateTask(queueName, taskId, data)
 
 	switch {
 	case errors.IsQueueNotFound(err):
-		return nil, deadline, fmt.Errorf("asynq: %w", ErrQueueNotFound)
+		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
 	case errors.IsTaskNotFound(err):
-		return nil, deadline, fmt.Errorf("asynq: %w", ErrTaskNotFound)
+		return nil, fmt.Errorf("asynq: %w", ErrTaskNotFound)
 	case err != nil:
-		return nil, deadline, fmt.Errorf("asynq: %v", err)
+		return nil, fmt.Errorf("asynq: %v", err)
 	}
 
-	return ti, deadline, nil
+	return ti, nil
 }
 
 // RequeueCompleted moves the completed task with the given taskId in the given queue to the target queue.

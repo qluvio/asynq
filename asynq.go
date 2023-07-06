@@ -31,6 +31,9 @@ type Task struct {
 	// opts holds options for the task.
 	opts []Option
 
+	// the result of a previous execution when this task was transitioned from another queue
+	result []byte
+
 	// w is the ResultWriter for the task.
 	w *ResultWriter
 
@@ -43,6 +46,7 @@ type Task struct {
 
 func (t *Task) Type() string    { return t.typename }
 func (t *Task) Payload() []byte { return t.payload }
+func (t *Task) Result() []byte  { return t.result }
 
 // ResultWriter returns a pointer to the ResultWriter associated with the task.
 //
@@ -80,10 +84,21 @@ func NewTask(typename string, payload []byte, opts ...Option) *Task {
 }
 
 // newTask creates a task with the given typename, payload, ResultWriter, and AsyncProcessor.
-func newTask(typename string, payload []byte, w *ResultWriter, p *asyncProcessor, ca func(fn func(string, error, bool))) *Task {
+func newTask(
+	typename string,
+	payload []byte,
+	result []byte,
+	w *ResultWriter,
+	p *asyncProcessor,
+	ca func(fn func(string, error, bool))) *Task {
+
+	if len(result) == 0 {
+		result = nil
+	}
 	return &Task{
 		typename:  typename,
 		payload:   payload,
+		result:    result,
 		w:         w,
 		p:         p,
 		callAfter: ca,

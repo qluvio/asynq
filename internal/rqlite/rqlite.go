@@ -280,18 +280,18 @@ func (r *RQLite) EnqueueUniqueBatch(ctx context.Context, msg ...*base.MessageBat
 // off a queue if one exists and returns the message and deadline.
 // Dequeue skips a queue if the queue is paused.
 // If all queues are empty, ErrNoProcessableTask error is returned.
-func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessage, deadline time.Time, err error) {
+func (r *RQLite) Dequeue(serverID string, qnames ...string) (*base.TaskInfo, error) {
 	var op errors.Op = "rqlite.Dequeue"
 	conn, err := r.client(op)
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, err
 	}
 
 	for _, qname := range qnames {
 
 		q, err := r.getQueue(qname)
 		if err != nil {
-			return nil, time.Time{}, errors.E(op, fmt.Sprintf("get queue error: %v", err))
+			return nil, errors.E(op, fmt.Sprintf("get queue error: %v", err))
 		}
 		if q == nil || q.state == paused {
 			continue
@@ -301,14 +301,19 @@ func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessa
 		data, err := conn.dequeueMessage(r.Now(), serverID, qname)
 
 		if err != nil {
-			return nil, time.Time{}, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
+			return nil, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
 		}
 		if data == nil {
 			continue
 		}
-		return data.msg, time.Unix(data.deadline, 0), nil
+		return &base.TaskInfo{
+			Message:  data.msg,
+			State:    base.TaskStateActive,
+			Deadline: time.Unix(data.deadline, 0),
+			Result:   data.result,
+		}, nil
 	}
-	return nil, time.Time{}, errors.E(op, errors.NotFound, errors.ErrNoProcessableTask)
+	return nil, errors.E(op, errors.NotFound, errors.ErrNoProcessableTask)
 }
 
 // Done removes the task from active queue to mark the task as done and set its
@@ -446,7 +451,7 @@ func (r *RQLite) WriteResult(qname, id string, data []byte) (int, error) {
 	return conn.writeTaskResult(qname, id, data, false)
 }
 
-func (r *RQLite) UpdateTask(qname, id string, data []byte) (*base.TaskInfo, time.Time, error) {
+func (r *RQLite) UpdateTask(qname, id string, data []byte) (*base.TaskInfo, error) {
 	conn, _ := r.Client()
 	return conn.updateTask(r.clock.Now(), qname, id, false, data)
 }
