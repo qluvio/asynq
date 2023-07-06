@@ -467,7 +467,7 @@ return redis.status_reply("OK")
 // KEYS[6] -> asynq:{<qname>}:unique:{<checksum>}
 // ARGV[1] -> task ID
 // ARGV[2] -> stats expiration timestamp
-// ARGV[3] -> task exipration time in unix time
+// ARGV[3] -> task expiration time in unix time
 // ARGV[4] -> task message data
 var markAsCompleteUniqueCmd = redis.NewScript(`
 if redis.call("LREM", KEYS[1], 0, ARGV[1]) == 0 then
@@ -583,10 +583,6 @@ func (r *RDB) Requeue(serverID string, msg *base.TaskMessage, aborted bool) erro
 		msg.ID,
 		int(msg.UniqueKeyTTL),
 	})
-}
-
-func (r *RDB) MoveToQueue(fromQueue string, msg *base.TaskMessage, processAt time.Time, active bool) (base.TaskState, error) {
-	panic("not implemented")
 }
 
 // KEYS[1] -> asynq:{<qname>}:t:<task_id>

@@ -25,7 +25,11 @@ func SeedPendingQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname 
 	require.NoError(tb, err)
 	for _, msg := range msgs {
 		require.Equal(tb, qname, msg.Queue)
-		err := r.Enqueue(context.Background(), msg)
+		if msg.UniqueKey != "" && msg.UniqueKeyTTL > 0 {
+			err = r.EnqueueUnique(context.Background(), msg, time.Duration(msg.UniqueKeyTTL)*time.Second)
+		} else {
+			err = r.Enqueue(context.Background(), msg)
+		}
 		require.NoError(tb, err)
 	}
 }

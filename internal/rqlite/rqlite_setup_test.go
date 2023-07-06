@@ -81,7 +81,7 @@ func setup(tb testing.TB) *RQLite {
 
 	tb.Helper()
 	ret := NewRQLite(&config, nil, nil)
-	ret.MockNow(time.Now())
+	ret.MockNow(time.Now().Truncate(time.Second))
 	err := ret.Open()
 	if err != nil {
 		tb.Fatal("Unable to connect rqlite", err)

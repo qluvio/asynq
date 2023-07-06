@@ -289,21 +289,23 @@ func (w *ResultWriter) TaskID() string {
 // It returns a TaskTransitionDone error that should be used as result of execution.
 type AsyncProcessor interface {
 	// TaskCompleted indicates that the task has completed successfully.
+	// The returned error is nil or TaskTransitionAlreadyDone
 	TaskCompleted() error
 
 	// TaskFailed indicates that the task has failed, with the given error.
+	// The returned error is nil or TaskTransitionAlreadyDone
 	TaskFailed(err error) error
 
 	// TaskTransition moves the task to a new queue and send a TaskTransitionDone as a result of execution.
-	// Another error is returned if the transition failed (and the caller can call TaskFailed).
+	// The returned error is nil or TaskTransitionAlreadyDone
 	TaskTransition(newQueue, typename string, opts ...Option) error
 
-	// MoveToQueue moves the executing 'active' task to a new queue.
+	// TransitionToQueue moves the executing 'active' task to a new queue.
 	// After a successful call:
 	// - the task is either in pending or scheduled state in newQueue.
 	// - the function returns the new state AND error TaskTransitionDone
 	// otherwise it returns zero and the error.
-	MoveToQueue(newQueue, typename string, opts ...Option) (TaskState, error)
+	TransitionToQueue(newQueue, typename string, opts ...Option) (TaskState, error)
 }
 
 var (
@@ -326,7 +328,7 @@ func (v *voidAsyncProcessor) TaskTransition(string, string, ...Option) error {
 	return invalidAsyncProcessorError
 }
 
-func (v *voidAsyncProcessor) MoveToQueue(string, string, ...Option) (TaskState, error) {
+func (v *voidAsyncProcessor) TransitionToQueue(string, string, ...Option) (TaskState, error) {
 	return 0, invalidAsyncProcessorError
 }
 
@@ -338,6 +340,7 @@ var _ AsyncProcessor = (*asyncProcessor)(nil)
 // Only the first TaskCompleted/TaskFailed/TaskTransition call will update the task status; all subsequent calls will
 // have no effect and return an error.
 type asyncProcessor struct {
+	ctx       context.Context
 	msg       *base.TaskMessage
 	processor *processor
 	resCh     chan error
@@ -376,7 +379,7 @@ func (p *asyncProcessor) TaskTransition(newQueue, typename string, opts ...Optio
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	if !p.done {
-		_, err := p.MoveToQueue(newQueue, typename, opts...)
+		_, err := p.TransitionToQueue(newQueue, typename, opts...)
 		if err != nil && err != TaskTransitionDone {
 			return err
 		}
@@ -387,13 +390,13 @@ func (p *asyncProcessor) TaskTransition(newQueue, typename string, opts ...Optio
 	return TaskTransitionAlreadyDone
 }
 
-// MoveToQueue moves the executing 'active' task to a new queue.
+// TransitionToQueue moves the executing 'active' task to a new queue.
 //
 // After the call the task is either in pending or scheduled state in newQueue.
 // When successful, the function returns the new state AND error TaskTransitionDone
 // otherwise it returns zero and the error.
-func (p *asyncProcessor) MoveToQueue(newQueue, typename string, opts ...Option) (TaskState, error) {
-	ret, err := p.processor.moveToQueue(p.msg, newQueue, typename, true, opts...)
+func (p *asyncProcessor) TransitionToQueue(newQueue, typename string, opts ...Option) (TaskState, error) {
+	ret, err := p.processor.moveToQueue(p.ctx, p.msg, newQueue, typename, true, opts...)
 	if err != nil {
 		return 0, err
 	}

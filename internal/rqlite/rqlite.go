@@ -333,12 +333,12 @@ func (r *RQLite) Requeue(serverID string, msg *base.TaskMessage, aborted bool) e
 
 // MoveToQueue moves the task from fromQueue queue to pending state in the queue of the message.
 // An error is returned if the message does not exist in 'fromQueue'.
-func (r *RQLite) MoveToQueue(fromQueue string, msg *base.TaskMessage, processAt time.Time, active bool) (base.TaskState, error) {
+func (r *RQLite) MoveToQueue(ctx context.Context, fromQueue string, msg *base.TaskMessage, processAt time.Time, active bool) (base.TaskState, error) {
 	conn, err := r.client("rqlite.MoveToQueue")
 	if err != nil {
 		return 0, err
 	}
-	return conn.moveToQueue(r.Now(), fromQueue, processAt, msg, active)
+	return conn.moveToQueue(ctx, r.Now(), fromQueue, processAt, msg, active)
 }
 
 // Schedule adds the task to the scheduled set to be processed in the future.

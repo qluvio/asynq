@@ -1488,7 +1488,7 @@ func TestUpdateFailedTask(t *testing.T) {
 		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
 			return time.Second
 		}),
-		LogLevel: testLogLevel, //DebugLevel,
+		LogLevel: testLogLevel,
 	})
 	defer func() {
 		srv.Shutdown()
@@ -1500,6 +1500,7 @@ func TestUpdateFailedTask(t *testing.T) {
 		task.CallAfter(func(string, error, bool) {
 			defer wg.Done()
 		})
+		// handler always fails
 		return errors.New("test")
 	}
 	_ = srv.Start(HandlerFunc(handler))
@@ -1507,7 +1508,7 @@ func TestUpdateFailedTask(t *testing.T) {
 	ctx.FlushDB()
 	{
 		//
-		// call 'failed', then success after task execution
+		// update task after execution 'failed'
 		//
 		const taskID = "custom_id"
 		task := NewTask("foo", nil)
@@ -1519,7 +1520,7 @@ func TestUpdateFailedTask(t *testing.T) {
 			Retention(time.Hour * 2),
 			Deadline(deadline),
 			TaskID(taskID),
-			MaxRetry(0),
+			MaxRetry(0), // no retry: task will be archived
 		}
 		eti, err := client.Enqueue(task, opts...)
 		if err != nil {
@@ -1529,7 +1530,7 @@ func TestUpdateFailedTask(t *testing.T) {
 		ah := srv.AsynchronousHandler()
 		ti, _, err := ah.UpdateTask(eti.Queue, eti.ID, []byte("azerty"))
 		if err != nil {
-			t.Fatalf("Failed failed: %v", err)
+			t.Fatalf("UpdateTask failed: %v", err)
 		}
 
 		assertTask := func(ti *TaskInfo, result string) {
@@ -1548,8 +1549,174 @@ func TestUpdateFailedTask(t *testing.T) {
 
 		ti, _, err = ah.UpdateTask(eti.Queue, eti.ID, []byte("qwerty"))
 		if err != nil {
-			t.Fatalf("Succeeded failed: %v", err)
+			t.Fatalf("UpdateTask failed: %v", err)
 		}
 		assertTask(ti, "qwerty")
 	}
+}
+
+func TestActiveTask_TransitionToQueue(t *testing.T) {
+	const (
+		customId         = "customId"
+		asynchronousType = "asynchronous"
+		regularType      = "regular"
+		transitionType   = "transition"
+	)
+	queues := map[string]string{
+		regularType:      "regular",
+		transitionType:   "transition",
+		asynchronousType: "asynchronous",
+	}
+
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	srv := newServer(client.rdb, Config{
+		Concurrency: 1,
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
+			return time.Second
+		}),
+		Queues: &QueuesConfig{
+			Queues: map[string]int{
+				queues[regularType]:      1,
+				queues[transitionType]:   1,
+				queues[asynchronousType]: 1,
+			},
+			Priority: Lenient,
+		},
+		LogLevel: testLogLevel,
+	})
+	defer func() {
+		srv.Shutdown()
+		_ = client.Close()
+	}()
+
+	wg := sync.WaitGroup{}
+	handler := func(ctx context.Context, task *Task) error {
+		srv.logger.Info("task handler, type: " + task.Type())
+		switch task.Type() {
+		case regularType:
+			_, err := task.AsyncProcessor().TransitionToQueue(
+				queues[transitionType],
+				transitionType,
+				Retention(time.Hour),
+			)
+			return err
+		case transitionType:
+			task.CallAfter(func(string, error, bool) {
+				defer wg.Done()
+			})
+			return nil
+		case asynchronousType:
+			go func() {
+				err := task.AsyncProcessor().TaskTransition(
+					queues[transitionType],
+					transitionType,
+					Retention(time.Hour),
+				)
+				require.NoError(t, err)
+			}()
+			return AsynchronousTask
+		default:
+		}
+		return errors.New("unexpected task type: " + task.Type())
+	}
+	_ = srv.Start(HandlerFunc(handler))
+
+	inspect, err := NewInspectorClient(client)
+	require.NoError(t, err)
+
+	for _, taskType := range []string{regularType, asynchronousType} {
+		ctx.FlushDB()
+		wg.Add(1)
+		_, err := client.Enqueue(NewTask(taskType, nil,
+			TaskID(customId),
+			Queue(queues[taskType])))
+		require.NoError(t, err)
+
+		wg.Wait()
+		ti, err := inspect.GetTaskInfo(queues[transitionType], customId)
+		require.NoError(t, err)
+		require.Equal(t, TaskStateCompleted, ti.State)
+	}
+
+}
+
+func TestMoveCompletedTask_ToQueue(t *testing.T) {
+	const (
+		customId = "customId"
+	)
+
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	srv := newServer(client.rdb, Config{
+		Concurrency: 1,
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
+			return time.Second
+		}),
+		LogLevel: testLogLevel,
+		Queues: &QueuesConfig{
+			Queues: map[string]int{
+				"default":   1,
+				"new_queue": 1,
+			},
+			Priority: Lenient,
+		},
+	})
+	defer func() {
+		srv.Shutdown()
+		_ = client.Close()
+	}()
+
+	var task *Task
+	wg := sync.WaitGroup{}
+	handler := func(ctx context.Context, t *Task) error {
+		t.CallAfter(func(string, error, bool) {
+			defer wg.Done()
+		})
+		task = t
+		return nil
+	}
+	_ = srv.Start(HandlerFunc(handler))
+
+	inspect, err := NewInspectorClient(client)
+	require.NoError(t, err)
+
+	ctx.FlushDB()
+	wg.Add(1)
+	_, err = client.Enqueue(NewTask("test", nil,
+		TaskID(customId),
+		Retention(time.Hour)))
+	require.NoError(t, err)
+	wg.Wait()
+
+	ti, err := inspect.GetTaskInfo("default", customId)
+	require.NoError(t, err)
+	require.Equal(t, TaskStateCompleted, ti.State)
+
+	_, err = task.AsyncProcessor().TransitionToQueue("new_queue", "new_type")
+	// error: rqlite.moveToQueue - rqlite error: context canceled, at: rqlite.(*Connection).moveToQueue (tasks.go:1089)
+	// if context is not canceled:
+	// next: rqlite.moveToQueue: FAILED_PRECONDITION: cannot move to new queue an already completed task.
+	require.Error(t, err)
+
+	wg.Add(1)
+	ah := srv.AsynchronousHandler()
+	ti, err = ah.RequeueCompleted(
+		context.Background(),
+		"default",
+		customId,
+		"new_queue",
+		"new_type",
+		Retention(time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, TaskStatePending, ti.State)
+	wg.Wait()
+
+	ti, err = inspect.GetTaskInfo("new_queue", customId)
+	require.NoError(t, err)
+	require.Equal(t, TaskStateCompleted, ti.State)
 }

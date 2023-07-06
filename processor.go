@@ -7,7 +7,6 @@ package asynq
 import (
 	"context"
 	"fmt"
-	"github.com/hibiken/asynq/internal/rdb"
 	"reflect"
 	"runtime"
 	"runtime/debug"
@@ -19,6 +18,7 @@ import (
 	asynqcontext "github.com/hibiken/asynq/internal/context"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
+	"github.com/hibiken/asynq/internal/rdb"
 	"golang.org/x/time/rate"
 )
 
@@ -41,15 +41,15 @@ var TaskTransitionDone = errors.New("task transitioned to another queue")
 var TaskTransitionAlreadyDone = errors.New("asyncProcessor already done")
 
 type AsynchronousHandler interface {
-	// UpdateTask updates the task in the given queue with the given data and
-	// returns the corresponding task info and the actual deadline of the task
+	// UpdateTask updates the task in the given queue and id with the given data.
+	// It returns the corresponding task info and the actual deadline of the task
 	// or an error if the operation failed.
 	UpdateTask(queueName, taskId string, data []byte) (*TaskInfo, time.Time, error)
 
-	// MoveToQueue moves the task with the given taskId in the given queue to target queue.
+	// RequeueCompleted moves the completed task with the given taskId in the given queue to the target queue.
 	// The task is enqueued or scheduled with the given 'typeName' task type and the given options.
-	// This call will fail if the task is in active state.
-	MoveToQueue(queue, taskId, targetQueue, typeName string, opts ...Option) (*TaskInfo, error)
+	// This call fails if the task is not in completed state.
+	RequeueCompleted(ctx context.Context, queue, taskId, targetQueue, typeName string, opts ...Option) (*TaskInfo, error)
 }
 
 type processor struct {
@@ -284,6 +284,7 @@ func (p *processor) exec() {
 
 			rw := &ResultWriter{id: msg.ID, qname: msg.Queue, broker: p.broker, ctx: ctx}
 			ap := &asyncProcessor{
+				ctx:       ctx,
 				msg:       msg,
 				processor: p,
 				resCh:     resCh,
@@ -670,7 +671,7 @@ func (p *processor) perform(ctx context.Context, task *Task) (err error) {
 	return p.handler.ProcessTask(ctx, task)
 }
 
-func (p *processor) moveToQueue(msg *base.TaskMessage, newQueue, typename string, active bool, opts ...Option) (*TaskInfo, error) {
+func (p *processor) moveToQueue(ctx context.Context, msg *base.TaskMessage, newQueue, typename string, active bool, opts ...Option) (*TaskInfo, error) {
 	newQueue = strings.TrimSpace(newQueue)
 	if newQueue == "" {
 		return nil, errors.New("queue name cannot be empty")
@@ -734,7 +735,7 @@ func (p *processor) moveToQueue(msg *base.TaskMessage, newQueue, typename string
 		}
 	}
 
-	state, err := p.broker.MoveToQueue(msg.Queue, newMsg, processAt, active)
+	state, err := p.broker.MoveToQueue(ctx, msg.Queue, newMsg, processAt, active)
 	if err != nil {
 		return nil, err
 	}
@@ -780,16 +781,16 @@ func (a *asynchronousHandler) updateTask(queueName, taskId string, data []byte) 
 	return ti, deadline, nil
 }
 
-// MoveToQueue moves the task with the given taskId in the given queue to target queue.
+// RequeueCompleted moves the completed task with the given taskId in the given queue to the target queue.
 // The task is enqueued or scheduled with the given task type and options.
-// This call will fail if the task is in active state.
-func (a *asynchronousHandler) MoveToQueue(queue, taskId, targetQueue, typeName string, opts ...Option) (*TaskInfo, error) {
-	ti, err := a.p.broker.Inspector().GetTaskInfo(queue, taskId)
+// This call fails if the task is not in completed state.
+func (a *asynchronousHandler) RequeueCompleted(ctx context.Context, fromQueue, taskId, toQueue, typeName string, opts ...Option) (*TaskInfo, error) {
+	ti, err := a.p.broker.Inspector().GetTaskInfo(fromQueue, taskId)
 	if err != nil {
 		return nil, err
 	}
 
-	ret, err := a.p.moveToQueue(ti.Message, targetQueue, typeName, false, opts...)
+	ret, err := a.p.moveToQueue(ctx, ti.Message, toQueue, typeName, false, opts...)
 	if err != nil {
 		return nil, err
 	}

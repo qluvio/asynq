@@ -292,6 +292,6 @@ func (tb *TestBroker) ScheduleUniqueBatch(ctx context.Context, msgs ...*base.Mes
 	return tb.real.ScheduleUniqueBatch(ctx, msgs...)
 }
 
-func (tb *TestBroker) MoveToQueue(fromQueue string, msg *base.TaskMessage, processAt time.Time, active bool) (base.TaskState, error) {
-	return tb.real.MoveToQueue(fromQueue, msg, processAt, active)
+func (tb *TestBroker) MoveToQueue(ctx context.Context, fromQueue string, msg *base.TaskMessage, processAt time.Time, active bool) (base.TaskState, error) {
+	return tb.real.MoveToQueue(ctx, fromQueue, msg, processAt, active)
 }

@@ -2637,7 +2637,7 @@ func TestWriteResult(t *testing.T) {
 
 func TestUpdateTask(t *testing.T) {
 	r := setup(t)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	t1 := &base.TaskMessage{
 		ID:      uuid.NewString(),

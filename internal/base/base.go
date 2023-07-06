@@ -768,9 +768,9 @@ type Broker interface {
 	// UpdateTask updates the result data of the given task and returns the updated task info and its actual deadline
 	UpdateTask(qname, id string, data []byte) (*TaskInfo, time.Time, error)
 	// MoveToQueue moves the given task from fromQueue to its new queue.
-	// When active is true, the moved task must be in active state, otherwise it must not be active.
+	// When active is true, the moved task must be in active state, otherwise it must be completed.
 	// The returned state is either scheduled or pending
-	MoveToQueue(fromQueue string, msg *TaskMessage, processAt time.Time, active bool) (TaskState, error)
+	MoveToQueue(ctx context.Context, fromQueue string, msg *TaskMessage, processAt time.Time, active bool) (TaskState, error)
 	// Close closes the connection with the store server.
 	Close() error
 	// ListServers returns the list of server info.

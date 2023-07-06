@@ -66,14 +66,18 @@ func (conn *Connection) deleteCompletedTasks(queue string) (int64, error) {
 	return wrs[0].RowsAffected, nil
 }
 
-func (conn *Connection) deleteCompletedTask(queue string, taskid string) (int64, error) {
-	op := errors.Op("rqlite.deleteTask")
-
-	st := Statement(
+func (conn *Connection) deleteCompletedStatement(queue string, taskid string) *sqlite3.Statement {
+	return Statement(
 		"DELETE FROM "+conn.table(CompletedTasksTable)+
 			" WHERE queue_name=? AND task_uuid=? ",
 		queue,
 		taskid)
+}
+
+func (conn *Connection) deleteCompletedTask(queue string, taskid string) (int64, error) {
+	op := errors.Op("rqlite.deleteTask")
+
+	st := conn.deleteCompletedStatement(queue, taskid)
 	wrs, err := conn.WriteStmt(conn.ctx(), st)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
