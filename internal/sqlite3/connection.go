@@ -2,10 +2,13 @@ package sqlite3
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/hibiken/asynq/internal/log"
 	"github.com/hibiken/asynq/internal/sqlite3/command"
 	"github.com/hibiken/asynq/internal/sqlite3/db"
 	"github.com/hibiken/asynq/internal/sqlite3/encoding"
@@ -16,12 +19,16 @@ type SQLiteConnection struct {
 	mu        sync.Mutex // protect db
 	db        *db.DB     // the actual connection
 	retryBusy bool       // retry 'execute' on sqlite3.ErrBusy error: 'database is locked'
+	logger    log.Base   // logger
+	tracing   bool       // true to trace requests
 }
 
-func NewSQLiteConnection(db *db.DB, retryBusy bool) *SQLiteConnection {
+func NewSQLiteConnection(db *db.DB, retryBusy bool, logger log.Base) *SQLiteConnection {
 	ret := &SQLiteConnection{
 		db:        db,
 		retryBusy: retryBusy,
+		logger:    logger,
+		tracing:   true,
 	}
 	return ret
 }
@@ -56,8 +63,13 @@ func newRequest(stmts []*Statement) *command.Request {
 }
 
 func (c *SQLiteConnection) QueryContext(ctx context.Context, req *command.Request, xTime bool) ([]*command.QueryRows, error) {
+	t0 := time.Now()
 	// no lock: db uses a 'read' connection
-	return c.db.QueryContext(ctx, req, xTime)
+	rs, err := c.db.QueryContext(ctx, req, xTime)
+	if c.tracing {
+		c.trace("QueryContext", req, 1, t0, err, rs)
+	}
+	return rs, err
 }
 
 func (c *SQLiteConnection) QueryStmt(ctx context.Context, stmts ...*Statement) ([]QueryResult, error) {
@@ -80,12 +92,13 @@ func (c *SQLiteConnection) QueryStmt(ctx context.Context, stmts ...*Statement) (
 }
 
 func (c *SQLiteConnection) ExecuteContext(ctx context.Context, req *command.Request, xTime bool) ([]*command.ExecuteResult, error) {
+	// take initial time before lock
+	t0 := time.Now()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	attempt := 0
-	// uncomment for troubleshooting
-	//t0 := time.Now()
 
 	// We are protected by taking the lock for concurrent calls using this
 	// connection, but not against concurrent calls made with another connection.
@@ -110,10 +123,9 @@ func (c *SQLiteConnection) ExecuteContext(ctx context.Context, req *command.Requ
 			time.Sleep(time.Millisecond * 5)
 			continue
 		}
-		// uncomment for troubleshooting
-		//if attempt > 1 {
-		//	fmt.Println("ExecuteContext", "attempt", attempt, "d", time.Now().Sub(t0), "err", err)
-		//}
+		if c.tracing {
+			c.trace("ExecuteContext", req, attempt, t0, err, wrs)
+		}
 		return wrs, err
 	}
 }
@@ -141,12 +153,13 @@ func (c *SQLiteConnection) WriteStmt(ctx context.Context, stmts ...*Statement) (
 }
 
 func (c *SQLiteConnection) RequestContext(ctx context.Context, req *command.Request, xTime bool) ([]*command.ExecuteQueryResponse, error) {
+	// take initial time before lock
+	t0 := time.Now()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	attempt := 0
-	// uncomment for troubleshooting
-	//t0 := time.Now()
 
 	// We are protected by taking the lock for concurrent calls using this
 	// connection, but not against concurrent calls made with another connection.
@@ -171,10 +184,9 @@ func (c *SQLiteConnection) RequestContext(ctx context.Context, req *command.Requ
 			time.Sleep(time.Millisecond * 5)
 			continue
 		}
-		// uncomment for troubleshooting
-		//if attempt > 1 {
-		//	fmt.Println("ExecuteContext", "attempt", attempt, "d", time.Now().Sub(t0), "err", err)
-		//}
+		if c.tracing {
+			c.trace("RequestContext", req, attempt, t0, err, eqrs)
+		}
 		return eqrs, err
 	}
 }
@@ -226,4 +238,56 @@ func (c *SQLiteConnection) RequestStmt(ctx context.Context, stmts ...*Statement)
 	}
 
 	return ret, nil
+}
+
+func (c *SQLiteConnection) trace(op string, req *command.Request, attempt int, t0 time.Time, err error, res interface{}) {
+	sb := strings.Builder{}
+	sb.WriteString(fmt.Sprintf("%s attempt: %d, duration: %v, err: %v \n",
+		op,
+		attempt,
+		time.Now().Sub(t0),
+		err))
+
+	sql := func(s *command.Statement) string {
+		ret := s.Sql
+		if len(ret) > 200 {
+			ret = ret[0:200] + "..."
+		}
+		return ret
+	}
+	duration := func(secs float64) time.Duration {
+		// execution duration are a floating point number of seconds.
+		return time.Duration(secs * float64(time.Second))
+	}
+
+	switch rs := res.(type) {
+	case []*command.QueryRows:
+		for i, wr := range rs {
+			sb.WriteString(fmt.Sprintf("exec time: %v, sql: %v", duration(wr.Time), sql(req.Statements[i])))
+			if i < len(rs)-1 {
+				sb.WriteString("\n")
+			}
+		}
+	case []*command.ExecuteResult:
+		for i, wr := range rs {
+			sb.WriteString(fmt.Sprintf("exec time: %v, sql: %v", duration(wr.Time), sql(req.Statements[i])))
+			if i < len(rs)-1 {
+				sb.WriteString("\n")
+			}
+		}
+	case []*command.ExecuteQueryResponse:
+		for i, wr := range rs {
+			var d float64
+			if wr.GetQ() != nil {
+				d = wr.GetQ().Time
+			} else {
+				d = wr.GetE().Time
+			}
+			sb.WriteString(fmt.Sprintf("exec time: %v, sql: %v", duration(d), sql(req.Statements[i])))
+			if i < len(rs)-1 {
+				sb.WriteString("\n")
+			}
+		}
+	}
+	c.logger.Debug(sb.String())
 }

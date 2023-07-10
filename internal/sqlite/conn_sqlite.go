@@ -6,11 +6,12 @@ import (
 	"context"
 
 	"github.com/hibiken/asynq/internal/errors"
+	"github.com/hibiken/asynq/internal/log"
 	"github.com/hibiken/asynq/internal/sqlite3"
 	"github.com/hibiken/asynq/internal/sqlite3/db"
 )
 
-func NewSQLiteConnection(ctx context.Context, dbPath string, inMemory bool) (*sqlite3.SQLiteConnection, error) {
+func NewSQLiteConnection(ctx context.Context, dbPath string, inMemory bool, logger log.Base) (*sqlite3.SQLiteConnection, error) {
 	op := errors.Op("NewSQLiteConnection")
 
 	var err error
@@ -24,5 +25,5 @@ func NewSQLiteConnection(ctx context.Context, dbPath string, inMemory bool) (*sq
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}
-	return sqlite3.NewSQLiteConnection(conn, true), nil
+	return sqlite3.NewSQLiteConnection(conn, true, logger), nil
 }

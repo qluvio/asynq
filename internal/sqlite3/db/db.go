@@ -138,6 +138,7 @@ func Open(dbPath string, fkEnabled bool) (*DB, error) {
 func OpenContext(ctx context.Context, dbPath string, fkEnabled bool) (*DB, error) {
 	rwOpts := []string{
 		"_txlock=immediate",
+		//"_journal_mode=WAL",
 		fmt.Sprintf("_fk=%s", strconv.FormatBool(fkEnabled)),
 	}
 	rwDSN := fmt.Sprintf("file:%s?%s", dbPath, strings.Join(rwOpts, "&"))

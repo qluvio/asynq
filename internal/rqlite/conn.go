@@ -39,7 +39,7 @@ func newConnection(ctx context.Context, config *Config, httpClient *http.Client,
 	case rqliteType:
 		conn, err = NewRQLiteConnection(ctx, config, httpClient, logger)
 	case sqliteType:
-		conn, err = NewSQLiteConnection(ctx, config)
+		conn, err = NewSQLiteConnection(ctx, config, logger)
 	}
 	if err != nil {
 		return nil, err
