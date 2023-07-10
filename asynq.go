@@ -300,7 +300,7 @@ func (w *ResultWriter) TaskID() string {
 // - Only the first TaskCompleted/TaskFailed/TaskTransition call will update the task status; all subsequent calls will
 // have no effect and return an error.
 //
-// MoveToQueue can be used from the worker goroutine (synchronous tasks).
+// TransitionToQueue can be used from the worker goroutine (synchronous tasks).
 // It returns a TaskTransitionDone error that should be used as result of execution.
 type AsyncProcessor interface {
 	// TaskCompleted indicates that the task has completed successfully.
@@ -320,6 +320,7 @@ type AsyncProcessor interface {
 	// - the task is either in pending or scheduled state in newQueue.
 	// - the function returns the new state AND error TaskTransitionDone
 	// otherwise it returns zero and the error.
+	// The returned error should always be returned as the result of the task execution.
 	TransitionToQueue(newQueue, typename string, opts ...Option) (TaskState, error)
 }
 
