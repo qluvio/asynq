@@ -202,7 +202,7 @@ func buildTables(allTables map[string]TableCtor, tablesPrefix string) map[string
 
 	// config may use 'prefix_'
 	if strings.HasSuffix(tablesPrefix, "_") {
-		tablesPrefix = tablesPrefix[1:]
+		tablesPrefix = tablesPrefix[:len(tablesPrefix)-1]
 	}
 
 	for name, ctor := range allTables {
