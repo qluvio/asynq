@@ -32,6 +32,7 @@ func (c *RqliteConfig) make() *rqlite.Config {
 	ret.Type = c.Type
 	ret.SqliteDbPath = c.SqliteDbPath
 	ret.SqliteInMemory = c.SqliteInMemory
+	ret.SqliteTracing = c.SqliteTracing
 	ret.RqliteUrl = c.RqliteUrl
 	if len(c.ConsistencyLevel) > 0 {
 		ret.ConsistencyLevel = c.ConsistencyLevel
