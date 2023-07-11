@@ -57,12 +57,12 @@ const (
 	pending_since           integer 
 )`
 
-	CompletedTasksTable          = "completed_asynq_tasks"
+	CompletedTasksTable          = "asynq_completed_tasks"
 	CreateCompletedTasksTableFmt = `CREATE TABLE IF NOT EXISTS %s (
 	ndx                     integer not null primary key,
 	queue_name              text not null,
 	type_name               text not null,
-	task_uuid               text not null,
+	task_uuid               text not null unique,
 	task_msg                text,
 	deadline                integer,
 	done_at                 integer,

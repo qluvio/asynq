@@ -12,6 +12,7 @@ type RqliteConfig struct {
 	Type                  string        `json:"type"`                        // rqlite | sqlite
 	SqliteDbPath          string        `json:"db_path,omitempty"`           // sqlite: DB path
 	SqliteInMemory        bool          `json:"sqlite_in_memory,omitempty"`  // sqlite: true to use in-memory DB
+	SqliteTracing         bool          `json:"sqlite_tracing,omitempty"`    // sqlite: true to trace sql requests execution
 	RqliteUrl             string        `json:"rqlite_url,omitempty"`        // Rqlite server url, e.g. http://localhost:4001.
 	ConsistencyLevel      string        `json:"consistency_level,omitempty"` // consistency level: none | weak| strong
 	TablesPrefix          string        `json:"tables_prefix,omitempty"`     // tables prefix

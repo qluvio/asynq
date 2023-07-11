@@ -585,6 +585,61 @@ func TestClientEnqueueWithConflictingTaskID(t *testing.T) {
 	}
 }
 
+func TestClientEnqueueConflictingWithCompleted(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	const (
+		initialTask = "initialTask"
+		customId    = "customId"
+		queueName   = "queueName"
+	)
+
+	client := NewClient(getClientConnOpt(t))
+	inspector := newInspector(client.rdb)
+	srv := newServer(client.rdb, Config{
+		Concurrency: 1,
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
+			return time.Second
+		}),
+		LogLevel: testLogLevel, //DebugLevel,
+		Queues: &QueuesConfig{Queues: map[string]int{
+			queueName: 1,
+		}},
+	})
+	defer func() {
+		srv.Shutdown()
+		_ = client.Close()
+	}()
+
+	wg := sync.WaitGroup{}
+	handler := func(ctx context.Context, task *Task) error {
+		if task.Type() == initialTask {
+			task.CallAfter(func(string, error, bool) {
+				defer wg.Done()
+			})
+		}
+		return nil
+	}
+	_ = srv.Start(HandlerFunc(handler))
+
+	wg.Add(1)
+	opts := []Option{Retention(time.Hour), TaskID(customId), Queue(queueName)}
+	task1 := NewTask(initialTask, nil)
+	_, err := client.Enqueue(task1, opts...)
+	require.NoError(t, err)
+	wg.Wait()
+
+	// use a different task type just to not use the wait group
+	task2 := NewTask("nextTask", nil)
+	_, err = client.Enqueue(task2, opts...)
+	require.True(t, errors.Is(err, ErrTaskIDConflict))
+
+	ti, err := inspector.GetTaskInfo(queueName, customId)
+	require.NoError(t, err)
+	require.Equal(t, TaskStateCompleted, ti.State)
+}
+
 func TestClientEnqueueTaskIDConflictingWithCompleted(t *testing.T) {
 	ctx := setupTestContext(t)
 	defer func() { _ = ctx.Close() }()

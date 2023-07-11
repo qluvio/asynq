@@ -193,8 +193,9 @@ func (conn *Connection) setTaskCompleted(now time.Time, serverID string, msg *ba
 		st = Statement(
 			"INSERT INTO "+conn.table(CompletedTasksTable)+
 				" (ndx, deadline, result, queue_name, type_name, task_uuid, task_msg, done_at, retain_until, sid) "+
-				" SELECT ndx, deadline, result, ?, ?, ?, ?, ?, ?, ? FROM "+conn.table(TasksTable)+
-				" WHERE task_uuid=? AND state='active'",
+				" SELECT ndx, deadline, result, ?, ?, ?, ?, ?, ?, ? "+
+				"   FROM "+conn.table(TasksTable)+
+				"   WHERE task_uuid=? AND state='active' ",
 			msg.Queue,
 			msg.Type,
 			msg.ID,
@@ -207,8 +208,9 @@ func (conn *Connection) setTaskCompleted(now time.Time, serverID string, msg *ba
 		st = Statement(
 			"INSERT INTO "+conn.table(CompletedTasksTable)+
 				" (ndx, deadline, result, queue_name, type_name, task_uuid, task_msg, done_at, retain_until) "+
-				" SELECT ndx, deadline, result, ?, ?, ?, ?, ?, ? FROM "+conn.table(TasksTable)+
-				" WHERE task_uuid=? AND state='active'",
+				" SELECT ndx, deadline, result, ?, ?, ?, ?, ?, ? "+
+				"   FROM "+conn.table(TasksTable)+
+				"   WHERE task_uuid=? AND state='active' ",
 			msg.Queue,
 			msg.Type,
 			msg.ID,

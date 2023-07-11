@@ -23,12 +23,12 @@ type SQLiteConnection struct {
 	tracing   bool       // true to trace requests
 }
 
-func NewSQLiteConnection(db *db.DB, retryBusy bool, logger log.Base) *SQLiteConnection {
+func NewSQLiteConnection(db *db.DB, retryBusy bool, logger log.Base, tracing bool) *SQLiteConnection {
 	ret := &SQLiteConnection{
 		db:        db,
 		retryBusy: retryBusy,
 		logger:    logger,
-		tracing:   true,
+		tracing:   tracing,
 	}
 	return ret
 }

@@ -274,8 +274,12 @@ func (conn *Connection) getTaskInfo(now time.Time, qname string, taskid string) 
 	// fall back to completed if not found
 	ret, err2 := conn.getCompletedTaskInfo(now, qname, taskid)
 	if err2 != nil {
-		// return the initial 'not found' error
-		return nil, errors.E(op, errors.Internal, err)
+		if errors.IsTaskNotFound(err2) {
+			// return the initial 'not found' error
+			return nil, errors.E(op, errors.Internal, err)
+		}
+		// last error is more exotic: return it
+		return nil, errors.E(op, errors.Internal, err2)
 	}
 	return ret, nil
 }

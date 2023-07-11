@@ -2048,6 +2048,48 @@ func TestDeleteExpiredCompletedTasks(t *testing.T) {
 	}
 }
 
+func TestMarkCompletedTasks(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	now := time.Unix(1674591000, 0)
+	r.MockNow(now)
+
+	hourAgo := now.Add(-time.Hour)
+	taskType1 := "task1"
+	queue1 := "default"
+	t1 := newCompletedTask(queue1, taskType1, nil, hourAgo)
+	completed := map[string][]base.Z{
+		"default": {
+			{Message: t1, Score: hourAgo.Unix()},
+		},
+	}
+
+	FlushDB(t, r.conn)
+	SeedAllCompletedQueues(t, r, completed)
+
+	ti, err := r.conn.getTaskInfo(r.Now(), queue1, t1.ID)
+	require.NoError(t, err)
+	require.Equal(t, base.TaskStateCompleted, ti.State)
+	ri, err := r.conn.getCompletedTask(queue1, t1.ID)
+	require.NoError(t, err)
+	require.Equal(t, "", ri.sid)
+
+	now = now.Add(time.Hour)
+	msg2 := &base.TaskMessage{
+		ID:       t1.ID,
+		Type:     taskType1,
+		Queue:    queue1,
+		Retry:    25,
+		Payload:  nil,
+		Timeout:  1800,
+		Deadline: 0,
+	}
+
+	err = r.conn.setTaskCompleted(now, "sid2", msg2)
+	require.Error(t, err)
+}
+
 func TestListDeadlineExceeded(t *testing.T) {
 	t1 := h.NewTaskMessageWithQueue("task1", nil, "default")
 	t2 := h.NewTaskMessageWithQueue("task2", nil, "default")
