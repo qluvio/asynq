@@ -58,8 +58,9 @@ type processor struct {
 
 	// sema is a counting semaphore to ensure the number of active workers
 	// does not exceed the limit.
-	sema   chan struct{}
-	qsemas map[string]chan struct{} // queue string -> chan
+	sema        chan struct{}
+	qsemas      map[string]chan struct{} // queue string -> chan
+	concurrency int
 
 	// channel to communicate back to the long running "processor" goroutine.
 	// once is used to send value to the channel only once.
@@ -129,13 +130,6 @@ type processorResult struct {
 
 // newProcessor constructs a new processor.
 func newProcessor(params processorParams) *processor {
-	qsemas := make(map[string]chan struct{})
-	for q, c := range params.queues.Concurrencies() {
-		if c <= 0 {
-			c = params.concurrency
-		}
-		qsemas[q] = make(chan struct{}, c)
-	}
 	abortNow := make(chan struct{})
 	return &processor{
 		logger:          params.logger,
@@ -149,7 +143,8 @@ func newProcessor(params processorParams) *processor {
 		afterTasks:      params.afterTasks,
 		errLogLimiter:   rate.NewLimiter(rate.Every(3*time.Second), 1),
 		sema:            make(chan struct{}, params.concurrency),
-		qsemas:          qsemas,
+		qsemas:          make(map[string]chan struct{}),
+		concurrency:     params.concurrency,
 		done:            make(chan struct{}),
 		quit:            make(chan struct{}),
 		abort:           make(chan struct{}),
@@ -237,54 +232,35 @@ func (p *processor) exec() {
 		return
 	case p.sema <- struct{}{}: // acquire token
 		// Only attempt to dequeue a task from queues that are under their respective concurrency limits
-		qnames := []string{}
-		qsemas := make(map[string]chan struct{})
-		for _, qn := range p.queues.Names() {
-			qs := p.qsemas[qn]
-			select {
-			case qs <- struct{}{}: // acquire queue token
-				qnames = append(qnames, qn)
-				qsemas[qn] = qs
-			default:
-				continue
-			}
-		}
+		qnames, qsemas := p.acquireQSemas()
 		t := time.Now()
 		msg, deadline, err := p.broker.Dequeue(p.serverID, qnames...)
 		p.logger.Debugf("Dequeue [%s], qnames=%v, msg=%v, err=%v", time.Since(t).String(), qnames, msg, err)
 		switch {
 		case errors.Is(err, errors.ErrNoProcessableTask):
-			if p.lastEmptyQ.IsZero() || time.Since(p.lastEmptyQ) >= time.Minute {
-				p.lastEmptyQ = time.Now()
-				if p.firstEmptyQ.IsZero() {
-					p.firstEmptyQ = p.lastEmptyQ
-				}
-				p.logger.Debugf("All queues are empty and/or concurrency limits reached [%s]", time.Since(p.firstEmptyQ).String())
-			}
+			p.logEmptyQ()
 			// Queues are empty and/or concurrency limits reached, this is a normal behavior.
 			// Sleep to avoid slamming redis and let scheduler move tasks into queues.
 			// Note: We are not using blocking pop operation and polling queues instead.
 			// This adds significant load to redis.
 			time.Sleep(p.emptyQSleep)
-			releaseQSemas(qsemas, "") // release queue tokens
+			p.releaseQSemas(qsemas, "") // release queue tokens
 			<-p.sema                  // release token
 			return
 		case err != nil:
-			p.firstEmptyQ = time.Time{}
-			p.lastEmptyQ = time.Time{}
+			p.resetEmptyQ()
 			if p.errLogLimiter.Allow() {
 				p.logger.Errorf("Dequeue error: %v", err)
 			}
 			// also sleep, otherwise we create a busy loop until errors clear...
 			time.Sleep(p.emptyQSleep)
-			releaseQSemas(qsemas, "") // release queue tokens
+			p.releaseQSemas(qsemas, "") // release queue tokens
 			<-p.sema                  // release token
 			return
 		}
-		p.firstEmptyQ = time.Time{}
-		p.lastEmptyQ = time.Time{}
+		p.resetEmptyQ()
 		p.logger.Debugf("dequeued %s -> %v", msg.ID, deadline)
-		qsema := releaseQSemas(qsemas, msg.Queue) // release unused queue tokens
+		qsema := p.releaseQSemas(qsemas, msg.Queue) // release unused queue tokens
 
 		go func() {
 			p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
@@ -596,9 +572,40 @@ func (p *processor) perform(ctx context.Context, task *Task) (err error) {
 	return p.handler.ProcessTask(ctx, task)
 }
 
+func (p *processor) acquireQSemas() ([]string, map[string]chan struct{}) {
+	qnames := []string{}
+	qsemas := make(map[string]chan struct{})
+	for _, qn := range p.queues.Names() {
+		qs := p.qsemas[qn]
+		if qs == nil {
+			for q, c := range p.queues.Concurrencies() {
+				if p.qsemas[q] == nil {
+					if c <= 0 {
+						c = p.concurrency
+					}
+					p.qsemas[q] = make(chan struct{}, c)
+				}
+			}
+			qs = p.qsemas[qn]
+			if qs == nil {
+				// Should not happen; skip
+				continue
+			}
+		}
+		select {
+		case qs <- struct{}{}: // acquire queue token
+			qnames = append(qnames, qn)
+			qsemas[qn] = qs
+		default:
+			continue
+		}
+	}
+	return qnames, qsemas
+}
+
 // releaseQSemas releases the given queue tokens, except for the queue token associated with skipQueues, if specified.
 // Returns the qsema for the skipped queue
-func releaseQSemas(qsemas map[string]chan struct{}, skipQueue string) chan struct{} {
+func (p *processor) releaseQSemas(qsemas map[string]chan struct{}, skipQueue string) chan struct{} {
 	var ret chan struct{}
 	for qname, qsema := range qsemas {
 		if qname == skipQueue {
@@ -608,4 +615,19 @@ func releaseQSemas(qsemas map[string]chan struct{}, skipQueue string) chan struc
 		<-qsema
 	}
 	return ret
+}
+
+func (p *processor) logEmptyQ() {
+	if p.lastEmptyQ.IsZero() || time.Since(p.lastEmptyQ) >= time.Minute {
+		p.lastEmptyQ = time.Now()
+		if p.firstEmptyQ.IsZero() {
+			p.firstEmptyQ = p.lastEmptyQ
+		}
+		p.logger.Debugf("All queues are empty and/or concurrency limits reached [%s]", time.Since(p.firstEmptyQ).String())
+	}
+}
+
+func (p *processor) resetEmptyQ() {
+	p.firstEmptyQ = time.Time{}
+	p.lastEmptyQ = time.Time{}
 }

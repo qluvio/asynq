@@ -10,6 +10,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -669,15 +670,14 @@ func NewDeadlines(abort chan struct{}, size int) *Deadlines {
 	d := &Deadlines{update: make(chan deadline, size)}
 	go func() {
 		dls := []deadline{}
+		t := time.NewTimer(time.Hour) // dummy duration
+		defer stopTimer(t)
 		for {
 			if func() bool {
-				var c <-chan time.Time
 				if len(dls) == 0 {
-					c = make(chan time.Time) // dummy
+					stopTimer(t)
 				} else {
-					t := time.NewTimer(time.Until(dls[0].dl))
-					defer t.Stop()
-					c = t.C
+					resetTimer(t, time.Until(dls[0].dl))
 				}
 				select {
 				case <-abort:
@@ -688,7 +688,7 @@ func NewDeadlines(abort chan struct{}, size int) *Deadlines {
 					} else {
 						dls = removeDeadline(dls, dl)
 					}
-				case <-c:
+				case <-t.C:
 					dl := dls[0]
 					dls = removeDeadline(dls, dl)
 					dl.fn()
@@ -712,6 +712,20 @@ func (d *Deadlines) Delete(id string) {
 	d.update <- deadline{id: id, fn: nil}
 }
 
+func stopTimer(t *time.Timer) {
+	t.Stop()
+	// Drain timer channel, if needed
+	select {
+	case <-t.C:
+	default:
+	}
+}
+
+func resetTimer(t *time.Timer, d time.Duration) {
+	stopTimer(t)
+	t.Reset(d)
+}
+
 type deadline struct {
 	id string
 	dl time.Time
@@ -719,32 +733,24 @@ type deadline struct {
 }
 
 // insertDeadline inserts a deadline into a given sorted list of deadlines.
-func insertDeadline(dls []deadline, dl deadline) (res []deadline) {
-	if len(dls) == 0 {
-		res = append(dls, dl)
-	} else {
-		var i int
-		for i = 0; i < len(dls); i++ {
-			if dls[i].dl.After(dl.dl) {
-				break
-			}
-		}
-		res = append(dls, dl)
-		copy(res[i+1:], res[i:])
-		res[i] = dl
-	}
-	return
+func insertDeadline(dls []deadline, dl deadline) []deadline {
+	i := sort.Search(len(dls), func(i int) bool {
+		return dls[i].dl.After(dl.dl)
+	})
+	res := append(dls, dl)
+	copy(res[i+1:], res[i:])
+	res[i] = dl
+	return res
 }
 
 // removeDeadline removes a deadline (by ID) from a given sorted list of deadlines.
-func removeDeadline(dls []deadline, dl deadline) (res []deadline) {
+func removeDeadline(dls []deadline, dl deadline) []deadline {
 	for i, dl2 := range dls {
 		if dl2.id == dl.id {
-			res = append(dls[:i], dls[i+1:]...)
-			break
+			return append(dls[:i], dls[i+1:]...)
 		}
 	}
-	return
+	return dls
 }
 
 // Cancelations is a collection that holds cancel functions for all active tasks.
