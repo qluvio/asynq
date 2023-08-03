@@ -243,7 +243,7 @@ func (p *processor) exec() {
 			// This adds significant load to redis.
 			time.Sleep(p.emptyQSleep)
 			p.releaseQSemas(qsemas, "") // release queue tokens
-			<-p.sema                  // release token
+			<-p.sema                    // release token
 			return
 		case err != nil:
 			p.resetEmptyQ()
@@ -253,7 +253,7 @@ func (p *processor) exec() {
 			// also sleep, otherwise we create a busy loop until errors clear...
 			time.Sleep(p.emptyQSleep)
 			p.releaseQSemas(qsemas, "") // release queue tokens
-			<-p.sema                  // release token
+			<-p.sema                    // release token
 			return
 		}
 		p.resetEmptyQ()
