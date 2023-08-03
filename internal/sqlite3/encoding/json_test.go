@@ -110,13 +110,13 @@ func Test_MarshalQueryRowsError(t *testing.T) {
 	}
 
 	_, err = enc.JSONMarshal(r)
-	if err != ErrTypesColumnsLengthViolation {
+	if err != ErrTypesColumnsMismatch {
 		t.Fatalf("succeeded marshaling QueryRows: %s", err)
 	}
 
 	enc.Associative = true
 	_, err = enc.JSONMarshal(r)
-	if err != ErrTypesColumnsLengthViolation {
+	if err != ErrTypesColumnsMismatch {
 		t.Fatalf("succeeded marshaling QueryRows (associative): %s", err)
 	}
 }

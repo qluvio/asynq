@@ -9,8 +9,8 @@ import (
 )
 
 // Statement enables use of parameterized sql statement.
-// The constructor issues a warning if the number of parameters does not match
-// the count of ? in the query.
+// The Check func can be used to verify if the number of parameters matches the
+// count of ? in the query.
 // example:
 //
 //	x := NewStatement(
@@ -21,9 +21,9 @@ import (
 // Statement is structurally identical to *gorqlite.Statement in order to be
 // usable with the gorqlite library as well as the sqlite3 package.
 type Statement struct {
-	Query     string
-	Arguments []interface{}
-	Returning bool
+	Query     string        // SQL statement
+	Arguments []interface{} // arguments of the SQL statement
+	Returning bool          // must be true if the SQL statement includes a RETURNING clause
 }
 
 func NewStatement(sql string, params ...interface{}) *Statement {
@@ -38,7 +38,7 @@ func (s *Statement) WithReturning(b bool) *Statement {
 	return s
 }
 
-// Check returns an error is the count of parameters does not match the count of
+// Check returns an error if the count of parameters does not match the count of
 // '?' in the SQL string.
 func (s *Statement) Check() error {
 	paramsCount := strings.Count(s.Query, "?")
