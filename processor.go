@@ -233,9 +233,7 @@ func (p *processor) exec() {
 	case p.sema <- struct{}{}: // acquire token
 		// Only attempt to dequeue a task from queues that are under their respective concurrency limits
 		qnames, qsemas := p.acquireQSemas()
-		t := time.Now()
 		msg, deadline, err := p.broker.Dequeue(p.serverID, qnames...)
-		p.logger.Debugf("Dequeue [%s], qnames=%v, msg=%v, err=%v", time.Since(t).String(), qnames, msg, err)
 		switch {
 		case errors.Is(err, errors.ErrNoProcessableTask):
 			p.logEmptyQ()

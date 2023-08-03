@@ -288,9 +288,7 @@ func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessa
 	}
 
 	for _, qname := range qnames {
-		t := time.Now()
 		q, err := r.getQueue(qname)
-		r.logger.Debug(fmt.Sprintf("getQueue [%s], qname=%s, err=%v", time.Since(t).String(), qname, err))
 		if err != nil {
 			return nil, time.Time{}, errors.E(op, fmt.Sprintf("get queue error: %v", err))
 		}
@@ -299,9 +297,7 @@ func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessa
 		}
 
 		// here we would use dequeueMessage0 to perform dequeue in 2 steps
-		t = time.Now()
 		data, err := conn.dequeueMessage(r.Now(), serverID, qname)
-		r.logger.Debug(fmt.Sprintf("dequeueMessage [%s], qname=%s, err=%v", time.Since(t).String(), qname, err))
 		if err != nil {
 			return nil, time.Time{}, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
 		}
