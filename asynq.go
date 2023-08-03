@@ -280,9 +280,10 @@ func (w *ResultWriter) TaskID() string {
 // should not make these calls, as would normally be the case for asynchronous tasks.
 // Only the first TaskCompleted/TaskFailed call will update the task status; all subsequent calls will have no effect.
 type AsyncProcessor struct {
-	resCh chan error
-	mutex sync.Mutex
-	done  bool
+	results chan processorResult
+	task    *processorTask
+	done    bool
+	mutex   sync.Mutex
 }
 
 // TaskCompleted indicates that the task has completed successfully.
@@ -290,7 +291,7 @@ func (p *AsyncProcessor) TaskCompleted() {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	if !p.done {
-		p.resCh <- nil
+		p.results <- processorResult{task: p.task, err: nil}
 		p.done = true
 	}
 }
@@ -300,7 +301,7 @@ func (p *AsyncProcessor) TaskFailed(err error) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	if !p.done {
-		p.resCh <- err
+		p.results <- processorResult{task: p.task, err: err}
 		p.done = true
 	}
 }

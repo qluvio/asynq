@@ -152,12 +152,12 @@ func BenchmarkEndToEndMultipleQueues(b *testing.B) {
 		srv := newServer(client.rdb, Config{
 			Concurrency: 10,
 			Queues: (&QueuesConfig{
-				Queues: map[string]int{
+				Queues: map[string]interface{}{
 					"high":    6,
 					"default": 3,
 					"low":     1,
 				},
-			}).configure(),
+			}),
 			LogLevel: testLogLevel,
 		})
 		// Create a bunch of tasks

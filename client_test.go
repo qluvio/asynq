@@ -603,7 +603,7 @@ func TestClientEnqueueConflictingWithCompleted(t *testing.T) {
 			return time.Second
 		}),
 		LogLevel: testLogLevel, //DebugLevel,
-		Queues: &QueuesConfig{Queues: map[string]int{
+		Queues: &QueuesConfig{Queues: map[string]interface{}{
 			queueName: 1,
 		}},
 	})

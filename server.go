@@ -321,9 +321,6 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	n := cfg.Concurrency
 	if n < 1 {
 		n = runtime.NumCPU()
-	} else if n > 32767 {
-		// Concurrency currently limited due to processor constraints; see p.fini() in processor.go
-		panic(aserrors.E(aserrors.Op("newServer"), aserrors.FailedPrecondition, fmt.Errorf("asynq: concurrency must not be greater than 32767")))
 	}
 	if len(cfg.ServerID) == 0 {
 		cfg.ServerID = uuid.New().String()
@@ -385,9 +382,9 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	}
 	logger.SetLevel(toInternalLogLevel(loglevel))
 
-	starting := make(chan *workerInfo)
-	finished := make(chan *base.TaskMessage)
-	syncCh := make(chan *syncRequest)
+	starting := make(chan *workerInfo, n)
+	finished := make(chan *base.TaskMessage, n)
+	syncCh := make(chan *syncRequest, n)
 	state := base.NewServerState()
 	cancels := base.NewCancelations()
 	afterTasks := base.NewAfterTasks()
