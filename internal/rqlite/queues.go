@@ -88,11 +88,12 @@ func (conn *Connection) removeQueue(queue string, force bool) (int64, error) {
 
 	st := Statement(
 		"DELETE FROM "+conn.table(QueuesTable)+
-			" WHERE queue_name=? AND (SELECT COUNT(*) FROM "+conn.table(conn.table(TasksTable))+
+			" WHERE queue_name=? AND (SELECT COUNT(*) FROM "+conn.table(TasksTable)+
 			" WHERE "+conn.table(TasksTable)+".queue_name=?)=0",
 		queue,
 		queue)
 	if force {
+		// fail if there's still any active task
 		st = Statement(
 			"DELETE FROM "+conn.table(QueuesTable)+
 				" WHERE queue_name=? AND (SELECT COUNT(*) FROM "+conn.table(TasksTable)+
@@ -176,6 +177,10 @@ func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, 
 			selectTaskRow+
 				" FROM "+conn.table(TasksTable)+
 				" WHERE queue_name=? ", queue),
+		Statement(
+			"SELECT COUNT(*)"+
+				" FROM "+conn.table(CompletedTasksTable)+
+				" WHERE queue_name=? ", queue),
 		conn.queueDayStatsStatement(queue, now),
 	}
 
@@ -183,7 +188,7 @@ func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, 
 	if err != nil {
 		return nil, NewRqliteRsError(op, qrs, err, stmts)
 	}
-	err = expectQueryResultCount(op, 3, qrs)
+	err = expectQueryResultCount(op, 4, qrs)
 	if err != nil {
 		return nil, err
 	}
@@ -227,10 +232,20 @@ func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, 
 			}
 		}
 		ret.Latency = now.Sub(time.Unix(0, oldestPending))
+
+		if qrs[2].Next() {
+			completed := 0
+			err := qrs[2].Scan(&completed)
+			if err != nil {
+				return nil, err
+			}
+			ret.Completed += completed
+		}
+
 		// processed are not included in size
 		ret.Size = ret.Pending + ret.Active + ret.Scheduled + ret.Retry + ret.Archived + ret.Completed
 
-		ds, err := parseDailyStatsRow(qrs[2])
+		ds, err := parseDailyStatsRow(qrs[3])
 		ret.Processed = ds.Processed
 		ret.Failed = ds.Failed
 
@@ -251,10 +266,22 @@ func (conn *Connection) getTaskInfo(now time.Time, qname string, taskid string) 
 	var op errors.Op = "getTaskInfo"
 
 	tr, err := conn.getTask(qname, taskid)
-	if err != nil {
+	if err == nil {
+		return getTaskInfo(op, now, tr)
+	} else if !errors.IsTaskNotFound(err) {
 		return nil, errors.E(op, errors.Internal, err)
 	}
-	return getTaskInfo(op, now, tr)
+	// fall back to completed if not found
+	ret, err2 := conn.getCompletedTaskInfo(now, qname, taskid)
+	if err2 != nil {
+		if errors.IsTaskNotFound(err2) {
+			// return the initial 'not found' error
+			return nil, errors.E(op, errors.Internal, err)
+		}
+		// last error is more exotic: return it
+		return nil, errors.E(op, errors.Internal, err2)
+	}
+	return ret, nil
 }
 
 func getTaskInfo(op errors.Op, now time.Time, tr *taskRow) (*base.TaskInfo, error) {

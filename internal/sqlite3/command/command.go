@@ -65,6 +65,7 @@ func (x *Parameter) GetName() string {
 type Statement struct {
 	Sql        string       `json:"sql"`
 	Parameters []*Parameter `json:"parameters"`
+	Returning  bool         `json:"returning,omitempty"`
 }
 
 func (x *Statement) String() string {
@@ -263,20 +264,99 @@ func (x *ExecuteResult) GetTime() float64 {
 	return 0
 }
 
-type LoadRequest struct {
-	Data []byte `json:"data,omitempty"`
+type ExecuteQueryRequest struct {
+	Request   *Request `json:"request,omitempty"`
+	Timings   bool     `json:"timings,omitempty"`
+	Freshness int64    `json:"freshness,omitempty"`
 }
 
-func (x *LoadRequest) String() string {
+func (x *ExecuteQueryRequest) String() string {
 	return stringOf(x)
 }
 
-func (x *LoadRequest) GetData() []byte {
+func (x *ExecuteQueryRequest) GetRequest() *Request {
 	if x != nil {
-		return x.Data
+		return x.Request
 	}
 	return nil
 }
+
+func (x *ExecuteQueryRequest) GetTimings() bool {
+	if x != nil {
+		return x.Timings
+	}
+	return false
+}
+
+func (x *ExecuteQueryRequest) GetFreshness() int64 {
+	if x != nil {
+		return x.Freshness
+	}
+	return 0
+}
+
+type ExecuteQueryResponse struct {
+	// Types that are assignable to Result:
+	//
+	//	*ExecuteQueryResponse_Q
+	//	*ExecuteQueryResponse_E
+	//	*ExecuteQueryResponse_Error
+	Result isExecuteQueryResponse_Result `json:"result"`
+}
+
+func (x *ExecuteQueryResponse) String() string {
+	return stringOf(x)
+}
+
+func (x *ExecuteQueryResponse) GetResult() isExecuteQueryResponse_Result {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
+func (x *ExecuteQueryResponse) GetQ() *QueryRows {
+	if x, ok := x.GetResult().(*ExecuteQueryResponse_Q); ok {
+		return x.Q
+	}
+	return nil
+}
+
+func (x *ExecuteQueryResponse) GetE() *ExecuteResult {
+	if x, ok := x.GetResult().(*ExecuteQueryResponse_E); ok {
+		return x.E
+	}
+	return nil
+}
+
+func (x *ExecuteQueryResponse) GetError() string {
+	if x, ok := x.GetResult().(*ExecuteQueryResponse_Error); ok {
+		return x.Error
+	}
+	return ""
+}
+
+type isExecuteQueryResponse_Result interface {
+	isExecuteQueryResponse_Result()
+}
+
+type ExecuteQueryResponse_Q struct {
+	Q *QueryRows `json:"q"`
+}
+
+type ExecuteQueryResponse_E struct {
+	E *ExecuteResult `json:"e"`
+}
+
+type ExecuteQueryResponse_Error struct {
+	Error string `json:"error"`
+}
+
+func (*ExecuteQueryResponse_Q) isExecuteQueryResponse_Result() {}
+
+func (*ExecuteQueryResponse_E) isExecuteQueryResponse_Result() {}
+
+func (*ExecuteQueryResponse_Error) isExecuteQueryResponse_Result() {}
 
 type Noop struct {
 	Id string `json:"id,omitempty"`

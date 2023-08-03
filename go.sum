@@ -11,6 +11,8 @@ github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/r
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
 github.com/eluv-io/gorqlite v0.0.8 h1:Iyyb0GwHL5DWqh3wPQM8Xg7tCnpEO7HaRAUFL1+/F7g=
 github.com/eluv-io/gorqlite v0.0.8/go.mod h1:ATIskjaRe2Tb9iPH7FtZz31UqvB2RuVoRfVbtlVRXxU=
+github.com/eluv-io/gorqlite v0.0.9-0.20230619193649-0070c59c5978 h1:TATiLKIScRy5DysS7IL7F+qy+E4blTpDn1gTuCgGODU=
+github.com/eluv-io/gorqlite v0.0.9-0.20230619193649-0070c59c5978/go.mod h1:ATIskjaRe2Tb9iPH7FtZz31UqvB2RuVoRfVbtlVRXxU=
 github.com/envoyproxy/go-control-plane v0.9.1-0.20191026205805-5f8ba28d4473/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
 github.com/envoyproxy/protoc-gen-validate v0.1.0/go.mod h1:iSmxcyjqTsJpI2R4NaDN7+kN2VEUnK/pcBlmesArF7c=
 github.com/fsnotify/fsnotify v1.4.7/go.mod h1:jwhsz4b93w/PPRr/qN1Yymfu8t87LnFCMoQvtojpjFo=
@@ -60,8 +62,8 @@ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZN
 github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
 github.com/robfig/cron/v3 v3.0.1 h1:WdRxkvbJztn8LMz/QEvLN5sBU+xKpSqwwUO1Pjr4qDs=
 github.com/robfig/cron/v3 v3.0.1/go.mod h1:eQICP3HwyT7UooqI/z+Ov+PtYAWygg1TEWWzGIFLtro=
-github.com/rqlite/go-sqlite3 v1.27.1 h1:BZMF7lB7kflMgWbULsM8TpKHM9vzcINEknbe0YC6Ti0=
-github.com/rqlite/go-sqlite3 v1.27.1/go.mod h1:nd4ooHtz396nqTudi+5u7stMN8EEkHjceyUARVYOceY=
+github.com/rqlite/go-sqlite3 v1.28.0 h1:26JE7mUIAaY4SxeZgZyl5iK6gmYFbTFNKvcpIEfTT14=
+github.com/rqlite/go-sqlite3 v1.28.0/go.mod h1:nd4ooHtz396nqTudi+5u7stMN8EEkHjceyUARVYOceY=
 github.com/spf13/cast v1.3.1 h1:nFm6S0SMdyzrzcmThSipiEubIDy8WEXKNZ0UOgiRpng=
 github.com/spf13/cast v1.3.1/go.mod h1:Qx5cxh0v+4UWYiBimWS+eyWzqEqokIECu5etghLkUJE=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

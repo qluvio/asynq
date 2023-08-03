@@ -71,7 +71,11 @@ func setup(tb testing.TB) *RQLite {
 	})
 	if sqliteDbTemp {
 		tb.Cleanup(func() {
-			_ = os.Remove(config.SqliteDbPath)
+			if !tb.Failed() {
+				_ = os.Remove(config.SqliteDbPath)
+			} else {
+				fmt.Println("preserving sqlite DB at:", config.SqliteDbPath)
+			}
 		})
 	}
 

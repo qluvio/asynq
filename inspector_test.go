@@ -271,7 +271,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 	m5 := h.NewTaskMessageWithQueue("task5", nil, "critical")
 	m6 := h.NewTaskMessageWithQueue("task6", nil, "low")
 
-	now := time.Now()
+	now := time.Now().UTC()
 	timeCmpOpt := cmpopts.EquateApproxTime(time.Second)
 	ignoreMemUsg := cmpopts.IgnoreFields(QueueInfo{}, "MemoryUsage")
 
@@ -404,7 +404,7 @@ func TestInspectorHistory(t *testing.T) {
 		return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
 
 	tests := []struct {

@@ -2,25 +2,8 @@ package rqlite
 
 import (
 	"fmt"
-	"sort"
 	"strings"
-	"time"
-
-	"github.com/hibiken/asynq/internal/errors"
-	"github.com/hibiken/asynq/internal/sqlite3"
 )
-
-var AllTables = map[string]string{
-	QueuesTable:           CreateQueuesTableFmt,
-	TasksTable:            CreateTasksTableFmt,
-	ServersTable:          CreateServersTableFmt,
-	WorkersTable:          CreateWorkersTableFmt,
-	SchedulersTable:       CreateSchedulersTableFmt,
-	SchedulerHistoryTable: CreateSchedulerHistoryTableFmt,
-	CancellationTable:     CreateCancellationTableFmt,
-	VersionTable:          CreateVersionTableFmt,
-	StatsTable:            CreateStatsTableFmt,
-}
 
 const (
 	Version               = "1.0.0"
@@ -47,30 +30,45 @@ const (
 
 	TasksTable          = "asynq_tasks"
 	CreateTasksTableFmt = `CREATE TABLE IF NOT EXISTS %s (
-	ndx                    integer not null primary key,
-	queue_name             text not null,
-	type_name              text not null,
-	task_uuid              text not null unique,
-	unique_key             text not null unique, 
-	unique_key_deadline    integer,
-	task_msg               text,
-	task_timeout           integer,
-	task_deadline          integer,
-	pndx                   integer default 0,
-	state                  text not null,
-	scheduled_at           integer,
-	deadline               integer,
-	retry_at               integer,
-	done_at                integer,
-	failed                 boolean,
-	archived_at            integer,
-	cleanup_at             integer,
-	retain_until           integer,
-	sid                    text,
-	affinity_timeout       integer,
-	recurrent              boolean,
-	result                 text,
-	pending_since          integer 
+	ndx                     integer not null primary key AUTOINCREMENT,
+	queue_name              text not null,
+	type_name               text not null,
+	task_uuid               text not null unique,
+	unique_key              text not null unique, 
+	unique_key_deadline     integer,
+	task_msg                text,
+	task_timeout            integer,
+	task_deadline           integer,
+	server_affinity         integer,
+	pndx                    integer default 0,
+	state                   text not null,
+	scheduled_at            integer,
+	deadline                integer,
+	retry_at                integer,
+	done_at                 integer,
+	failed                  boolean,
+	archived_at             integer,
+	cleanup_at              integer,
+	retain_until            integer,
+	sid                     text,
+	affinity_timeout        integer,
+	recurrent               boolean,
+	result                  text,
+	pending_since           integer 
+)`
+
+	CompletedTasksTable          = "asynq_completed_tasks"
+	CreateCompletedTasksTableFmt = `CREATE TABLE IF NOT EXISTS %s (
+	ndx                     integer not null primary key,
+	queue_name              text not null,
+	type_name               text not null,
+	task_uuid               text not null unique,
+	task_msg                text,
+	deadline                integer,
+	done_at                 integer,
+	retain_until            integer,
+	sid                     text,
+	result                  text
 )`
 
 	ServersTable          = "asynq_servers"
@@ -121,47 +119,164 @@ const (
 )`
 )
 
-func (conn *Connection) buildTables() {
-	tables := make(map[string]string)
-	tableNames := make(map[string]string)
-	for table, ctorFmt := range AllTables {
-		t := conn.config.TablesPrefix + table
-		tables[t] = fmt.Sprintf(ctorFmt, t)
-		tableNames[table] = t
-	}
-	conn.tables = tables
-	conn.tableNames = tableNames
+type TableCtor struct {
+	NameFmt   string
+	CreateFmt string
+	Indexes   []IndexCtor
 }
 
-func (conn *Connection) AllTables() map[string]string {
+type IndexCtor struct {
+	NameFmt   string
+	CreateFmt string
+}
+
+var (
+	CreateTasksIndexesFmt = IndexCtor{
+		NameFmt:   "idx_%s_queue_and_state",
+		CreateFmt: `CREATE INDEX IF NOT EXISTS %s ON %s (queue_name,state);`,
+	}
+	CreateCompletedTasksQueueUuidIndexesFmt = IndexCtor{
+		NameFmt:   "idx_%s_queue_and_uuid",
+		CreateFmt: `CREATE INDEX IF NOT EXISTS %s ON %s (queue_name,task_uuid);`,
+	}
+	CreateCompletedTasksUuidIndexesFmt = IndexCtor{
+		NameFmt:   "idx_%s_uuid",
+		CreateFmt: `CREATE INDEX IF NOT EXISTS %s ON %s (task_uuid);`,
+	}
+	CreateCompletedTasksQueueRetainUntilIndexesFmt = IndexCtor{
+		NameFmt:   "idx_%s_queue_retain_until",
+		CreateFmt: `CREATE INDEX IF NOT EXISTS %s ON %s (queue_name,retain_until);`,
+	}
+
+	AllTables = map[string]TableCtor{
+		QueuesTable: {
+			NameFmt:   "%s_%s",
+			CreateFmt: CreateQueuesTableFmt,
+		},
+		TasksTable: {
+			NameFmt:   "%s_%s",
+			CreateFmt: CreateTasksTableFmt,
+			Indexes:   []IndexCtor{CreateTasksIndexesFmt},
+		},
+		CompletedTasksTable: {
+			NameFmt:   "%s_%s",
+			CreateFmt: CreateCompletedTasksTableFmt,
+			Indexes: []IndexCtor{
+				CreateCompletedTasksQueueUuidIndexesFmt,
+				CreateCompletedTasksUuidIndexesFmt,
+				CreateCompletedTasksQueueRetainUntilIndexesFmt,
+			},
+		},
+		ServersTable: {
+			NameFmt:   "%s_%s",
+			CreateFmt: CreateServersTableFmt,
+		},
+		WorkersTable: {
+			NameFmt:   "%s_%s",
+			CreateFmt: CreateWorkersTableFmt,
+		},
+		SchedulersTable: {
+			NameFmt:   "%s_%s",
+			CreateFmt: CreateSchedulersTableFmt,
+		},
+		SchedulerHistoryTable: {
+			NameFmt:   "%s_%s",
+			CreateFmt: CreateSchedulerHistoryTableFmt,
+		},
+		CancellationTable: {
+			NameFmt:   "%s_%s",
+			CreateFmt: CreateCancellationTableFmt,
+		},
+		VersionTable: {
+			NameFmt:   "%s_%s",
+			CreateFmt: CreateVersionTableFmt,
+		},
+		StatsTable: {
+			NameFmt:   "%s_%s",
+			CreateFmt: CreateStatsTableFmt,
+		},
+	}
+)
+
+type TableDef struct {
+	Name             string
+	CreateStmt       string
+	CreateIndexStmts []string
+}
+
+func buildTables(allTables map[string]TableCtor, tablesPrefix string) map[string]*TableDef {
+
+	ret := make(map[string]*TableDef)
+
+	// config may use 'prefix_'
+	if strings.HasSuffix(tablesPrefix, "_") {
+		tablesPrefix = tablesPrefix[:len(tablesPrefix)-1]
+	}
+
+	for name, ctor := range allTables {
+		tableName := fmt.Sprintf(ctor.NameFmt, tablesPrefix, name)
+		if strings.HasPrefix(tableName, "_") {
+			tableName = tableName[1:]
+		}
+		createTable := fmt.Sprintf(ctor.CreateFmt, tableName)
+		indexes := []string(nil)
+		for _, ndx := range ctor.Indexes {
+			indexName := fmt.Sprintf(ndx.NameFmt, tableName)
+			indexes = append(indexes, fmt.Sprintf(ndx.CreateFmt, indexName, tableName))
+		}
+
+		ret[name] = &TableDef{
+			Name:             tableName,
+			CreateStmt:       createTable,
+			CreateIndexStmts: indexes,
+		}
+	}
+
+	return ret
+}
+
+func (conn *Connection) buildTables() {
+	conn.tables = buildTables(AllTables, conn.config.TablesPrefix)
+}
+
+func (conn *Connection) AllTables() map[string]*TableDef {
 	return conn.tables
 }
 
 func (conn *Connection) table(name string) string {
-	return conn.tableNames[name]
+	t := conn.tables[name]
+	if t == nil {
+		return ""
+	}
+	return t.Name
 }
 
 // CreateTablesIfNotExist returns true if tables were created, false if they were not.
 func (conn *Connection) CreateTablesIfNotExist() (bool, error) {
-	op := errors.Op("CreateTablesIfNotExist")
 
-	get := Statement("SELECT COUNT(*) FROM " + conn.table(VersionTable))
-	qrs, err := conn.QueryStmt(conn.ctx(), get)
-	if err != nil {
-		if len(qrs) == 0 {
-			return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
-		}
-		if qrs[0].Err() == nil || !strings.Contains(qrs[0].Err().Error(), "no such table:") {
-			return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
-		}
-	}
-	if len(qrs) == 0 {
-		return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, nil, []*sqlite3.Statement{get}))
-	}
-	if qrs[0].NumRows() > 0 {
-		return false, nil
-	}
-	err = conn.CreateTables()
+	//
+	// commented until a migration strategy is in place
+	//
+
+	//op := errors.Op("CreateTablesIfNotExist")
+
+	//get := Statement("SELECT COUNT(*) FROM " + conn.table(VersionTable))
+	//qrs, err := conn.QueryStmt(conn.ctx(), get)
+	//if err != nil {
+	//	if len(qrs) == 0 {
+	//		return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
+	//	}
+	//	if qrs[0].Err() == nil || !strings.Contains(qrs[0].Err().Error(), "no such table:") {
+	//		return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, err, []*sqlite3.Statement{get}))
+	//	}
+	//}
+	//if len(qrs) == 0 {
+	//	return false, errors.E(op, errors.Internal, NewRqliteRsError(op, qrs, nil, []*sqlite3.Statement{get}))
+	//}
+	//if qrs[0].NumRows() > 0 {
+	//	return false, nil
+	//}
+	err := conn.CreateTables()
 	if err != nil {
 		return false, err
 	}
@@ -169,52 +284,19 @@ func (conn *Connection) CreateTablesIfNotExist() (bool, error) {
 }
 
 func (conn *Connection) CreateTables() error {
-	stmts := make([]*sqlite3.Statement, 0)
-	tables := make([]string, 0)
-	for _, stmt := range conn.AllTables() {
-		tables = append(tables, stmt)
-	}
-	sort.Strings(tables)
-	for _, stmt := range tables {
-		stmts = append(stmts, Statement(stmt))
-	}
+	return conn.createTables(conn.AllTables())
+}
 
-	verStmt := fmt.Sprintf(InsertVersionStmtFmt, conn.table(VersionTable))
-	stmts = append(stmts, Statement(verStmt, Version, time.Now().Unix()))
-	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
-	if err != nil {
-		return NewRqliteWsError("CreateTables", wrs, err, stmts)
-	}
-
-	return nil
+func (conn *Connection) CreateIndexes() error {
+	return conn.createIndexes(conn.AllTables())
 }
 
 // DropTables deletes all the tables.
 func (conn *Connection) DropTables() error {
-	stmts := make([]*sqlite3.Statement, 0)
-	for table := range conn.AllTables() {
-		stmts = append(stmts, Statement("DROP TABLE IF EXISTS "+table))
-	}
-	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
-	if err != nil {
-		return NewRqliteWsError("PurgeTables", wrs, err, stmts)
-	}
-	return nil
+	return conn.dropTables(conn.AllTables())
 }
 
 // PurgeTables purges data from all tables, except the version table.
 func (conn *Connection) PurgeTables() error {
-	stmts := make([]*sqlite3.Statement, 0)
-	verTable := conn.table(VersionTable)
-	for table := range conn.AllTables() {
-		if table == verTable {
-			continue
-		}
-		stmts = append(stmts, Statement(fmt.Sprintf("DELETE FROM '%s' ", table)))
-	}
-	wrs, err := conn.WriteStmt(conn.ctx(), stmts...)
-	if err != nil {
-		return NewRqliteWsError("PurgeTables", wrs, err, stmts)
-	}
-	return nil
+	return conn.purgeTables(conn.AllTables(), VersionTable)
 }

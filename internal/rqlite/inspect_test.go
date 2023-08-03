@@ -64,6 +64,7 @@ func TestCurrentStats(t *testing.T) {
 	m4 := h.NewTaskMessage("sync", nil)
 	m5 := h.NewTaskMessageWithQueue("important_notification", nil, "critical")
 	m6 := h.NewTaskMessageWithQueue("minor_notification", nil, "low")
+	m7 := h.NewTaskMessageWithQueue("notification", nil, "default")
 	now := r.Now()
 
 	tests := []struct {
@@ -109,7 +110,9 @@ func TestCurrentStats(t *testing.T) {
 				"low":      {},
 			},
 			completed: map[string][]base.Z{
-				"default":  {},
+				"default": {
+					{Message: m7, Score: now.Add(time.Hour).Unix()},
+				},
 				"critical": {},
 				"low":      {},
 			},
@@ -128,14 +131,14 @@ func TestCurrentStats(t *testing.T) {
 			want: &base.Stats{
 				Queue:     "default",
 				Paused:    false,
-				Size:      4,
+				Size:      5,
 				Pending:   1,
 				Active:    1,
 				Scheduled: 2,
 				Retry:     0,
 				Archived:  0,
-				Completed: 0,
-				Processed: 122, // the redis test says 120 (but due to the way the test is inited) the doc says processed include failed!
+				Completed: 1,
+				Processed: 123, // the redis test says 120 (but due to the way the test is inited) the doc says processed include failed!
 				Failed:    2,
 				Timestamp: now,
 			},
@@ -366,9 +369,10 @@ func TestGetTaskInfo(t *testing.T) {
 	SeedAllScheduledQueues(t, r, fixtures.scheduled)
 	SeedAllRetryQueues(t, r, fixtures.retry)
 	SeedAllArchivedQueues(t, r, fixtures.archived)
-	SeedAllCompletedQueues(t, r, fixtures.completed)
-	_, err := r.conn.writeTaskResult(m6.Queue, m6.ID, []byte("foobar"), false)
-	require.NoError(t, err)
+	SeedAllCompletedQueues(t, r, fixtures.completed, func(id string) error {
+		_, err := r.conn.writeTaskResult(m6.Queue, m6.ID, []byte("foobar"), false)
+		return err
+	})
 
 	tests := []struct {
 		qname string
@@ -3545,6 +3549,68 @@ func newCompletedTaskMessage(qname, typename string, retention time.Duration, co
 	msg.Retention = int64(retention.Seconds())
 	msg.CompletedAt = completedAt.Unix()
 	return msg
+}
+
+func TestDeleteCompletedTask(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+
+	now := time.Now()
+	m1 := newCompletedTaskMessage("default", "task1", 30*time.Minute, now.Add(-2*time.Minute))
+	m2 := newCompletedTaskMessage("default", "task2", 30*time.Minute, now.Add(-5*time.Minute))
+	m3 := newCompletedTaskMessage("custom", "task3", 30*time.Minute, now.Add(-5*time.Minute))
+
+	completed := map[string][]base.Z{
+		"default": {
+			{Message: m1, Score: m1.CompletedAt + m1.Retention},
+			{Message: m2, Score: m2.CompletedAt + m2.Retention},
+		},
+		"custom": {
+			{Message: m3, Score: m3.CompletedAt + m3.Retention},
+		},
+	}
+	SeedAllCompletedQueues(t, r, completed)
+
+	err := r.DeleteTask(m1.Queue, m1.ID)
+	if err != nil {
+		t.Errorf("r.DeleteTask(%s,%s) returned error: %v", m1.Queue, m1.ID, err)
+	}
+	tasksInfo, err := r.ListCompleted("default", base.Pagination{
+		Size: 20,
+	})
+	if err != nil {
+		t.Errorf("r.ListCompleted returned error: %v", err)
+	}
+	if len(tasksInfo) != 1 {
+		t.Errorf("r.ListCompleted expected count 1, got: %d", len(tasksInfo))
+	}
+	if tasksInfo[0].Message.ID != m2.ID {
+		t.Errorf("r.ListCompleted expected count ID, got: %s", tasksInfo[0].Message.ID)
+	}
+
+	err = r.DeleteTask(m2.Queue, m2.ID)
+	if err != nil {
+		t.Errorf("r.DeleteTask returned error: %v", err)
+	}
+	tasksInfo, err = r.ListCompleted("default", base.Pagination{
+		Size: 20,
+	})
+	if err != nil || len(tasksInfo) != 0 {
+		t.Errorf("r.ListCompleted returned unexpected: error: %v, len(tasks): %d", err, len(tasksInfo))
+	}
+
+	tasksInfo, err = r.ListCompleted("custom", base.Pagination{
+		Size: 20,
+	})
+	if err != nil {
+		t.Errorf("r.ListCompleted returned error: %v", err)
+	}
+	if len(tasksInfo) != 1 {
+		t.Errorf("r.ListCompleted expected count 1, got: %d", len(tasksInfo))
+	}
+	if tasksInfo[0].Message.ID != m3.ID {
+		t.Errorf("r.ListCompleted expected count ID, got: %s", tasksInfo[0].Message.ID)
+	}
 }
 
 func TestDeleteAllCompletedTasks(t *testing.T) {

@@ -9,7 +9,7 @@ type ErrorMux struct {
 
 func NewErrorMux(defaultHandler ErrorHandler) *ErrorMux {
 	def := noErrorHandler
-	if defaultHandler != nil {
+	if !IsNil(defaultHandler) {
 		def = func() ErrorHandler { return defaultHandler }
 	}
 	return &ErrorMux{

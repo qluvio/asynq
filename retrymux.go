@@ -11,7 +11,7 @@ type RetryMux struct {
 
 func NewRetryMux(defaultRetry RetryDelayHandler) *RetryMux {
 	def := noRetryHandler
-	if defaultRetry != nil {
+	if !IsNil(defaultRetry) {
 		def = func() RetryDelayHandler { return defaultRetry }
 	}
 	return &RetryMux{

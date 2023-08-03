@@ -58,6 +58,11 @@ func (c *RQLiteConnection) WriteStmt(ctx context.Context, stmts ...*sqlite3.Stat
 	return fromRQWriteResults(wrs), err
 }
 
+func (c *RQLiteConnection) RequestStmt(ctx context.Context, stmts ...*sqlite3.Statement) ([]sqlite3.RequestResult, error) {
+	rrs, err := c.conn.RequestStmt(ctx, Statements(stmts).Rqlite()...)
+	return fromRQRequestResults(rrs), err
+}
+
 // statements
 
 func toRqlite(s *sqlite3.Statement) *gorqlite.Statement {
@@ -76,6 +81,24 @@ func (s Statements) Rqlite() []*gorqlite.Statement {
 	ret := make([]*gorqlite.Statement, 0, len(s))
 	for _, st := range s {
 		ret = append(ret, toRqlite(st))
+	}
+	return ret
+}
+
+// request
+
+func fromRQRequestResult(wr gorqlite.RequestResult) sqlite3.RequestResult {
+	return sqlite3.RequestResult{
+		Err:   wr.Err,
+		Write: fromRQWriteResult(wr.Write),
+		Query: fromRQQueryResult(wr.Query),
+	}
+}
+
+func fromRQRequestResults(rrs []gorqlite.RequestResult) []sqlite3.RequestResult {
+	ret := make([]sqlite3.RequestResult, 0, len(rrs))
+	for _, rr := range rrs {
+		ret = append(ret, fromRQRequestResult(rr))
 	}
 	return ret
 }
