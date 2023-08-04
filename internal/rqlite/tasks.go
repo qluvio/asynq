@@ -1393,7 +1393,6 @@ func (conn *Connection) scheduleTasks(ctx context.Context, msgs ...*base.Message
 		if err != nil {
 			return err
 		}
-
 		stmts = append(stmts, st)
 	}
 
@@ -1564,7 +1563,6 @@ func (conn *Connection) scheduleUniqueTasks(ctx context.Context, now time.Time, 
 		if err != nil {
 			return err
 		}
-
 		stmts = append(stmts, st)
 	}
 

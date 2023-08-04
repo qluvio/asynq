@@ -10,12 +10,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
+	"go.uber.org/atomic"
 )
 
 func TestTaskKey(t *testing.T) {
@@ -571,6 +573,130 @@ func TestStatusConcurrentAccess(t *testing.T) {
 	}()
 
 	wg.Wait()
+}
+
+func testDeadlinesToString(dls []deadline) string {
+	res := "[ "
+	for _, dl := range dls {
+		res += fmt.Sprintf("{ %s %d %v } ", dl.id, dl.dl.Unix(), dl.fn)
+	}
+	res += "]"
+	return res
+}
+
+func TestInsertDeadline(t *testing.T) {
+	now := time.Now()
+	dl := func(n int) deadline {
+		return deadline{strconv.Itoa(n), now.Add(time.Second * time.Duration(n)), nil}
+	}
+	dls := []deadline{
+		dl(2),
+		dl(4),
+		dl(8),
+	}
+
+	dls = insertDeadline(dls, dl(1))
+	if len(dls) != 4 || dls[0].id != "1" || dls[1].id != "2" || dls[2].id != "4" || dls[3].id != "8" {
+		t.Errorf("insertDeadline did not insert correctly, dls = %s", testDeadlinesToString(dls))
+		return
+	}
+
+	dls = insertDeadline(dls, dl(16))
+	if len(dls) != 5 || dls[0].id != "1" || dls[1].id != "2" || dls[2].id != "4" || dls[3].id != "8" || dls[4].id != "16" {
+		t.Errorf("insertDeadline did not insert correctly, dls = %s", testDeadlinesToString(dls))
+		return
+	}
+
+	dls = insertDeadline(dls, dl(5))
+	if len(dls) != 6 || dls[0].id != "1" || dls[1].id != "2" || dls[2].id != "4" || dls[3].id != "5" || dls[4].id != "8" || dls[5].id != "16" {
+		t.Errorf("insertDeadline did not insert correctly, dls = %s", testDeadlinesToString(dls))
+		return
+	}
+}
+
+func TestRemoveDeadline(t *testing.T) {
+	now := time.Now()
+	dl := func(n int) deadline {
+		return deadline{strconv.Itoa(n), now.Add(time.Second * time.Duration(n)), nil}
+	}
+	dls := []deadline{
+		dl(1),
+		dl(2),
+		dl(4),
+		dl(8),
+		dl(16),
+		dl(32),
+	}
+
+	dls = removeDeadline(dls, dl(1))
+	if len(dls) != 5 || dls[0].id != "2" || dls[1].id != "4" || dls[2].id != "8" || dls[3].id != "16" || dls[4].id != "32" {
+		t.Errorf("removeDeadline did not remove correctly, dls = %s", testDeadlinesToString(dls))
+		return
+	}
+
+	dls = removeDeadline(dls, dl(32))
+	if len(dls) != 4 || dls[0].id != "2" || dls[1].id != "4" || dls[2].id != "8" || dls[3].id != "16" {
+		t.Errorf("removeDeadline did not remove correctly, dls = %s", testDeadlinesToString(dls))
+		return
+	}
+
+	dls = removeDeadline(dls, dl(8))
+	if len(dls) != 3 || dls[0].id != "2" || dls[1].id != "4" || dls[2].id != "16" {
+		t.Errorf("removeDeadline did not remove correctly, dls = %s", testDeadlinesToString(dls))
+		return
+	}
+
+	dls = removeDeadline(dls, dl(4))
+	if len(dls) != 2 || dls[0].id != "2" || dls[1].id != "16" {
+		t.Errorf("removeDeadline did not remove correctly, dls = %s", testDeadlinesToString(dls))
+		return
+	}
+}
+
+// Test for deadlines being accessed by multiple goroutines.
+// Run with -race flag to check for data race.
+func TestDeadlinesConcurrentAccess(t *testing.T) {
+	abort := make(chan struct{})
+	defer func() {
+		close(abort)
+	}()
+	d := NewDeadlines(abort, 1024)
+
+	n := atomic.NewInt32(0)
+	var deadline1, deadline2, deadline3 = time.Now().Add(time.Second), time.Now().Add(time.Second * 2), time.Now().Add(time.Second * 3)
+	var cancel1, cancel2, cancel3 = func() { n.Add(1) }, func() { n.Add(2) }, func() { n.Add(4) }
+	var key1, key2, key3 = "key1", "key2", "key3"
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.Add(key1, deadline1, cancel1)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.Add(key2, deadline2, cancel2)
+		time.Sleep(200 * time.Millisecond)
+		d.Delete(key2)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.Add(key3, deadline3, cancel3)
+	}()
+
+	wg.Wait()
+
+	time.Sleep(time.Second * 10)
+
+	x := n.Load()
+	if x != 5 {
+		t.Errorf("Deadlines did not execute correctly, n = %d", x)
+	}
 }
 
 // Test for cancelations being accessed by multiple goroutines.

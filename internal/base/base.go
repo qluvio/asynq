@@ -10,6 +10,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -656,9 +657,106 @@ func DecodeSchedulerEnqueueEvent(b []byte) (*SchedulerEnqueueEvent, error) {
 	}, nil
 }
 
+// Deadlines is a collection that holds deadlines for all active tasks.
+// When a deadline is reached, the associated cancel function is executed.
+// Assumes that deadlines have unique IDs and will not be added multiples times.
+//
+// Deadlines is safe for concurrent use by multiple goroutines.
+type Deadlines struct {
+	update chan deadline
+}
+
+// NewDeadlines returns a Deadlines instance.
+func NewDeadlines(abort chan struct{}, size int) *Deadlines {
+	d := &Deadlines{update: make(chan deadline, size)}
+	go func() {
+		dls := []deadline{}
+		t := time.NewTimer(time.Hour) // dummy duration
+		defer stopTimer(t)
+		for {
+			if func() bool {
+				if len(dls) == 0 {
+					stopTimer(t)
+				} else {
+					resetTimer(t, time.Until(dls[0].dl))
+				}
+				select {
+				case <-abort:
+					return true
+				case dl := <-d.update:
+					if dl.fn != nil {
+						dls = insertDeadline(dls, dl)
+					} else {
+						dls = removeDeadline(dls, dl)
+					}
+				case <-t.C:
+					dl := dls[0]
+					dls = removeDeadline(dls, dl)
+					dl.fn()
+				}
+				return false
+			}() {
+				return
+			}
+		}
+	}()
+	return d
+}
+
+// Add adds a new cancel func to the collection.
+func (d *Deadlines) Add(id string, dl time.Time, fn context.CancelFunc) {
+	d.update <- deadline{id: id, dl: dl, fn: fn}
+}
+
+// Delete deletes a cancel func from the collection given an id.
+func (d *Deadlines) Delete(id string) {
+	d.update <- deadline{id: id, fn: nil}
+}
+
+func stopTimer(t *time.Timer) {
+	t.Stop()
+	// Drain timer channel, if needed
+	select {
+	case <-t.C:
+	default:
+	}
+}
+
+func resetTimer(t *time.Timer, d time.Duration) {
+	stopTimer(t)
+	t.Reset(d)
+}
+
+type deadline struct {
+	id string
+	dl time.Time
+	fn context.CancelFunc
+}
+
+// insertDeadline inserts a deadline into a given sorted list of deadlines.
+func insertDeadline(dls []deadline, dl deadline) []deadline {
+	i := sort.Search(len(dls), func(i int) bool {
+		return dls[i].dl.After(dl.dl)
+	})
+	res := append(dls, dl)
+	copy(res[i+1:], res[i:])
+	res[i] = dl
+	return res
+}
+
+// removeDeadline removes a deadline (by ID) from a given sorted list of deadlines.
+func removeDeadline(dls []deadline, dl deadline) []deadline {
+	for i, dl2 := range dls {
+		if dl2.id == dl.id {
+			return append(dls[:i], dls[i+1:]...)
+		}
+	}
+	return dls
+}
+
 // Cancelations is a collection that holds cancel functions for all active tasks.
 //
-// Cancelations are safe for concurrent use by multiple goroutines.
+// Cancelations is safe for concurrent use by multiple goroutines.
 type Cancelations struct {
 	mu          sync.Mutex
 	cancelFuncs map[string]context.CancelFunc

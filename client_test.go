@@ -603,7 +603,7 @@ func TestClientEnqueueConflictingWithCompleted(t *testing.T) {
 			return time.Second
 		}),
 		LogLevel: testLogLevel, //DebugLevel,
-		Queues: &QueuesConfig{Queues: map[string]int{
+		Queues: &QueuesConfig{Queues: map[string]interface{}{
 			queueName: 1,
 		}},
 	})
@@ -1578,7 +1578,7 @@ func TestActiveTask_TransitionToQueue(t *testing.T) {
 			return time.Second
 		}),
 		Queues: &QueuesConfig{
-			Queues: map[string]int{
+			Queues: map[string]interface{}{
 				queues[regularType]:      1,
 				queues[transitionType]:   1,
 				queues[asynchronousType]: 1,
@@ -1659,7 +1659,7 @@ func TestMoveCompletedTask_ToQueue(t *testing.T) {
 		}),
 		LogLevel: testLogLevel,
 		Queues: &QueuesConfig{
-			Queues: map[string]int{
+			Queues: map[string]interface{}{
 				"default":   1,
 				"new_queue": 1,
 			},

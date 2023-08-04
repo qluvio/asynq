@@ -10,9 +10,9 @@ import (
 )
 
 var (
-	// ErrTypesColumnsLengthViolation is returned when a results
+	// ErrTypesColumnsMismatch is returned when a results
 	// object doesn't have the same number of types and columns
-	ErrTypesColumnsLengthViolation = errors.New("types and columns are different lengths")
+	ErrTypesColumnsMismatch = errors.New("number of types differs from columns")
 )
 
 // Result represents the outcome of an operation that changes rows.
@@ -32,7 +32,33 @@ type Rows struct {
 	Time    float64         `json:"time,omitempty"`
 }
 
-// AssociativeRows represents the outcome of an operation that returns query data.
+// AssociativeRows represents the outcome of an operation that returns query data
+// similar to Rows with the difference that:
+//   - in Rows, rows and types are slices that must be accessed with the same index
+//   - in AssociativeRows, Types map colum names to type, and each row in Rows maps
+//     a column name to a value.
+//
+// Example:
+//
+//		q := &command.QueryRows{
+//			Columns: []string{"col1", "col2"},
+//			Types:   []string{"string", "int"},
+//			Values: []*command.Values{
+//				{Parameters: []*command.Parameter{
+//					{Value: "bob", Name: ""},
+//					{Value: 23, Name: ""},
+//				}},
+//			},
+//		}
+//	  - as Rows: {
+//	    "columns": [  "col1",   "col2" ],
+//	    "types":   [  "string", "int" ],
+//	    "values": [[  "bob",    23    ]]
+//	    }
+//	  - as AssociativeRows: {
+//	    "types": { "col1": "string", "col2": "int" },
+//	    "rows": [{ "col1": "bob",    "col2": 23 }]
+//	    }
 type AssociativeRows struct {
 	Types map[string]string        `json:"types,omitempty"`
 	Rows  []map[string]interface{} `json:"rows"`
@@ -41,7 +67,7 @@ type AssociativeRows struct {
 }
 
 // ResultWithRows represents the outcome of an operation that changes rows, but also
-// includes an nil rows object, so clients can distinguish between a query and execute
+// includes a nil rows object, so clients can distinguish between a query and execute
 // result.
 type ResultWithRows struct {
 	Result
@@ -95,7 +121,7 @@ func NewResultFromExecuteResult(e *command.ExecuteResult) (*Result, error) {
 // NewRowsFromQueryRows returns an API Rows object from a QueryRows
 func NewRowsFromQueryRows(q *command.QueryRows) (*Rows, error) {
 	if len(q.Columns) != len(q.Types) {
-		return nil, ErrTypesColumnsLengthViolation
+		return nil, ErrTypesColumnsMismatch
 	}
 
 	values := make([][]interface{}, len(q.Values))
@@ -114,7 +140,7 @@ func NewRowsFromQueryRows(q *command.QueryRows) (*Rows, error) {
 // NewAssociativeRowsFromQueryRows returns an associative API object from a QueryRows
 func NewAssociativeRowsFromQueryRows(q *command.QueryRows) (*AssociativeRows, error) {
 	if len(q.Columns) != len(q.Types) {
-		return nil, ErrTypesColumnsLengthViolation
+		return nil, ErrTypesColumnsMismatch
 	}
 
 	values := make([][]interface{}, len(q.Values))

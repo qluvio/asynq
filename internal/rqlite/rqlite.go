@@ -288,7 +288,6 @@ func (r *RQLite) Dequeue(serverID string, qnames ...string) (*base.TaskInfo, err
 	}
 
 	for _, qname := range qnames {
-
 		q, err := r.getQueue(qname)
 		if err != nil {
 			return nil, errors.E(op, fmt.Sprintf("get queue error: %v", err))

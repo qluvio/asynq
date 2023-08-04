@@ -163,6 +163,12 @@ if [[ "${run_sqlite}" == "true" ]]; then
     if [[ ${PIPESTATUS[0]} != 0 ]]; then
         ret=1
     fi
+    go test ${debug_flags} $flags -tags "$tags" $short -count=1 ./internal/sqlite3/... 2>&1 |
+        tee "$out" |
+        grep -av "?.*\[no test files\]"
+    if [[ ${PIPESTATUS[0]} != 0 ]]; then
+        ret=1
+    fi
     go test ${debug_flags} $flags -tags "$tags" $short -count=1 . --broker_type sqlite ${sqlite_in_memory} 2>&1 |
         tee "$out" |
         grep -av "?.*\[no test files\]"

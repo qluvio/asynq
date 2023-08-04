@@ -298,29 +298,39 @@ func (w *ResultWriter) TaskID() string {
 // - TaskCompleted/TaskFailed/TaskTransition will block until the task worker goroutine returns; this means that the worker
 // goroutine should not make these calls, as would normally be the case for asynchronous tasks.
 // - Only the first TaskCompleted/TaskFailed/TaskTransition call will update the task status; all subsequent calls will
-// have no effect and return an error.
+// have no effect and return a TaskTransitionAlreadyDone error.
 //
 // TransitionToQueue can be used from the worker goroutine (synchronous tasks).
 // It returns a TaskTransitionDone error that should be used as result of execution.
 type AsyncProcessor interface {
 	// TaskCompleted indicates that the task has completed successfully.
+	//
 	// The returned error is nil or TaskTransitionAlreadyDone
 	TaskCompleted() error
 
 	// TaskFailed indicates that the task has failed, with the given error.
+	//
 	// The returned error is nil or TaskTransitionAlreadyDone
 	TaskFailed(err error) error
 
-	// TaskTransition moves the task to a new queue and send a TaskTransitionDone as a result of execution.
+	// TaskTransition indicates that the task has completed successfully and
+	// moves the task to a new queue. Internally, the asynq processor is notified
+	// via a TaskTransitionDone as the result of execution.
+	//
 	// The returned error is nil or TaskTransitionAlreadyDone
 	TaskTransition(newQueue, typename string, opts ...Option) error
 
 	// TransitionToQueue moves the executing 'active' task to a new queue.
+	// TransitionToQueue has the same effect as TaskTransition but does not notify
+	// the processor of the termination of the task and therefore, after a call to
+	// TransitionToQueue, the caller still has to call one of the TaskXX functions.
+	// It is recommended to return the error returned by TransitionToQueue as the
+	// result of the task execution.
+	//
 	// After a successful call:
 	// - the task is either in pending or scheduled state in newQueue.
 	// - the function returns the new state AND error TaskTransitionDone
 	// otherwise it returns zero and the error.
-	// The returned error should always be returned as the result of the task execution.
 	TransitionToQueue(newQueue, typename string, opts ...Option) (TaskState, error)
 }
 
@@ -356,10 +366,9 @@ var _ AsyncProcessor = (*asyncProcessor)(nil)
 // Only the first TaskCompleted/TaskFailed/TaskTransition call will update the task status; all subsequent calls will
 // have no effect and return an error.
 type asyncProcessor struct {
-	ctx       context.Context
-	msg       *base.TaskMessage
+	task      *processorTask
 	processor *processor
-	resCh     chan error
+	results   chan processorResult
 	mutex     sync.Mutex
 	done      bool
 }
@@ -369,7 +378,7 @@ func (p *asyncProcessor) TaskCompleted() error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	if !p.done {
-		p.resCh <- nil
+		p.results <- processorResult{task: p.task, err: nil}
 		p.done = true
 		return nil
 	}
@@ -381,7 +390,7 @@ func (p *asyncProcessor) TaskFailed(err error) error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	if !p.done {
-		p.resCh <- err
+		p.results <- processorResult{task: p.task, err: err}
 		p.done = true
 		return nil
 	}
@@ -399,7 +408,7 @@ func (p *asyncProcessor) TaskTransition(newQueue, typename string, opts ...Optio
 		if err != nil && err != TaskTransitionDone {
 			return err
 		}
-		p.resCh <- TaskTransitionDone
+		p.results <- processorResult{task: p.task, err: TaskTransitionDone}
 		p.done = true
 		return nil
 	}
@@ -412,7 +421,7 @@ func (p *asyncProcessor) TaskTransition(newQueue, typename string, opts ...Optio
 // When successful, the function returns the new state AND error TaskTransitionDone
 // otherwise it returns zero and the error.
 func (p *asyncProcessor) TransitionToQueue(newQueue, typename string, opts ...Option) (TaskState, error) {
-	ret, err := p.processor.moveToQueue(p.ctx, p.msg, newQueue, typename, true, opts...)
+	ret, err := p.processor.moveToQueue(p.task.ctx, p.task.msg, newQueue, typename, true, opts...)
 	if err != nil {
 		return 0, err
 	}

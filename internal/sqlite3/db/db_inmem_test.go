@@ -220,6 +220,9 @@ func Test_DeserializeIntoMemory(t *testing.T) {
 //
 // See https://github.com/mattn/go-sqlite3/issues/959#issuecomment-890283264
 func Test_ParallelOperationsInMemory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
 	db := mustCreateInMemoryDatabase()
 	defer ignoreErr(db.Close)
 
@@ -323,6 +326,9 @@ func Test_ParallelOperationsInMemory(t *testing.T) {
 
 // Test_TableCreationLoadRawInMemory tests for https://sqlite.org/forum/forumpost/d443fb0730
 func Test_TableCreationLoadRawInMemory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
 	db := mustCreateInMemoryDatabase()
 	defer ignoreErr(db.Close)
 
@@ -365,6 +371,9 @@ func Test_TableCreationLoadRawInMemory(t *testing.T) {
 // Test_1GiBInMemory tests that in-memory databases larger than 1GiB,
 // but smaller than 2GiB, can be created without issue.
 func Test_1GiBInMemory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
 	db := mustCreateInMemoryDatabase()
 	defer ignoreErr(db.Close)
 

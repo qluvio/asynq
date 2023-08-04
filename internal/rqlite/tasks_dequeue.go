@@ -65,31 +65,6 @@ func (conn *Connection) dequeueMessage(now time.Time, serverID string, qname str
 	op := errors.Op("rqlite.dequeueMessage")
 
 	nowUnix := now.Unix()
-
-	//st := Statement(
-	//	"SELECT task_uuid,ndx,pndx,task_msg,task_timeout,task_deadline FROM "+conn.table(TasksTable)+
-	//		" INNER JOIN "+conn.table(QueuesTable)+
-	//		" ON "+conn.table(QueuesTable)+".queue_name="+conn.table(TasksTable)+".queue_name"+
-	//		" WHERE "+conn.table(QueuesTable)+".queue_name=? "+
-	//		" AND pndx=(SELECT COALESCE(MIN(pndx),0) FROM "+conn.table(TasksTable)+" WHERE state='pending' AND queue_name=?)"+
-	//		" AND "+conn.table(QueuesTable)+".state='active'",
-	//	qname,
-	//	qname)
-	//
-	//st.Append(" AND ("+
-	//	""+conn.table(TasksTable)+".sid IS NULL "+
-	//	"OR ("+conn.table(TasksTable)+".sid=?"+
-	//	"  AND ("+conn.table(TasksTable)+".affinity_timeout>=0 "+
-	//	"    OR ("+conn.table(TasksTable)+".affinity_timeout<0 AND ("+
-	//	"        "+conn.table(TasksTable)+".archived_at-"+conn.table(TasksTable)+".affinity_timeout)<=?))) "+
-	//	"OR (("+conn.table(TasksTable)+".done_at+"+conn.table(TasksTable)+".affinity_timeout)<=? "+
-	//	"   AND "+conn.table(TasksTable)+".sid!=?)"+
-	//	")",
-	//	serverID,
-	//	now.Unix(),
-	//	now.Unix(),
-	//	serverID)
-
 	var st *sqlite3.Statement
 
 	getPending := "(task_uuid,ndx,pndx,task_msg,task_timeout,task_deadline)=" +
