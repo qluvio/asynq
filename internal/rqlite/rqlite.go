@@ -35,11 +35,16 @@ var _ base.Scheduler = (*RQLite)(nil)
 var _ base.Inspector = (*RQLite)(nil)
 var slog log.Base
 
+// Config is the configuration for rqlite/sqlite
+// PENDING(GIL): refactor to use inner structs specific to each type: RQLiteConfig, SQLiteConfig
 type Config struct {
 	Type                      string        `json:"type"`                                   // rqlite | sqlite
 	SqliteDbPath              string        `json:"sqlite_db_path,omitempty"`               // sqlite: db path
 	SqliteInMemory            bool          `json:"sqlite_in_memory,omitempty"`             // sqlite: im memory DB
 	SqliteTracing             bool          `json:"sqlite_tracing,omitempty"`               // sqlite: true to trace sql requests execution
+	SqliteFKEnabled           bool          `json:"sqlite_fk_enabled"`                      // sqlite: true to enable foreign keys constraints (default is false)
+	SqliteDisableWall         bool          `json:"sqlite_disable_wall"`                    // sqlite: true to disable wall mode with on disk db (default is false)
+	SqliteSynchronousMode     string        `json:"sqlite_synchronous_mode"`                // sqlite: synchronous mode (OFF | NORMAL | FULL | EXTRA) (default is NORMAL)
 	RqliteUrl                 string        `json:"rqlite_url,omitempty"`                   // rqlite: server url, e.g. http://localhost:4001.
 	ConsistencyLevel          string        `json:"consistency_level"`                      // rqlite: consistency level: none | weak| strong
 	TablesPrefix              string        `json:"tables_prefix,omitempty"`                // tables prefix
@@ -52,6 +57,7 @@ type Config struct {
 
 func (c *Config) InitDefaults() *Config {
 	c.ConsistencyLevel = "strong"
+	c.SqliteSynchronousMode = "NORMAL"
 	c.MaxArchiveSize = maxArchiveSize
 	c.ArchivedExpirationInDays = archivedExpirationInDays
 	c.ArchiveTTL = statsTTL
@@ -95,6 +101,16 @@ func (c *Config) Validate() error {
 		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition,
 			fmt.Sprintf("invalid consistency level: %s", c.ConsistencyLevel))
 	}
+
+	switch strings.ToUpper(c.SqliteSynchronousMode) {
+	case "OFF", "NORMAL", "FULL", "EXTRA":
+	case "":
+		c.SqliteSynchronousMode = "NORMAL"
+	default:
+		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition,
+			fmt.Sprintf("invalid synchronous mode: %s", c.SqliteSynchronousMode))
+	}
+
 	if c.MaxArchiveSize <= 0 {
 		c.MaxArchiveSize = maxArchiveSize
 	}

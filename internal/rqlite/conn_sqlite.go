@@ -11,7 +11,15 @@ import (
 func NewSQLiteConnection(ctx context.Context, config *Config, logger log.Base) (*Connection, error) {
 	op := errors.Op("open")
 
-	dbConnection, err := sqlite.NewSQLiteConnection(ctx, config.SqliteDbPath, config.SqliteInMemory, logger, config.SqliteTracing)
+	dbConnection, err := sqlite.NewSQLiteConnection(
+		ctx,
+		config.SqliteDbPath,
+		config.SqliteInMemory,
+		logger,
+		config.SqliteTracing,
+		config.SqliteFKEnabled,
+		!config.SqliteDisableWall,
+		config.SqliteSynchronousMode)
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}

@@ -11,16 +11,37 @@ import (
 	"github.com/hibiken/asynq/internal/sqlite3/db"
 )
 
-func NewSQLiteConnection(ctx context.Context, dbPath string, inMemory bool, logger log.Base, tracing bool) (*sqlite3.SQLiteConnection, error) {
+/*
+type SQLiteConnectionConfig struct {
+	DbPath          string
+	InMemory        bool
+	FkEnabled       bool
+	WalMode         bool
+	SynchronousMode string
+	Tracing         bool
+}
+*/
+
+// NewSQLiteConnection returns an initialized *sqlite3.SQLiteConnection or an error
+func NewSQLiteConnection(
+	ctx context.Context,
+	dbPath string,
+	inMemory bool,
+	logger log.Base,
+	tracing bool,
+	fkEnabled bool,
+	walEnabled bool,
+	synchronousMode string) (*sqlite3.SQLiteConnection, error) {
+
 	op := errors.Op("NewSQLiteConnection")
 
 	var err error
 	var conn *db.DB
 	switch inMemory {
 	case false:
-		conn, err = db.OpenContext(ctx, dbPath, false)
+		conn, err = db.OpenContext(ctx, dbPath, fkEnabled, walEnabled, synchronousMode)
 	case true:
-		conn, err = db.OpenInMemoryPath(dbPath, false)
+		conn, err = db.OpenInMemoryPath(dbPath, fkEnabled)
 	}
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)

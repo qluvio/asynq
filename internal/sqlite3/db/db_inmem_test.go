@@ -38,75 +38,15 @@ func Test_TableCreationInMemory(t *testing.T) {
 	if exp, got := `[{"columns":["id","name"],"types":["integer","text"]}]`, asJSON(q); exp != got {
 		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
 	}
-}
 
-// Test_TableCreationInMemoryFK ensures foreign key constraints work
-func Test_TableCreationInMemoryFK(t *testing.T) {
-	createTableFoo := "CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)"
-	createTableBar := "CREATE TABLE bar (fooid INTEGER NOT NULL PRIMARY KEY, FOREIGN KEY(fooid) REFERENCES foo(id))"
-	insertIntoBar := "INSERT INTO bar(fooid) VALUES(1)"
-
-	db := mustCreateInMemoryDatabase()
-	defer ignoreErr(db.Close)
-
-	r, err := db.ExecuteStringStmt(createTableFoo)
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
-	if exp, got := `[{}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
-	}
-
-	r, err = db.ExecuteStringStmt(createTableBar)
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
-	if exp, got := `[{}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
-	}
-
-	r, err = db.ExecuteStringStmt(insertIntoBar)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
-	if exp, got := `[{"last_insert_id":1,"rows_affected":1}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
-	}
-
-	// Now, do same testing with FK constraints enabled.
-	dbFK := mustCreateInMemoryDatabaseFK()
-	defer ignoreErr(dbFK.Close)
-	if !dbFK.FKEnabled() {
-		t.Fatal("FK constraints not marked as enabled")
-	}
-
-	r, err = dbFK.ExecuteStringStmt(createTableFoo)
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
-	if exp, got := `[{}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
-	}
-
-	r, err = dbFK.ExecuteStringStmt(createTableBar)
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
-	if exp, got := `[{}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
-	}
-
-	r, err = dbFK.ExecuteStringStmt(insertIntoBar)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
-	if exp, got := `[{"error":"FOREIGN KEY constraint failed"}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
+	// Confirm checkpoint works without error on an in-memory database. It should just be ignored.
+	if err := db.Checkpoint(5 * time.Second); err != nil {
+		t.Fatalf("failed to checkpoint in-memory database: %s", err.Error())
 	}
 }
 
 func Test_LoadIntoMemory(t *testing.T) {
-	db, p := mustCreateDatabase()
+	db, p := mustCreateOnDiskDatabase()
 	defer ignoreErr(db.Close)
 	defer ignoreErr(func() error { return os.Remove(p) })
 
@@ -123,7 +63,7 @@ func Test_LoadIntoMemory(t *testing.T) {
 		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
 	}
 
-	inmem, err := LoadIntoMemory(p, false)
+	inmem, err := LoadIntoMemory(p, false, false)
 	if err != nil {
 		t.Fatalf("failed to create loaded in-memory database: %s", err.Error())
 	}
@@ -139,7 +79,7 @@ func Test_LoadIntoMemory(t *testing.T) {
 }
 
 func Test_DeserializeIntoMemory(t *testing.T) {
-	db, p := mustCreateDatabase()
+	db, p := mustCreateOnDiskDatabase()
 	defer ignoreErr(db.Close)
 	defer ignoreErr(func() error { return os.Remove(p) })
 
@@ -209,7 +149,7 @@ func Test_DeserializeIntoMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query table: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["COUNT(*)"],"types":[""],"values":[[5004]]}]`, asJSON(ro); exp != got {
+	if exp, got := `[{"columns":["COUNT(*)"],"types":["integer"],"values":[[5004]]}]`, asJSON(ro); exp != got {
 		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
 	}
 }

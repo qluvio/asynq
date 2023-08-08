@@ -2,6 +2,8 @@ package db
 
 import (
 	"fmt"
+	"io"
+	"io/ioutil"
 	"os"
 	"strings"
 	"sync"
@@ -59,6 +61,89 @@ func Test_ReturningClause(t *testing.T) {
 	}
 }
 
+func Test_RemoveFiles(t *testing.T) {
+	d := t.TempDir()
+	mustCreateClosedFile(fmt.Sprintf("%s/foo", d))
+	mustCreateClosedFile(fmt.Sprintf("%s/foo-wal", d))
+
+	if err := RemoveFiles(fmt.Sprintf("%s/foo", d)); err != nil {
+		t.Fatalf("failed to remove files: %s", err.Error())
+	}
+
+	files, err := ioutil.ReadDir(d)
+	if err != nil {
+		t.Fatalf("failed to read directory: %s", err.Error())
+	}
+	if len(files) != 0 {
+		t.Fatalf("expected directory to be empty, but wasn't")
+	}
+}
+
+// Test_TableCreationInMemoryFK ensures foreign key constraints work
+func Test_TableCreationInMemoryFK(t *testing.T) {
+	createTableFoo := "CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)"
+	createTableBar := "CREATE TABLE bar (fooid INTEGER NOT NULL PRIMARY KEY, FOREIGN KEY(fooid) REFERENCES foo(id))"
+	insertIntoBar := "INSERT INTO bar(fooid) VALUES(1)"
+
+	db := mustCreateInMemoryDatabase()
+	defer db.Close()
+
+	r, err := db.ExecuteStringStmt(createTableFoo)
+	if err != nil {
+		t.Fatalf("failed to create table: %s", err.Error())
+	}
+	if exp, got := `[{}]`, asJSON(r); exp != got {
+		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
+	}
+
+	r, err = db.ExecuteStringStmt(createTableBar)
+	if err != nil {
+		t.Fatalf("failed to create table: %s", err.Error())
+	}
+	if exp, got := `[{}]`, asJSON(r); exp != got {
+		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
+	}
+
+	r, err = db.ExecuteStringStmt(insertIntoBar)
+	if err != nil {
+		t.Fatalf("failed to insert record: %s", err.Error())
+	}
+	if exp, got := `[{"last_insert_id":1,"rows_affected":1}]`, asJSON(r); exp != got {
+		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
+	}
+
+	// Now, do same testing with FK constraints enabled.
+	dbFK := mustCreateInMemoryDatabaseFK()
+	defer dbFK.Close()
+	if !dbFK.FKEnabled() {
+		t.Fatal("FK constraints not marked as enabled")
+	}
+
+	r, err = dbFK.ExecuteStringStmt(createTableFoo)
+	if err != nil {
+		t.Fatalf("failed to create table: %s", err.Error())
+	}
+	if exp, got := `[{}]`, asJSON(r); exp != got {
+		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
+	}
+
+	r, err = dbFK.ExecuteStringStmt(createTableBar)
+	if err != nil {
+		t.Fatalf("failed to create table: %s", err.Error())
+	}
+	if exp, got := `[{}]`, asJSON(r); exp != got {
+		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
+	}
+
+	r, err = dbFK.ExecuteStringStmt(insertIntoBar)
+	if err != nil {
+		t.Fatalf("failed to insert record: %s", err.Error())
+	}
+	if exp, got := `[{"error":"FOREIGN KEY constraint failed"}]`, asJSON(r); exp != got {
+		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
+	}
+}
+
 func Test_WriteOnQueryInMemDatabase(t *testing.T) {
 	db := mustCreateInMemoryDatabase()
 	defer ignoreErr(db.Close)
@@ -90,7 +175,7 @@ func Test_WriteOnQueryInMemDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query table: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["COUNT(*)"],"types":[""],"values":[[1]]}]`, asJSON(ro); exp != got {
+	if exp, got := `[{"columns":["COUNT(*)"],"types":["integer"],"values":[[1]]}]`, asJSON(ro); exp != got {
 		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
 	}
 }
@@ -126,7 +211,7 @@ func Test_ConcurrentQueriesInMemory(t *testing.T) {
 			if err != nil {
 				t.Logf("failed to query table: %s", err.Error())
 			}
-			if exp, got := `[{"columns":["COUNT(*)"],"types":[""],"values":[[5000]]}]`, asJSON(ro); exp != got {
+			if exp, got := `[{"columns":["COUNT(*)"],"types":["integer"],"values":[[5000]]}]`, asJSON(ro); exp != got {
 				t.Logf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
 			}
 		}()
@@ -137,7 +222,7 @@ func Test_ConcurrentQueriesInMemory(t *testing.T) {
 // Test_ConnectionIsolation test that ISOLATION behavior of on-disk databases doesn't
 // change unexpectedly.
 func Test_ConnectionIsolation(t *testing.T) {
-	db, p := mustCreateDatabase()
+	db, p := mustCreateOnDiskDatabase()
 	defer ignoreErr(db.Close)
 	defer ignoreErr(func() error { return os.Remove(p) })
 
@@ -221,7 +306,7 @@ func Test_ConnectionIsolationMemory(t *testing.T) {
 }
 
 func Test_PartialFail(t *testing.T) {
-	db, p := mustCreateDatabase()
+	db, p := mustCreateOnDiskDatabase()
 	defer ignoreErr(db.Close)
 	defer ignoreErr(func() error { return os.Remove(p) })
 
@@ -263,7 +348,7 @@ func Test_PartialFail(t *testing.T) {
 }
 
 func Test_SimpleTransaction(t *testing.T) {
-	db, p := mustCreateDatabase()
+	db, p := mustCreateOnDiskDatabase()
 	defer ignoreErr(db.Close)
 	defer ignoreErr(func() error { return os.Remove(p) })
 
@@ -306,9 +391,9 @@ func Test_SimpleTransaction(t *testing.T) {
 }
 
 func Test_PartialFailTransaction(t *testing.T) {
-	db, p := mustCreateDatabase()
-	defer ignoreErr(db.Close)
-	defer ignoreErr(func() error { return os.Remove(p) })
+	db, path := mustCreateOnDiskDatabase()
+	defer db.Close()
+	defer os.Remove(path)
 
 	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
 	if err != nil {
@@ -349,7 +434,7 @@ func Test_PartialFailTransaction(t *testing.T) {
 }
 
 func Test_Backup(t *testing.T) {
-	db, p := mustCreateDatabase()
+	db, p := mustCreateOnDiskDatabase()
 	defer ignoreErr(db.Close)
 	defer ignoreErr(func() error { return os.Remove(p) })
 
@@ -388,7 +473,7 @@ func Test_Backup(t *testing.T) {
 		t.Fatalf("failed to backup database: %s", err.Error())
 	}
 
-	newDB, err := Open(dstDB, false)
+	newDB, err := Open(dstDB, false, false)
 	if err != nil {
 		t.Fatalf("failed to open backup database: %s", err.Error())
 	}
@@ -404,7 +489,7 @@ func Test_Backup(t *testing.T) {
 }
 
 func Test_Copy(t *testing.T) {
-	srcDB, p := mustCreateDatabase()
+	srcDB, p := mustCreateOnDiskDatabase()
 	defer ignoreErr(srcDB.Close)
 	defer ignoreErr(func() error { return os.Remove(p) })
 
@@ -437,7 +522,7 @@ func Test_Copy(t *testing.T) {
 
 	dstFile := mustTempFile()
 	defer ignoreErr(func() error { return os.Remove(dstFile) })
-	dstDB, err := Open(dstFile, false)
+	dstDB, err := Open(dstFile, false, false)
 	if err != nil {
 		t.Fatalf("failed to open destination database: %s", err)
 	}
@@ -458,7 +543,7 @@ func Test_Copy(t *testing.T) {
 }
 
 func Test_SerializeOnDisk(t *testing.T) {
-	db, p := mustCreateDatabase()
+	db, p := mustCreateOnDiskDatabase()
 	defer ignoreErr(db.Close)
 	defer ignoreErr(func() error { return os.Remove(p) })
 
@@ -506,7 +591,7 @@ func Test_SerializeOnDisk(t *testing.T) {
 		t.Fatalf("failed to write serialized database to file: %s", err.Error())
 	}
 
-	newDB, err := Open(dstDB.Name(), false)
+	newDB, err := Open(dstDB.Name(), false, false)
 	if err != nil {
 		t.Fatalf("failed to open on-disk serialized database: %s", err.Error())
 	}
@@ -569,7 +654,7 @@ func Test_SerializeInMemory(t *testing.T) {
 		t.Fatalf("failed to write serialized database to file: %s", err.Error())
 	}
 
-	newDB, err := Open(dstDB.Name(), false)
+	newDB, err := Open(dstDB.Name(), false, false)
 	if err != nil {
 		t.Fatalf("failed to open on-disk serialized database: %s", err.Error())
 	}
@@ -585,7 +670,7 @@ func Test_SerializeInMemory(t *testing.T) {
 }
 
 func Test_Dump(t *testing.T) {
-	db, p := mustCreateDatabase()
+	db, p := mustCreateOnDiskDatabase()
 	defer ignoreErr(db.Close)
 	defer ignoreErr(func() error { return os.Remove(p) })
 
@@ -605,11 +690,11 @@ func Test_Dump(t *testing.T) {
 }
 
 func Test_DumpMemory(t *testing.T) {
-	db, p := mustCreateDatabase()
+	db, p := mustCreateOnDiskDatabase()
 	defer ignoreErr(db.Close)
 	defer ignoreErr(func() error { return os.Remove(p) })
 
-	inmem, err := LoadIntoMemory(p, false)
+	inmem, err := LoadIntoMemory(p, false, false)
 	if err != nil {
 		t.Fatalf("failed to create loaded in-memory database: %s", err.Error())
 	}
@@ -665,31 +750,43 @@ func Test_JSON1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to perform simple SELECT: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["phone"],"types":[""],"values":[["{\"mobile\":\"789111\",\"home\":\"123456\"}"]]}]`, asJSON(q); exp != got {
+	if exp, got := `[{"columns":["phone"],"types":["text"],"values":[["{\"mobile\":\"789111\",\"home\":\"123456\"}"]]}]`, asJSON(q); exp != got {
 		t.Fatalf("unexpected results for simple query, expected %s, got %s", exp, got)
 	}
 	q, err = db.QueryStringStmt("SELECT json_extract(customer.phone, '$.mobile') FROM customer")
 	if err != nil {
 		t.Fatalf("failed to perform simple SELECT: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["json_extract(customer.phone, '$.mobile')"],"types":[""],"values":[["789111"]]}]`, asJSON(q); exp != got {
+	if exp, got := `[{"columns":["json_extract(customer.phone, '$.mobile')"],"types":["text"],"values":[["789111"]]}]`, asJSON(q); exp != got {
 		t.Fatalf("unexpected results for JSON query, expected %s, got %s", exp, got)
 	}
 	q, err = db.QueryStringStmt("SELECT customer.phone ->> '$.mobile' FROM customer")
 	if err != nil {
 		t.Fatalf("failed to perform simple SELECT: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["customer.phone ->> '$.mobile'"],"types":[""],"values":[["789111"]]}]`, asJSON(q); exp != got {
+	if exp, got := `[{"columns":["customer.phone ->> '$.mobile'"],"types":["text"],"values":[["789111"]]}]`, asJSON(q); exp != got {
 		t.Fatalf("unexpected results for JSON query, expected %s, got %s", exp, got)
 	}
 }
 
-func mustCreateDatabase() (*DB, string) {
+func mustCreateOnDiskDatabase() (*DB, string) {
 	var err error
 	f := mustTempFile()
-	db, err := Open(f, false)
+	db, err := Open(f, false, false)
+	fmt.Println("db file", f)
 	if err != nil {
-		panic("failed to open database")
+		panic("failed to open database in DELETE mode")
+	}
+
+	return db, f
+}
+
+func mustCreateOnDiskDatabaseWAL() (*DB, string) {
+	var err error
+	f := mustTempFile()
+	db, err := Open(f, false, true)
+	if err != nil {
+		panic("failed to open database in WAL mode")
 	}
 
 	return db, f
@@ -711,36 +808,15 @@ func mustCreateInMemoryDatabaseFK() *DB {
 	return db
 }
 
-func mustWriteAndOpenDatabase(b []byte) (*DB, string) {
-	var err error
-	f := mustTempFile()
-	err = os.WriteFile(f, b, 0660)
-	if err != nil {
-		panic("failed to write file")
-	}
-
-	db, err := Open(f, false)
-	if err != nil {
-		panic("failed to open database")
-	}
-	return db, f
-}
-
 // mustExecute executes a statement, and panics on failure. Used for statements
 // that should never fail, even taking into account test setup.
 func mustExecute(db *DB, stmt string) {
-	_, err := db.ExecuteStringStmt(stmt)
+	r, err := db.ExecuteStringStmt(stmt)
 	if err != nil {
 		panic(fmt.Sprintf("failed to execute statement: %s", err.Error()))
 	}
-}
-
-// mustQuery executes a statement, and panics on failure. Used for statements
-// that should never fail, even taking into account test setup.
-func mustQuery(db *DB, stmt string) {
-	_, err := db.QueryStringStmt(stmt)
-	if err != nil {
-		panic(fmt.Sprintf("failed to query: %s", err.Error()))
+	if r[0].Error != "" {
+		panic(fmt.Sprintf("failed to execute statement: %s", r[0].Error))
 	}
 }
 
@@ -762,4 +838,53 @@ func mustTempFile() string {
 	}
 	_ = tmpfile.Close()
 	return tmpfile.Name()
+}
+
+func mustTempDir() string {
+	tmpdir, err := ioutil.TempDir("", "rqlite-db-test")
+	if err != nil {
+		panic(err.Error())
+	}
+	return tmpdir
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// function which copies a src file to a dst file, panics if any error
+func mustCopyFile(dst, src string) {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		panic(err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		panic(err)
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func mustRenameFile(oldpath, newpath string) {
+	if err := os.Rename(oldpath, newpath); err != nil {
+		panic(err)
+	}
+}
+
+func mustCreateClosedFile(path string) {
+	f, err := os.Create(path)
+	if err != nil {
+		panic("failed to create file")
+	}
+	if err := f.Close(); err != nil {
+		panic("failed to close file")
+	}
 }
