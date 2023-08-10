@@ -16,9 +16,9 @@ func TestSqliteRestartWithWalChanged(t *testing.T) {
 	if testing.Short() && brokerType != SqliteType {
 		t.Skip("sqlite only")
 	}
-	cfg := (&RqliteConfig{}).InitDefaults()
+	cfg := NewRqliteConfig()
 	cfg.Type = SqliteType
-	cfg.SqliteInMemory = false
+	cfg.Sqlite.InMemory = false
 	dir, err := os.MkdirTemp("", "TestSqliteRestartWithWalChanged")
 	require.NoError(t, err)
 	fmt.Println("test dir: " + dir)
@@ -63,8 +63,8 @@ func TestSqliteRestartWithWalChanged(t *testing.T) {
 		err = os.Mkdir(dir, os.ModePerm)
 		require.NoError(t, err)
 
-		cfg.SqliteDbPath = dbPath
-		cfg.SqliteDisableWall = !tc.startWal
+		cfg.Sqlite.DbPath = dbPath
+		cfg.Sqlite.DisableWal = !tc.startWal
 		opt := RqliteConnOpt{Config: cfg}
 		ctx := &rqliteTestContext{
 			tb: t,
@@ -80,19 +80,19 @@ func TestSqliteRestartWithWalChanged(t *testing.T) {
 		info, err := client.Enqueue(task, TaskID(taskId), Queue(queue))
 		require.NoError(t, err)
 
-		assertSingleDbFile(cfg.SqliteDisableWall)
+		assertSingleDbFile(cfg.Sqlite.DisableWal)
 		err = client.Close()
 		require.NoError(t, err)
 		//fmt.Println("after close", "db files:", len(dbFiles()), "wal enabled", !cfg.SqliteDisableWall)
 
-		cfg.SqliteDisableWall = !cfg.SqliteDisableWall
+		cfg.Sqlite.DisableWal = !cfg.Sqlite.DisableWal
 		client = NewClient(opt)
 		inspect, err := NewInspectorClient(client)
 		require.NoError(t, err)
 		info2, err := inspect.GetTaskInfo(queue, taskId)
 		require.NoError(t, err)
 
-		assertSingleDbFile(cfg.SqliteDisableWall)
+		assertSingleDbFile(cfg.Sqlite.DisableWal)
 		err = client.Close()
 		require.NoError(t, err)
 		//fmt.Println("after close", "db files:", len(dbFiles()), "wal enabled", !cfg.SqliteDisableWall)

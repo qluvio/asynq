@@ -24,11 +24,11 @@ func NewRQLiteConnection(ctx context.Context, config *Config, httpClient *http.C
 		gorqlite.WithTracer(tracer)
 	}
 
-	rqliteConn, err := gorqlite.OpenContext(ctx, config.RqliteUrl, httpClient)
+	rqliteConn, err := gorqlite.OpenContext(ctx, config.Rqlite.Url, httpClient)
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}
-	err = rqliteConn.SetConsistencyLevel(config.ConsistencyLevel)
+	err = rqliteConn.SetConsistencyLevel(config.Rqlite.ConsistencyLevel)
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, err)
 	}

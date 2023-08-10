@@ -15,6 +15,7 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
+	"github.com/hibiken/asynq/internal/sqlite"
 	"github.com/hibiken/asynq/internal/sqlite3"
 	"github.com/hibiken/asynq/internal/timeutil"
 )
@@ -35,29 +36,45 @@ var _ base.Scheduler = (*RQLite)(nil)
 var _ base.Inspector = (*RQLite)(nil)
 var slog log.Base
 
+type SQLiteConnConfig = sqlite.Config
+type RQLiteConnConfig struct {
+	Url              string `json:"url,omitempty"`     // rqlite: server url, e.g. http://localhost:4001.
+	ConsistencyLevel string `json:"consistency_level"` // rqlite: consistency level: none | weak| strong
+}
+
+func (c *RQLiteConnConfig) InitDefaults() *RQLiteConnConfig {
+	c.ConsistencyLevel = "strong"
+	return c
+}
+
+func (c *RQLiteConnConfig) Validate() error {
+	if c.ConsistencyLevel == "" {
+		c.ConsistencyLevel = "strong"
+	}
+	c.ConsistencyLevel = strings.ToLower(c.ConsistencyLevel)
+	if c.ConsistencyLevel != "none" && c.ConsistencyLevel != "weak" && c.ConsistencyLevel != "strong" {
+		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition,
+			fmt.Sprintf("invalid consistency level: %s", c.ConsistencyLevel))
+	}
+	return nil
+}
+
 // Config is the configuration for rqlite/sqlite
-// PENDING(GIL): refactor to use inner structs specific to each type: RQLiteConfig, SQLiteConfig
 type Config struct {
-	Type                      string        `json:"type"`                                   // rqlite | sqlite
-	SqliteDbPath              string        `json:"sqlite_db_path,omitempty"`               // sqlite: db path
-	SqliteInMemory            bool          `json:"sqlite_in_memory,omitempty"`             // sqlite: im memory DB
-	SqliteTracing             bool          `json:"sqlite_tracing,omitempty"`               // sqlite: true to trace sql requests execution
-	SqliteFKEnabled           bool          `json:"sqlite_fk_enabled"`                      // sqlite: true to enable foreign keys constraints (default is false)
-	SqliteDisableWall         bool          `json:"sqlite_disable_wall"`                    // sqlite: true to disable wall mode with on disk db (default is false)
-	SqliteSynchronousMode     string        `json:"sqlite_synchronous_mode"`                // sqlite: synchronous mode (OFF | NORMAL | FULL | EXTRA) (default is NORMAL)
-	RqliteUrl                 string        `json:"rqlite_url,omitempty"`                   // rqlite: server url, e.g. http://localhost:4001.
-	ConsistencyLevel          string        `json:"consistency_level"`                      // rqlite: consistency level: none | weak| strong
-	TablesPrefix              string        `json:"tables_prefix,omitempty"`                // tables prefix
-	MaxArchiveSize            int           `json:"max_archive_size,omitempty"`             // maximum number of tasks in archive
-	ArchivedExpirationInDays  int           `json:"archived_expiration_in_days,omitempty"`  // number of days before an archived task gets deleted permanently
-	ArchiveTTL                time.Duration `json:"archive_ttl,omitempty"`                  // expiration of archived entries
-	SchedulerHistoryMaxEvents int           `json:"scheduler_history_max_events,omitempty"` // Maximum number of enqueue events to store per scheduler entry.
-	PubsubPollingInterval     time.Duration `json:"pubsub_polling_interval,omitempty"`      // interval for polling the pub-sub table. Zero to disable.
+	Type                      string           `json:"type"` // rqlite | sqlite
+	Rqlite                    RQLiteConnConfig `json:"rqlite"`
+	Sqlite                    SQLiteConnConfig `json:"sqlite"`
+	TablesPrefix              string           `json:"tables_prefix,omitempty"`                // tables prefix
+	MaxArchiveSize            int              `json:"max_archive_size,omitempty"`             // maximum number of tasks in archive
+	ArchivedExpirationInDays  int              `json:"archived_expiration_in_days,omitempty"`  // number of days before an archived task gets deleted permanently
+	ArchiveTTL                time.Duration    `json:"archive_ttl,omitempty"`                  // expiration of archived entries
+	SchedulerHistoryMaxEvents int              `json:"scheduler_history_max_events,omitempty"` // Maximum number of enqueue events to store per scheduler entry.
+	PubsubPollingInterval     time.Duration    `json:"pubsub_polling_interval,omitempty"`      // interval for polling the pub-sub table. Zero to disable.
 }
 
 func (c *Config) InitDefaults() *Config {
-	c.ConsistencyLevel = "strong"
-	c.SqliteSynchronousMode = "NORMAL"
+	c.Rqlite.InitDefaults()
+	c.Sqlite.InitDefaults()
 	c.MaxArchiveSize = maxArchiveSize
 	c.ArchivedExpirationInDays = archivedExpirationInDays
 	c.ArchiveTTL = statsTTL
@@ -70,45 +87,44 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "nil config")
 	}
-	if c.RqliteUrl == "" && c.SqliteDbPath == "" {
+	if c.Rqlite.Url == "" && c.Sqlite.DbPath == "" {
 		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no rqlite url and no sqlite db path provided")
 	}
 	switch c.Type {
 	case rqliteType:
-		if c.RqliteUrl == "" {
+		if c.Rqlite.Url == "" {
 			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no rqlite url provided")
 		}
-		c.SqliteDbPath = ""
+		c.Sqlite.DbPath = ""
 	case sqliteType:
 		// require a db path even with in-memory as we need it to share the connection
-		if c.SqliteDbPath == "" {
+		if c.Sqlite.DbPath == "" {
 			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no sqlite db path provided")
 		}
-		c.RqliteUrl = ""
+		c.Rqlite.Url = ""
 	default:
-		if c.RqliteUrl != "" && c.SqliteDbPath != "" {
+		if c.Rqlite.Url != "" && c.Sqlite.DbPath != "" {
 			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no type specified and both rqlite url and sqlite db path provided")
 		}
-		if c.RqliteUrl != "" {
+		if c.Rqlite.Url != "" {
 			c.Type = rqliteType
 		}
-		if c.SqliteDbPath != "" {
+		if c.Sqlite.DbPath != "" {
 			c.Type = sqliteType
 		}
 	}
-	c.ConsistencyLevel = strings.ToLower(c.ConsistencyLevel)
-	if c.ConsistencyLevel != "none" && c.ConsistencyLevel != "weak" && c.ConsistencyLevel != "strong" {
-		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition,
-			fmt.Sprintf("invalid consistency level: %s", c.ConsistencyLevel))
-	}
 
-	switch strings.ToUpper(c.SqliteSynchronousMode) {
-	case "OFF", "NORMAL", "FULL", "EXTRA":
-	case "":
-		c.SqliteSynchronousMode = "NORMAL"
-	default:
-		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition,
-			fmt.Sprintf("invalid synchronous mode: %s", c.SqliteSynchronousMode))
+	var err error
+	switch c.Type {
+	case rqliteType:
+		err = c.Rqlite.Validate()
+		_ = c.Sqlite.Validate()
+	case sqliteType:
+		err = c.Sqlite.Validate()
+		_ = c.Rqlite.Validate()
+	}
+	if err != nil {
+		return err
 	}
 
 	if c.MaxArchiveSize <= 0 {
@@ -123,6 +139,10 @@ func (c *Config) Validate() error {
 	if c.SchedulerHistoryMaxEvents <= 0 {
 		c.SchedulerHistoryMaxEvents = schedulerHistoryMaxEvents
 	}
+	// pubsub is disabled when <= 0
+	//if c.PubsubPollingInterval <= 0 {
+	//	c.PubsubPollingInterval = PubsubPollingInterval
+	//}
 
 	return nil
 }

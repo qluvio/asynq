@@ -38,7 +38,7 @@ var (
 	clusterAddrs    string
 	tlsServerName   string
 
-	rqliteConfig = (&asynq.RqliteConfig{}).InitDefaults()
+	rqliteConfig = asynq.NewRqliteConfig()
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -86,9 +86,9 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&tlsServerName, "tls_server",
 		"", "server name for TLS validation")
 
-	rootCmd.PersistentFlags().StringVar(&rqliteConfig.SqliteDbPath, "sqlite_db_path", "", "sqlite DB path")
-	rootCmd.PersistentFlags().StringVar(&rqliteConfig.RqliteUrl, "rqlite_url", "http://localhost:4001", "rqlite address to use")
-	rootCmd.PersistentFlags().StringVar(&rqliteConfig.ConsistencyLevel, "rqlite_consistency_level", "strong", "rqlite consistency level")
+	rootCmd.PersistentFlags().StringVar(&rqliteConfig.Sqlite.DbPath, "sqlite_db_path", "", "sqlite DB path")
+	rootCmd.PersistentFlags().StringVar(&rqliteConfig.Rqlite.Url, "rqlite_url", "http://localhost:4001", "rqlite address to use")
+	rootCmd.PersistentFlags().StringVar(&rqliteConfig.Rqlite.ConsistencyLevel, "rqlite_consistency_level", "strong", "rqlite consistency level")
 	rootCmd.PersistentFlags().StringVar(&rqliteConfig.TablesPrefix, "rqlite_tables_prefix", "", "rqlite tables prefix")
 
 	// Bind flags with config.

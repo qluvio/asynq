@@ -35,7 +35,7 @@ func TestLocalLongRun(t *testing.T) {
 	fmt.Println("db_path", dbPath)
 
 	rqliteConfig.TablesPrefix = "local_"
-	rqliteConfig.SqliteDbPath = dbPath
+	rqliteConfig.Sqlite.DbPath = dbPath
 	rqliteConfig.Type = "sqlite"
 
 	client := NewClient(getClientConnOpt(t))

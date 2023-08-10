@@ -36,7 +36,7 @@ var (
 	useRedisCluster   bool
 	redisClusterAddrs string // comma-separated list of host:port
 
-	rqliteConfig = (&RqliteConfig{}).InitDefaults()
+	rqliteConfig = NewRqliteConfig()
 
 	testLogLevel = FatalLevel
 )
@@ -51,10 +51,10 @@ func init() {
 	flag.BoolVar(&useRedisCluster, "redis_cluster", false, "use redis cluster as a broker in testing")
 	flag.StringVar(&redisClusterAddrs, "redis_cluster_addrs", "localhost:7000,localhost:7001,localhost:7002", "comma separated list of redis server addresses")
 
-	flag.StringVar(&rqliteConfig.SqliteDbPath, "sqlite_db_path", "", "sqlite db path")
-	flag.BoolVar(&rqliteConfig.SqliteInMemory, "sqlite_in_memory", false, "use in memory DB (sqlite)")
-	flag.StringVar(&rqliteConfig.RqliteUrl, "rqlite_url", "http://localhost:4001", "rqlite address to use")
-	flag.StringVar(&rqliteConfig.ConsistencyLevel, "rqlite_consistency_level", "strong", "consistency level (rqlite)")
+	flag.StringVar(&rqliteConfig.Sqlite.DbPath, "sqlite_db_path", "", "sqlite db path")
+	flag.BoolVar(&rqliteConfig.Sqlite.InMemory, "sqlite_in_memory", false, "use in memory DB (sqlite)")
+	flag.StringVar(&rqliteConfig.Rqlite.Url, "rqlite_url", "http://localhost:4001", "rqlite address to use")
+	flag.StringVar(&rqliteConfig.Rqlite.ConsistencyLevel, "rqlite_consistency_level", "strong", "consistency level (rqlite)")
 
 	flag.Var(&testLogLevel, "loglevel", "log level to use in testing")
 	testLogger = log.NewLogger(nil)
@@ -102,18 +102,18 @@ func doInitBrokerTypeOnce(tb testing.TB) {
 	initBrokerOnce.Do(func() {
 		if brokerType == SqliteType {
 			rqliteConfig.Type = brokerType
-			if rqliteConfig.SqliteDbPath == "" {
-				if rqliteConfig.SqliteInMemory {
-					rqliteConfig.SqliteDbPath = rqlite.RandomInMemoryDbPath()
+			if rqliteConfig.Sqlite.DbPath == "" {
+				if rqliteConfig.Sqlite.InMemory {
+					rqliteConfig.Sqlite.DbPath = rqlite.RandomInMemoryDbPath()
 				} else {
 					sqliteDbTemp = true
 					db, err := os.CreateTemp("", "sqlite")
 					require.NoError(tb, err)
-					rqliteConfig.SqliteDbPath = db.Name()
+					rqliteConfig.Sqlite.DbPath = db.Name()
 				}
 			}
-			fmt.Println("sqlite db path:", rqliteConfig.SqliteDbPath)
-			rqliteConfig.RqliteUrl = ""
+			fmt.Println("sqlite db path:", rqliteConfig.Sqlite.DbPath)
+			rqliteConfig.Rqlite.Url = ""
 		}
 	})
 }
