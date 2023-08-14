@@ -578,7 +578,7 @@ func TestStatusConcurrentAccess(t *testing.T) {
 func testDeadlinesToString(dls []deadline) string {
 	res := "[ "
 	for _, dl := range dls {
-		res += fmt.Sprintf("{ %s %d %v } ", dl.id, dl.dl.Unix(), dl.fn)
+		res += fmt.Sprintf("{ %s %d %p } ", dl.id, dl.dl.Unix(), dl.fn)
 	}
 	res += "]"
 	return res
@@ -656,11 +656,8 @@ func TestRemoveDeadline(t *testing.T) {
 // Test for deadlines being accessed by multiple goroutines.
 // Run with -race flag to check for data race.
 func TestDeadlinesConcurrentAccess(t *testing.T) {
-	abort := make(chan struct{})
-	defer func() {
-		close(abort)
-	}()
-	d := NewDeadlines(abort, 1024)
+	d := NewDeadlines(1024)
+	defer d.Close()
 
 	n := atomic.NewInt32(0)
 	var deadline1, deadline2, deadline3 = time.Now().Add(time.Second), time.Now().Add(time.Second * 2), time.Now().Add(time.Second * 3)

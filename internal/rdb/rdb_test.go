@@ -2073,9 +2073,17 @@ func TestForwardIfReady(t *testing.T) {
 		now := time.Now()
 		r.SetClock(timeutil.NewSimulatedClock(now))
 
-		err := r.ForwardIfReady(tc.qnames...)
+		nPending := 0
+		for _, want := range tc.wantPending {
+			nPending += len(want)
+		}
+
+		n, err := r.ForwardIfReady(tc.qnames...)
 		if err != nil {
-			t.Errorf("(*RDB).CheckScheduled(%v) = %v, want nil", tc.qnames, err)
+			t.Errorf("(*RDB).ForwardIfReady(%v) = %v, want nil", tc.qnames, err)
+			continue
+		} else if n != nPending {
+			t.Errorf("(*RDB).ForwardIfReady(%v) = %v, want %v", tc.qnames, n, nPending)
 			continue
 		}
 

@@ -144,11 +144,11 @@ func (tb *TestBroker) Archive(msg *base.TaskMessage, errMsg string) error {
 	return tb.real.Archive(msg, errMsg)
 }
 
-func (tb *TestBroker) ForwardIfReady(qnames ...string) error {
+func (tb *TestBroker) ForwardIfReady(qnames ...string) (int, error) {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
-		return errRedisDown
+		return 0, errRedisDown
 	}
 	return tb.real.ForwardIfReady(qnames...)
 }

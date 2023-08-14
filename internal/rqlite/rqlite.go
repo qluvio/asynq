@@ -436,14 +436,16 @@ func (r *RQLite) WriteResult(qname, id string, data []byte) (int, error) {
 
 // ForwardIfReady checks scheduled and retry sets of the given queues
 // and move any tasks that are ready to be processed to the pending set.
-func (r *RQLite) ForwardIfReady(qnames ...string) error {
+func (r *RQLite) ForwardIfReady(qnames ...string) (n int, err error) {
 	var op errors.Op = "rqlite.ForwardIfReady"
 	for _, qname := range qnames {
-		if err := r.forwardAll(qname); err != nil {
-			return errors.E(op, errors.CanonicalCode(err), err)
+		if x, err := r.forwardAll(qname); err != nil {
+			return n, errors.E(op, errors.CanonicalCode(err), err)
+		} else {
+			n += x
 		}
 	}
-	return nil
+	return n, nil
 }
 
 // forward moves tasks with an 'xx_at' value less than the current unix time
@@ -459,22 +461,23 @@ func (r *RQLite) forward(qname, src string) (int, error) {
 
 // forwardAll checks for tasks in scheduled/retry state that are ready to be run,
 // and updates their state to "pending".
-func (r *RQLite) forwardAll(qname string) (err error) {
+func (r *RQLite) forwardAll(qname string) (n int, err error) {
 	sources := []string{
 		scheduled,
 		retry,
 	}
 
 	for _, src := range sources {
-		n := 1
-		for n != 0 {
-			n, err = r.forward(qname, src)
+		x := 1
+		for x != 0 {
+			x, err = r.forward(qname, src)
 			if err != nil {
-				return err
+				return n, err
 			}
+			n += x
 		}
 	}
-	return nil
+	return n, nil
 }
 
 // ListDeadlineExceeded returns a list of task messages that have exceeded the

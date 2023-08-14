@@ -266,7 +266,7 @@ func BenchmarkCheckAndEnqueue(b *testing.B) {
 		asynqtest.SeedScheduledQueue(b, r.client, zs, base.DefaultQueueName)
 		b.StartTimer()
 
-		if err := r.ForwardIfReady(base.DefaultQueueName); err != nil {
+		if _, err := r.ForwardIfReady(base.DefaultQueueName); err != nil {
 			b.Fatalf("ForwardIfReady failed: %v", err)
 		}
 	}

@@ -30,6 +30,10 @@ type forwarder struct {
 	// health provider (the healthchecker)
 	healthStarted chan struct{}
 	healthy       chan struct{}
+
+	// channel to receive requests to immediately forward tasks
+	wakeCh    <-chan bool
+	wakePrcCh chan<- bool
 }
 
 type forwarderParams struct {
@@ -38,6 +42,8 @@ type forwarderParams struct {
 	queues      Queues
 	interval    time.Duration
 	healthCheck healthChecker
+	wakeCh      <-chan bool
+	wakePrcCh   chan<- bool
 }
 
 func newForwarder(params forwarderParams) *forwarder {
@@ -56,6 +62,8 @@ func newForwarder(params forwarderParams) *forwarder {
 		avgInterval:   params.interval,
 		healthStarted: health,
 		healthy:       healthy,
+		wakeCh:        params.wakeCh,
+		wakePrcCh:     params.wakePrcCh,
 	}
 }
 
@@ -87,6 +95,8 @@ func (f *forwarder) start(wg *sync.WaitGroup) {
 			case <-f.done:
 				f.logger.Debug("Forwarder done")
 				return
+			case <-f.wakeCh:
+				f.exec()
 			case <-time.After(f.avgInterval):
 				f.exec()
 			}
@@ -95,7 +105,12 @@ func (f *forwarder) start(wg *sync.WaitGroup) {
 }
 
 func (f *forwarder) exec() {
-	if err := f.broker.ForwardIfReady(f.queues.Names()...); err != nil {
+	if n, err := f.broker.ForwardIfReady(f.queues.Names()...); err != nil {
 		f.logger.Errorf("Could not enqueue scheduled tasks: %v", err)
+	} else if n > 0 {
+		select {
+		case f.wakePrcCh <- true:
+		default:
+		}
 	}
 }

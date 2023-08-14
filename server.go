@@ -38,6 +38,8 @@ type Server struct {
 
 	broker base.Broker
 
+	deadlines *base.Deadlines
+
 	state *base.ServerState
 
 	// wait group to wait for all goroutines to finish.
@@ -388,6 +390,11 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	state := base.NewServerState()
 	cancels := base.NewCancelations()
 	afterTasks := base.NewAfterTasks()
+	deadlines := base.NewDeadlines(n)
+
+	wakePrcCh := make(chan bool, 1)
+	wakeFwdCh := make(chan bool, 1)
+	broker = newWakingBroker(broker, deadlines, wakePrcCh, wakeFwdCh)
 
 	syncer := newSyncer(syncerParams{
 		logger:     logger,
@@ -418,6 +425,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		retryDelayFunc:  delayFunc,
 		isFailureFunc:   isFailureFunc,
 		syncCh:          syncCh,
+		deadlines:       deadlines,
 		cancelations:    cancels,
 		afterTasks:      afterTasks,
 		concurrency:     n,
@@ -426,6 +434,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		shutdownTimeout: shutdownTimeout,
 		starting:        starting,
 		finished:        finished,
+		wakeCh:          wakePrcCh,
 		emptyQSleep:     cfg.ProcessorEmptyQSleep,
 	})
 	healthchecker := newHealthChecker(healthcheckerParams{
@@ -440,6 +449,8 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		queues:      cfg.Queues,
 		interval:    cfg.ForwarderInterval,
 		healthCheck: healthchecker,
+		wakeCh:      wakeFwdCh,
+		wakePrcCh:   wakePrcCh,
 	})
 	recoverer := newRecoverer(recovererParams{
 		logger:         logger,
@@ -461,6 +472,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	return &Server{
 		logger:        logger,
 		broker:        broker,
+		deadlines:     deadlines,
 		state:         state,
 		forwarder:     forwarder,
 		processor:     processor,
@@ -591,6 +603,7 @@ func (srv *Server) shutdown(now bool) {
 
 	srv.wg.Wait()
 
+	srv.deadlines.Close()
 	_ = srv.broker.Close()
 	srv.state.Set(base.StateClosed)
 

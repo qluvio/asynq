@@ -93,6 +93,9 @@ type processor struct {
 	starting chan<- *workerInfo
 	finished chan<- *base.TaskMessage
 
+	// channel to receive requests to immediately process tasks
+	wakeCh      <-chan bool
+	sleepTimer  *time.Timer
 	emptyQSleep time.Duration
 	firstEmptyQ time.Time
 	lastEmptyQ  time.Time
@@ -105,6 +108,7 @@ type processorParams struct {
 	retryDelayFunc  RetryDelayHandler
 	isFailureFunc   func(error) bool
 	syncCh          chan<- *syncRequest
+	deadlines       *base.Deadlines
 	cancelations    *base.Cancelations
 	afterTasks      *base.AfterTasks
 	concurrency     int
@@ -113,6 +117,7 @@ type processorParams struct {
 	shutdownTimeout time.Duration
 	starting        chan<- *workerInfo
 	finished        chan<- *base.TaskMessage
+	wakeCh          <-chan bool
 	emptyQSleep     time.Duration
 }
 
@@ -151,12 +156,14 @@ func newProcessor(params processorParams) *processor {
 		abortNow:        abortNow,
 		tasks:           make(map[string]*processorTask),
 		results:         make(chan processorResult, params.concurrency),
-		deadlines:       base.NewDeadlines(abortNow, params.concurrency),
+		deadlines:       params.deadlines,
 		errHandler:      params.errHandler,
 		handler:         HandlerFunc(func(ctx context.Context, t *Task) error { return fmt.Errorf("handler not set") }),
 		shutdownTimeout: params.shutdownTimeout,
 		starting:        params.starting,
 		finished:        params.finished,
+		wakeCh:          params.wakeCh,
+		sleepTimer:      time.NewTimer(time.Hour), // dummy duration
 		emptyQSleep:     params.emptyQSleep,
 	}
 }
@@ -241,7 +248,7 @@ func (p *processor) exec() {
 			// Sleep to avoid slamming redis and let scheduler move tasks into queues.
 			// Note: We are not using blocking pop operation and polling queues instead.
 			// This adds significant load to redis.
-			time.Sleep(p.emptyQSleep)
+			p.sleep()
 			p.releaseQSemas(qsemas, "") // release queue tokens
 			<-p.sema                    // release token
 			return
@@ -251,7 +258,7 @@ func (p *processor) exec() {
 				p.logger.Errorf("Dequeue error: %v", err)
 			}
 			// also sleep, otherwise we create a busy loop until errors clear...
-			time.Sleep(p.emptyQSleep)
+			p.sleep()
 			p.releaseQSemas(qsemas, "") // release queue tokens
 			<-p.sema                    // release token
 			return
@@ -358,7 +365,6 @@ func (p *processor) fini() {
 }
 
 func (p *processor) requeue(ctx context.Context, msg *base.TaskMessage) {
-
 	err := p.broker.Requeue(p.serverID, msg, false)
 	if err == nil {
 		p.logger.Infof("Pushed recurrent task id=%s back to queue", msg.ID)
@@ -613,6 +619,20 @@ func (p *processor) releaseQSemas(qsemas map[string]chan struct{}, skipQueue str
 		<-qsema
 	}
 	return ret
+}
+
+func (p *processor) sleep() {
+	// Clear wake channel before sleeping
+	select {
+	case <-p.wakeCh:
+	default:
+	}
+	base.ResetTimer(p.sleepTimer, p.emptyQSleep)
+	select {
+	case <-p.wakeCh:
+	case <-p.sleepTimer.C:
+	}
+	base.StopTimer(p.sleepTimer)
 }
 
 func (p *processor) logEmptyQ() {

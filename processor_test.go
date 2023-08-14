@@ -71,6 +71,7 @@ func newProcessorForTest(t *testing.T, r base.Broker, h Handler, q ...Queues) *p
 		retryDelayFunc:  DefaultRetryDelay,
 		isFailureFunc:   defaultIsFailureFunc,
 		syncCh:          syncCh,
+		deadlines:       base.NewDeadlines(10),
 		cancelations:    base.NewCancelations(),
 		concurrency:     10,
 		queues:          queues,
@@ -80,6 +81,7 @@ func newProcessorForTest(t *testing.T, r base.Broker, h Handler, q ...Queues) *p
 		finished:        finished,
 	})
 	p.handler = h
+	t.Cleanup(p.deadlines.Close)
 	return p
 }
 
@@ -673,6 +675,7 @@ func TestProcessorNilRetry(t *testing.T) {
 	require.True(t, d > 0)
 
 	close(s.processor.abortNow)
+	s.deadlines.Close()
 }
 
 func TestProcessorMarkAsComplete(t *testing.T) {
@@ -879,6 +882,7 @@ func TestProcessorWithStrictPriority(t *testing.T) {
 				retryDelayFunc:  DefaultRetryDelay,
 				isFailureFunc:   defaultIsFailureFunc,
 				syncCh:          syncCh,
+				deadlines:       base.NewDeadlines(1),
 				cancelations:    base.NewCancelations(),
 				concurrency:     1, // Set concurrency to 1 to make sure tasks are processed one at a time.
 				queues:          queueCfg,
@@ -899,6 +903,7 @@ func TestProcessorWithStrictPriority(t *testing.T) {
 				}
 			}
 			p.shutdown()
+			p.deadlines.Close()
 
 			if diff := cmp.Diff(tc.wantProcessed, processed, taskCmpOpts...); diff != "" {
 				t.Errorf("mismatch found in processed tasks; (-want, +got)\n%s", diff)
