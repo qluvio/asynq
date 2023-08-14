@@ -42,6 +42,10 @@ func (tb *TestBroker) SetClock(c timeutil.Clock) {
 	tb.real.SetClock(c)
 }
 
+func (tb *TestBroker) Now() time.Time {
+	return tb.real.Now()
+}
+
 func (tb *TestBroker) Sleep() {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
@@ -72,11 +76,11 @@ func (tb *TestBroker) EnqueueUnique(ctx context.Context, msg *base.TaskMessage, 
 	return tb.real.EnqueueUnique(ctx, msg, ttl, forceUnique...)
 }
 
-func (tb *TestBroker) Dequeue(serverID string, qnames ...string) (*base.TaskMessage, time.Time, error) {
+func (tb *TestBroker) Dequeue(serverID string, qnames ...string) (*base.TaskInfo, error) {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.sleeping {
-		return nil, time.Time{}, errRedisDown
+		return nil, errRedisDown
 	}
 	return tb.real.Dequeue(serverID, qnames...)
 }
@@ -216,6 +220,15 @@ func (tb *TestBroker) WriteResult(qname, id string, data []byte) (int, error) {
 	return tb.real.WriteResult(qname, id, data)
 }
 
+func (tb *TestBroker) UpdateTask(qname, id string, data []byte) (*base.TaskInfo, error) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return nil, errRedisDown
+	}
+	return tb.real.UpdateTask(qname, id, data)
+}
+
 func (tb *TestBroker) Ping() error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
@@ -277,4 +290,8 @@ func (tb *TestBroker) ScheduleUniqueBatch(ctx context.Context, msgs ...*base.Mes
 		return errRedisDown
 	}
 	return tb.real.ScheduleUniqueBatch(ctx, msgs...)
+}
+
+func (tb *TestBroker) MoveToQueue(ctx context.Context, fromQueue string, msg *base.TaskMessage, processAt time.Time, active bool) (base.TaskState, error) {
+	return tb.real.MoveToQueue(ctx, fromQueue, msg, processAt, active)
 }

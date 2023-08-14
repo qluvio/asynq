@@ -234,6 +234,12 @@ func (s *Scheduler) Start() error {
 
 // Shutdown stops and shuts down the scheduler.
 func (s *Scheduler) Shutdown() {
+	switch s.state.Get() {
+	case base.StateNew, base.StateClosed:
+		// not running, do nothing and return.
+		return
+	}
+
 	s.logger.Info("Scheduler shutting down")
 	close(s.done) // signal heartbeater to stop
 	ctx := s.cron.Stop()

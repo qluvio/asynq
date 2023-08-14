@@ -58,6 +58,10 @@ func (r *RDB) SetClock(c timeutil.Clock) {
 	r.clock = c
 }
 
+func (r *RDB) Now() time.Time {
+	return r.clock.Now()
+}
+
 // Ping checks the connection with redis server.
 func (r *RDB) Ping() error {
 	return r.client.Ping(context.Background()).Err()
@@ -275,10 +279,11 @@ if redis.call("EXISTS", KEYS[2]) == 0 then
 		local key = ARGV[2] .. id
 		redis.call("HSET", key, "state", "active")
 		redis.call("HDEL", key, "pending_since")
-		local data = redis.call("HMGET", key, "msg", "timeout", "deadline")
+		local data = redis.call("HMGET", key, "msg", "timeout", "deadline", "result")
 		local msg = data[1]
 		local timeout = tonumber(data[2])
 		local deadline = tonumber(data[3])
+		local result = data[4]
 		local score
 		if timeout ~= 0 and deadline ~= 0 then
 			score = math.min(ARGV[1]+timeout, deadline)
@@ -290,7 +295,7 @@ if redis.call("EXISTS", KEYS[2]) == 0 then
 			return redis.error_reply("asynq internal error: both timeout and deadline are not set")
 		end
 		redis.call("ZADD", KEYS[4], score, id)
-		return {msg, score}
+		return {msg, score, result}
 	end
 end
 return nil`)
@@ -299,13 +304,14 @@ return nil`)
 // off a queue if one exists and returns the message and deadline.
 // Dequeue skips a queue if the queue is paused.
 // If all queues are empty, ErrNoProcessableTask error is returned.
-func (r *RDB) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessage, deadline time.Time, err error) {
+func (r *RDB) Dequeue(serverID string, qnames ...string) (*base.TaskInfo, error) {
 	var op errors.Op = "rdb.Dequeue"
 
 	//
 	// PENDING(GIL): dequeue with server affinity is not implemented for redis
 	//
 	_ = serverID
+	ctx := context.Background()
 
 	for _, qname := range qnames {
 		keys := []string{
@@ -318,33 +324,49 @@ func (r *RDB) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessage,
 			r.clock.Now().Unix(),
 			base.TaskKeyPrefix(qname),
 		}
-		res, err := dequeueCmd.Run(context.Background(), r.client, keys, argv...).Result()
+		res, err := dequeueCmd.Run(ctx, r.client, keys, argv...).Result()
 		if err == redis.Nil {
 			continue
 		} else if err != nil {
-			return nil, time.Time{}, errors.E(op, errors.Unknown, fmt.Sprintf("redis eval error: %v", err))
+			return nil, errors.E(op, errors.Unknown, fmt.Sprintf("redis eval error: %v", err))
 		}
 		data, err := cast.ToSliceE(res)
 		if err != nil {
-			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from Lua script: %v", res))
+			return nil, errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from Lua script: %v", res))
 		}
-		if len(data) != 2 {
-			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("Lua script returned %d values; expected 2", len(data)))
+		if len(data) != 3 {
+			return nil, errors.E(op, errors.Internal, fmt.Sprintf("Lua script returned %d values; expected 2", len(data)))
 		}
 		encoded, err := cast.ToStringE(data[0])
 		if err != nil {
-			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from Lua script: %v", res))
+			return nil, errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from Lua script: %v", res))
 		}
 		d, err := cast.ToInt64E(data[1])
 		if err != nil {
-			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from Lua script: %v", res))
+			return nil, errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from Lua script: %v", res))
 		}
+		resultStr, err := cast.ToStringE(data[2])
+		if err != nil {
+			return nil, errors.E(op, errors.Internal, "unexpected value returned from Lua script")
+		}
+		var result []byte
+		if resultStr != "" {
+			result = []byte(resultStr)
+		}
+
+		var msg *base.TaskMessage
 		if msg, err = base.DecodeMessage([]byte(encoded)); err != nil {
-			return nil, time.Time{}, errors.E(op, errors.Internal, fmt.Sprintf("cannot decode message: %v", err))
+			return nil, errors.E(op, errors.Internal, fmt.Sprintf("cannot decode message: %v", err))
 		}
-		return msg, time.Unix(d, 0), nil
+
+		return &base.TaskInfo{
+			Message:  msg,
+			State:    base.TaskStateActive,
+			Deadline: time.Unix(d, 0),
+			Result:   result,
+		}, nil
 	}
-	return nil, time.Time{}, errors.E(op, errors.NotFound, errors.ErrNoProcessableTask)
+	return nil, errors.E(op, errors.NotFound, errors.ErrNoProcessableTask)
 }
 
 // KEYS[1] -> asynq:{<qname>}:active
@@ -463,7 +485,7 @@ return redis.status_reply("OK")
 // KEYS[6] -> asynq:{<qname>}:unique:{<checksum>}
 // ARGV[1] -> task ID
 // ARGV[2] -> stats expiration timestamp
-// ARGV[3] -> task exipration time in unix time
+// ARGV[3] -> task expiration time in unix time
 // ARGV[4] -> task message data
 var markAsCompleteUniqueCmd = redis.NewScript(`
 if redis.call("LREM", KEYS[1], 0, ARGV[1]) == 0 then
@@ -556,7 +578,7 @@ redis.call("HSET", KEYS[4], "state", "pending")
 redis.call("SET", KEYS[5], ARGV[1], "EX", ARGV[2])
 return redis.status_reply("OK")`)
 
-// Requeue moves the task from active queue to the specified queue.
+// Requeue moves the task from active state to pending in the queue of the message.
 func (r *RDB) Requeue(serverID string, msg *base.TaskMessage, aborted bool) error {
 	//
 	// PENDING(GIL): serverID (used to support server affinity) is ignored on redis.
@@ -1327,4 +1349,34 @@ func (r *RDB) WriteResult(qname, taskID string, data []byte) (int, error) {
 		return 0, errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "hset", Err: err})
 	}
 	return len(data), nil
+}
+
+func (r *RDB) UpdateTask(qname, id string, data []byte) (*base.TaskInfo, error) {
+	var op errors.Op = "rdb.UpdateTask"
+
+	_, err := r.WriteResult(qname, id, data)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := context.Background()
+	zm := r.client.ZMScore(ctx, base.DeadlinesKey(qname), id)
+	if zm.Err() != nil {
+		return nil, zm.Err()
+	}
+
+	deadline := time.Time{}
+	if len(zm.Val()) > 0 {
+		d, err := cast.ToInt64E(zm.Val()[0])
+		if err != nil {
+			return nil, errors.E(op, errors.Internal, fmt.Sprintf("cast error: unexpected return value from script: %v", zm.Val()[0]))
+		}
+		deadline = time.Unix(d, 0).UTC()
+	}
+
+	ret, err := r.GetTaskInfo(qname, id)
+	if err == nil {
+		ret.Deadline = deadline
+	}
+	return ret, err
 }

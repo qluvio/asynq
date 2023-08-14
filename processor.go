@@ -17,6 +17,7 @@ import (
 	asynqcontext "github.com/hibiken/asynq/internal/context"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
+	"github.com/hibiken/asynq/internal/rdb"
 	"go.uber.org/atomic"
 	"golang.org/x/time/rate"
 )
@@ -33,6 +34,23 @@ var TaskCanceled = errors.New("task canceled")
 // indicate that the task is processing asynchronously separately from the main
 // worker goroutine.
 var AsynchronousTask = errors.New("task is processing asynchronously")
+
+// TaskTransitionDone is used as a return value from Handler.ProcessTask to
+// indicate that the task was transitioned to another queue.
+var TaskTransitionDone = errors.New("task transitioned to another queue")
+var TaskTransitionAlreadyDone = errors.New("asyncProcessor already done")
+
+type AsynchronousHandler interface {
+	// UpdateTask updates the task in the given queue and id with the given data.
+	// It returns the corresponding task info and the actual deadline of the task
+	// or an error if the operation failed.
+	UpdateTask(queueName, taskId string, data []byte) (*TaskInfo, time.Time, error)
+
+	// RequeueCompleted moves the completed task with the given taskId in the given queue to the target queue.
+	// The task is enqueued or scheduled with the given 'typeName' task type and the given options.
+	// This call fails if the task is not in completed state.
+	RequeueCompleted(ctx context.Context, queue, taskId, targetQueue, typeName string, opts ...Option) (*TaskInfo, error)
+}
 
 type processor struct {
 	logger   *log.Logger
@@ -93,9 +111,11 @@ type processor struct {
 	starting chan<- *workerInfo
 	finished chan<- *base.TaskMessage
 
-	emptyQSleep time.Duration
-	firstEmptyQ time.Time
-	lastEmptyQ  time.Time
+	emptyQSleep      time.Duration
+	firstEmptyQ      time.Time
+	lastEmptyQ       time.Time
+	asynchronousOnce sync.Once
+	asynchronous     *asynchronousHandler
 }
 
 type processorParams struct {
@@ -233,7 +253,8 @@ func (p *processor) exec() {
 	case p.sema <- struct{}{}: // acquire token
 		// Only attempt to dequeue a task from queues that are under their respective concurrency limits
 		qnames, qsemas := p.acquireQSemas()
-		msg, deadline, err := p.broker.Dequeue(p.serverID, qnames...)
+		task, err := p.broker.Dequeue(p.serverID, qnames...)
+
 		switch {
 		case errors.Is(err, errors.ErrNoProcessableTask):
 			p.logEmptyQ()
@@ -256,6 +277,8 @@ func (p *processor) exec() {
 			<-p.sema                    // release token
 			return
 		}
+		msg := task.Message
+		deadline := task.Deadline
 		p.resetEmptyQ()
 		p.logger.Debugf("dequeued %s -> %v", msg.ID, deadline)
 		qsema := p.releaseQSemas(qsemas, msg.Queue) // release unused queue tokens
@@ -295,9 +318,19 @@ func (p *processor) exec() {
 			}
 
 			rw := &ResultWriter{id: msg.ID, qname: msg.Queue, broker: p.broker, ctx: ctx}
-			ap := &AsyncProcessor{results: p.results, task: ptask}
+			ap := &asyncProcessor{
+				task:      ptask,
+				processor: p,
+				results:   p.results,
+			}
 			go func() {
-				task := newTask(msg.Type, msg.Payload, rw, ap, func(fn func(string, error, bool)) { p.afterTasks.Add(msg.ID, fn) })
+				task := newTask(
+					msg.Type,
+					msg.Payload,
+					task.Result,
+					rw,
+					ap,
+					func(fn func(string, error, bool)) { p.afterTasks.Add(msg.ID, fn) })
 				p.results <- processorResult{task: ptask, err: p.perform(ctx, task)}
 			}()
 		}()
@@ -329,6 +362,7 @@ func (p *processor) fini() {
 		case r := <-p.results:
 			if errors.Is(r.err, AsynchronousTask) {
 				// task worker goroutine marked self as asynchronous task; do nothing
+				p.afterTasks.Delete(r.task.msg.ID)
 				break
 			}
 			done := r.task.done.Swap(true)
@@ -339,16 +373,21 @@ func (p *processor) fini() {
 					p.tasksMutex.Lock()
 					delete(p.tasks, r.task.msg.ID)
 					p.tasksMutex.Unlock()
-					if r.err != nil {
+					switch r.err {
+					case nil:
+						if r.task.msg.Recurrent {
+							p.requeue(r.task.ctx, r.task.msg)
+						} else {
+							p.handleSucceededMessage(r.task.ctx, r.task.msg)
+						}
+					case TaskTransitionDone:
+						// nothing to do: just cleanup
+					default:
 						reason := "errored"
 						if errors.Is(r.err, context.Canceled) || errors.Is(r.err, context.DeadlineExceeded) {
 							reason = "done"
 						}
 						p.handleFailedMessage(r.task.ctx, r.task.msg, reason, r.err)
-					} else if r.task.msg.Recurrent {
-						p.requeue(r.task.ctx, r.task.msg)
-					} else {
-						p.handleSucceededMessage(r.task.ctx, r.task.msg)
 					}
 					return
 				}()
@@ -568,6 +607,132 @@ func (p *processor) perform(ctx context.Context, task *Task) (err error) {
 		}
 	}()
 	return p.handler.ProcessTask(ctx, task)
+}
+
+func (p *processor) moveToQueue(ctx context.Context, msg *base.TaskMessage, newQueue, typename string, active bool, opts ...Option) (*TaskInfo, error) {
+	newQueue = strings.TrimSpace(newQueue)
+	if newQueue == "" {
+		return nil, errors.New("queue name cannot be empty")
+	}
+	if newQueue == msg.Queue {
+		return nil, errors.New("new queue name equals existing queue")
+	}
+	pmsg := *msg
+
+	newMsg := &pmsg
+	if typename != "" {
+		newMsg.Type = typename
+	}
+	newMsg.Retried = 0
+	newMsg.ErrorMsg = ""
+	newMsg.Queue = newQueue
+
+	processAt := time.Time{}
+	now := p.broker.Now()
+
+	for _, opt := range opts {
+		switch opt := opt.(type) {
+		case retryOption:
+			newMsg.Retry = int(opt)
+		case queueOption:
+			qname := strings.TrimSpace(string(opt))
+			if qname != newQueue {
+				return nil, errors.New("queue name specified twice")
+			}
+		case taskIDOption:
+			return nil, errors.New("task ID cannot be changed")
+		case timeoutOption:
+			newMsg.Timeout = int64(time.Duration(opt).Round(time.Second).Seconds())
+		case deadlineOption:
+			newMsg.Deadline = time.Time(opt).Unix()
+		case uniqueOption:
+			ttl := time.Duration(opt)
+			if ttl < 1*time.Second {
+				return nil, errors.New("Unique TTL cannot be less than 1s")
+			}
+			newMsg.UniqueKeyTTL = int64(ttl.Seconds())
+		case processAtOption:
+			processAt = time.Time(opt)
+		case processInOption:
+			processAt = now.Add(time.Duration(opt))
+		case forceUniqueOption:
+			// ignore
+		case recurrentOption:
+			newMsg.Recurrent = bool(opt)
+		case reprocessAfterOption:
+			newMsg.ReprocessAfter = int64(time.Duration(opt).Seconds())
+		case serverAffinityOption:
+			if _, ok := p.broker.(*rdb.RDB); ok {
+				return nil, errors.New("server affinity not supported with redis")
+			}
+			newMsg.ServerAffinity = int64(time.Duration(opt).Seconds())
+		case retentionOption:
+			newMsg.Retention = int64(time.Duration(opt).Seconds())
+		default:
+			// ignore unexpected option
+		}
+	}
+
+	state, err := p.broker.MoveToQueue(ctx, msg.Queue, newMsg, processAt, active)
+	if err != nil {
+		return nil, err
+	}
+
+	return newTaskInfo(newMsg, state, processAt, nil), nil
+}
+
+func (p *processor) asynchronousHandler() AsynchronousHandler {
+	p.asynchronousOnce.Do(func() {
+		if p.asynchronous == nil {
+			p.asynchronous = &asynchronousHandler{p: p}
+		}
+	})
+	return p.asynchronous
+}
+
+type asynchronousHandler struct {
+	p *processor
+}
+
+// UpdateTask updates the result of the given tasks with the given data.
+func (a *asynchronousHandler) UpdateTask(queueName, taskId string, data []byte) (*TaskInfo, time.Time, error) {
+	info, err := a.updateTask(queueName, taskId, data)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return newTaskInfo(info.Message, info.State, info.NextProcessAt, info.Result), info.Deadline, nil
+}
+
+func (a *asynchronousHandler) updateTask(queueName, taskId string, data []byte) (*base.TaskInfo, error) {
+	ti, err := a.p.broker.UpdateTask(queueName, taskId, data)
+
+	switch {
+	case errors.IsQueueNotFound(err):
+		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
+	case errors.IsTaskNotFound(err):
+		return nil, fmt.Errorf("asynq: %w", ErrTaskNotFound)
+	case err != nil:
+		return nil, fmt.Errorf("asynq: %v", err)
+	}
+
+	return ti, nil
+}
+
+// RequeueCompleted moves the completed task with the given taskId in the given queue to the target queue.
+// The task is enqueued or scheduled with the given task type and options.
+// This call fails if the task is not in completed state.
+func (a *asynchronousHandler) RequeueCompleted(ctx context.Context, fromQueue, taskId, toQueue, typeName string, opts ...Option) (*TaskInfo, error) {
+	ti, err := a.p.broker.Inspector().GetTaskInfo(fromQueue, taskId)
+	if err != nil {
+		return nil, err
+	}
+
+	ret, err := a.p.moveToQueue(ctx, ti.Message, toQueue, typeName, false, opts...)
+	if err != nil {
+		return nil, err
+	}
+	ret.Result = ti.Result
+	return ret, nil
 }
 
 func (p *processor) acquireQSemas() ([]string, map[string]chan struct{}) {

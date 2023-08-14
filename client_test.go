@@ -1316,3 +1316,407 @@ func TestClientEnqueueBatchError(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateTask(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	inspector := newInspector(client.rdb)
+	srv := newServer(client.rdb, Config{
+		Concurrency: 1,
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
+			return time.Second
+		}),
+		LogLevel: testLogLevel, //DebugLevel,
+	})
+	defer func() {
+		srv.Shutdown()
+		_ = client.Close()
+	}()
+
+	wgActive := sync.WaitGroup{}
+	wg := sync.WaitGroup{}
+	handler := func(ctx context.Context, task *Task) error {
+		wgActive.Done()
+		task.CallAfter(func(string, error, bool) {
+			defer wg.Done()
+		})
+		time.Sleep(time.Millisecond * 300)
+		return nil
+	}
+	_ = srv.Start(HandlerFunc(handler))
+
+	ctx.FlushDB()
+	{
+		//
+		// retention and update while task is active
+		//
+		const taskID = "custom_id"
+		task := NewTask("foo", nil)
+		now := time.Now().UTC()
+		deadline := now.Add(time.Hour).Truncate(time.Second)
+
+		wgActive.Add(1)
+		wg.Add(1)
+		opts := []Option{
+			Retention(time.Hour * 2),
+			Deadline(deadline),
+			TaskID(taskID),
+		}
+		eti, err := client.Enqueue(task, opts...)
+		if err != nil {
+			t.Fatalf("Enqueue failed: %v", err)
+		}
+		wgActive.Wait()
+		ah := srv.AsynchronousHandler()
+		uti, dl, err := ah.UpdateTask(eti.Queue, eti.ID, []byte("azerty"))
+		if err != nil {
+			t.Fatalf("UpdateTask failed: %v", err)
+		}
+		if !dl.Equal(deadline) {
+			t.Fatalf("deadline failed, expected: %v, actual:%v", deadline, dl)
+		}
+		if string(uti.Result) != "azerty" {
+			t.Fatalf("update result failed, expected: %v, actual:%v", "azerty", string(uti.Result))
+		}
+		wg.Wait()
+
+		ti, err := inspector.GetTaskInfo(eti.Queue, eti.ID)
+		if err != nil {
+			t.Fatalf("GetTaskInfo failed: %v", err)
+		}
+		if ti.State != TaskStateCompleted {
+			t.Fatalf("GetTaskInfo state: expected 'completed', got %v", ti.State.String())
+		}
+		if string(ti.Result) != "azerty" {
+			t.Fatalf("update result failed, expected: %v, actual:%v", "azerty", string(uti.Result))
+		}
+	}
+	{
+		//
+		// retention and update after task has completed
+		//
+		const taskID = "custom_id2"
+		task := NewTask("foo", nil)
+		now := time.Now().UTC()
+		deadline := now.Add(time.Hour).Truncate(time.Second)
+
+		wgActive.Add(1)
+		wg.Add(1)
+		opts := []Option{
+			Retention(time.Hour * 2),
+			Deadline(deadline),
+			TaskID(taskID),
+		}
+		eti, err := client.Enqueue(task, opts...)
+		if err != nil {
+			t.Fatalf("Enqueue failed: %v", err)
+		}
+		wgActive.Wait()
+		wg.Wait()
+
+		ah := srv.AsynchronousHandler()
+		uti, dl, err := ah.UpdateTask(eti.Queue, eti.ID, []byte("pompom"))
+		if err != nil {
+			t.Fatalf("UpdateTask failed: %v", err)
+		}
+		if uti.State != TaskStateCompleted {
+			t.Fatalf("UpdateTask state: expected 'completed', got %v", uti.State.String())
+		}
+		if dl.Unix() != 0 {
+			t.Fatalf("deadline failed, expected zero, actual:%v", dl)
+		}
+		if string(uti.Result) != "pompom" {
+			t.Fatalf("update result failed, expected: %v, actual:%v", "azerty", string(uti.Result))
+		}
+
+		ti, err := inspector.GetTaskInfo(eti.Queue, eti.ID)
+		if err != nil {
+			t.Fatalf("GetTaskInfo failed: %v", err)
+		}
+		if ti.State != TaskStateCompleted {
+			t.Fatalf("GetTaskInfo state: expected 'completed', got %v", ti.State.String())
+		}
+		if string(ti.Result) != "pompom" {
+			t.Fatalf("update result failed, expected: %v, actual:%v", "azerty", string(uti.Result))
+		}
+	}
+	{
+		//
+		// no retention: update should fail
+		//
+		const taskID = "custom_id3"
+		task := NewTask("foo", nil)
+		now := time.Now().UTC()
+		deadline := now.Add(time.Hour).Truncate(time.Second)
+
+		wgActive.Add(1)
+		wg.Add(1)
+		opts := []Option{
+			Deadline(deadline),
+			TaskID(taskID),
+		}
+		eti, err := client.Enqueue(task, opts...)
+		if err != nil {
+			t.Fatalf("Enqueue failed: %v", err)
+		}
+		wgActive.Wait()
+		wg.Wait()
+
+		ah := srv.AsynchronousHandler()
+		_, _, err = ah.UpdateTask(eti.Queue, eti.ID, []byte("qwerty"))
+		if err == nil {
+			t.Fatalf("UpdateTask did not fail")
+		}
+
+		_, err = inspector.GetTaskInfo(eti.Queue, eti.ID)
+		if err == nil {
+			t.Fatalf("GetTaskInfo did not fail")
+		}
+	}
+
+}
+
+func TestUpdateFailedTask(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	srv := newServer(client.rdb, Config{
+		Concurrency: 1,
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
+			return time.Second
+		}),
+		LogLevel: testLogLevel,
+	})
+	defer func() {
+		srv.Shutdown()
+		_ = client.Close()
+	}()
+
+	wg := sync.WaitGroup{}
+	handler := func(ctx context.Context, task *Task) error {
+		task.CallAfter(func(string, error, bool) {
+			defer wg.Done()
+		})
+		// handler always fails
+		return errors.New("test")
+	}
+	_ = srv.Start(HandlerFunc(handler))
+
+	ctx.FlushDB()
+	{
+		//
+		// update task after execution 'failed'
+		//
+		const taskID = "custom_id"
+		task := NewTask("foo", nil)
+		now := time.Now().UTC()
+		deadline := now.Add(time.Hour).Truncate(time.Second)
+
+		wg.Add(1)
+		opts := []Option{
+			Retention(time.Hour * 2),
+			Deadline(deadline),
+			TaskID(taskID),
+			MaxRetry(0), // no retry: task will be archived
+		}
+		eti, err := client.Enqueue(task, opts...)
+		if err != nil {
+			t.Fatalf("Enqueue failed: %v", err)
+		}
+		wg.Wait()
+		ah := srv.AsynchronousHandler()
+		ti, _, err := ah.UpdateTask(eti.Queue, eti.ID, []byte("azerty"))
+		if err != nil {
+			t.Fatalf("UpdateTask failed: %v", err)
+		}
+
+		assertTask := func(ti *TaskInfo, result string) {
+			if ti.State != TaskStateArchived {
+				t.Fatalf("GetTaskInfo state: expected 'archived', got %v", ti.State.String())
+			}
+			if string(ti.Result) != result {
+				t.Fatalf("update result failed, expected: %v, actual:%v", "azerty", string(ti.Result))
+			}
+			// last error is still there
+			if ti.LastErr != "test" {
+				t.Fatalf("expected 'test' last error, got '%s'", ti.LastErr)
+			}
+		}
+		assertTask(ti, "azerty")
+
+		ti, _, err = ah.UpdateTask(eti.Queue, eti.ID, []byte("qwerty"))
+		if err != nil {
+			t.Fatalf("UpdateTask failed: %v", err)
+		}
+		assertTask(ti, "qwerty")
+	}
+}
+
+func TestActiveTask_TransitionToQueue(t *testing.T) {
+	const (
+		customId         = "customId"
+		asynchronousType = "asynchronous"
+		regularType      = "regular"
+		transitionType   = "transition"
+	)
+	queues := map[string]string{
+		regularType:      "regular",
+		transitionType:   "transition",
+		asynchronousType: "asynchronous",
+	}
+
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	srv := newServer(client.rdb, Config{
+		Concurrency: 1,
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
+			return time.Second
+		}),
+		Queues: &QueuesConfig{
+			Queues: map[string]interface{}{
+				queues[regularType]:      1,
+				queues[transitionType]:   1,
+				queues[asynchronousType]: 1,
+			},
+			Priority: Lenient,
+		},
+		LogLevel: testLogLevel,
+	})
+	defer func() {
+		srv.Shutdown()
+		_ = client.Close()
+	}()
+
+	wg := sync.WaitGroup{}
+	handler := func(ctx context.Context, task *Task) error {
+		srv.logger.Info("task handler, type: " + task.Type())
+		switch task.Type() {
+		case regularType:
+			_, err := task.AsyncProcessor().TransitionToQueue(
+				queues[transitionType],
+				transitionType,
+				Retention(time.Hour),
+			)
+			return err
+		case transitionType:
+			task.CallAfter(func(string, error, bool) {
+				defer wg.Done()
+			})
+			return nil
+		case asynchronousType:
+			go func() {
+				err := task.AsyncProcessor().TaskTransition(
+					queues[transitionType],
+					transitionType,
+					Retention(time.Hour),
+				)
+				require.NoError(t, err)
+			}()
+			return AsynchronousTask
+		default:
+		}
+		return errors.New("unexpected task type: " + task.Type())
+	}
+	_ = srv.Start(HandlerFunc(handler))
+
+	inspect, err := NewInspectorClient(client)
+	require.NoError(t, err)
+
+	for _, taskType := range []string{regularType, asynchronousType} {
+		ctx.FlushDB()
+		wg.Add(1)
+		_, err := client.Enqueue(NewTask(taskType, nil,
+			TaskID(customId),
+			Queue(queues[taskType])))
+		require.NoError(t, err)
+
+		wg.Wait()
+		ti, err := inspect.GetTaskInfo(queues[transitionType], customId)
+		require.NoError(t, err)
+		require.Equal(t, TaskStateCompleted, ti.State)
+	}
+
+}
+
+func TestMoveCompletedTask_ToQueue(t *testing.T) {
+	const (
+		customId = "customId"
+	)
+
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	srv := newServer(client.rdb, Config{
+		Concurrency: 1,
+		RetryDelayFunc: RetryDelayFunc(func(n int, err error, t *Task) time.Duration {
+			return time.Second
+		}),
+		LogLevel: testLogLevel,
+		Queues: &QueuesConfig{
+			Queues: map[string]interface{}{
+				"default":   1,
+				"new_queue": 1,
+			},
+			Priority: Lenient,
+		},
+	})
+	defer func() {
+		srv.Shutdown()
+		_ = client.Close()
+	}()
+
+	var task *Task
+	wg := sync.WaitGroup{}
+	handler := func(ctx context.Context, t *Task) error {
+		t.CallAfter(func(string, error, bool) {
+			defer wg.Done()
+		})
+		task = t
+		return nil
+	}
+	_ = srv.Start(HandlerFunc(handler))
+
+	inspect, err := NewInspectorClient(client)
+	require.NoError(t, err)
+
+	ctx.FlushDB()
+	wg.Add(1)
+	_, err = client.Enqueue(NewTask("test", nil,
+		TaskID(customId),
+		Retention(time.Hour)))
+	require.NoError(t, err)
+	wg.Wait()
+
+	ti, err := inspect.GetTaskInfo("default", customId)
+	require.NoError(t, err)
+	require.Equal(t, TaskStateCompleted, ti.State)
+
+	_, err = task.AsyncProcessor().TransitionToQueue("new_queue", "new_type")
+	// error: rqlite.moveToQueue - rqlite error: context canceled, at: rqlite.(*Connection).moveToQueue (tasks.go:1089)
+	// if context is not canceled:
+	// next: rqlite.moveToQueue: FAILED_PRECONDITION: cannot move to new queue an already completed task.
+	require.Error(t, err)
+
+	wg.Add(1)
+	ah := srv.AsynchronousHandler()
+	ti, err = ah.RequeueCompleted(
+		context.Background(),
+		"default",
+		customId,
+		"new_queue",
+		"new_type",
+		Retention(time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, TaskStatePending, ti.State)
+	wg.Wait()
+
+	ti, err = inspect.GetTaskInfo("new_queue", customId)
+	require.NoError(t, err)
+	require.Equal(t, TaskStateCompleted, ti.State)
+}

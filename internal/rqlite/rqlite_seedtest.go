@@ -25,7 +25,11 @@ func SeedPendingQueue(tb testing.TB, r *RQLite, msgs []*base.TaskMessage, qname 
 	require.NoError(tb, err)
 	for _, msg := range msgs {
 		require.Equal(tb, qname, msg.Queue)
-		err := r.Enqueue(context.Background(), msg)
+		if msg.UniqueKey != "" && msg.UniqueKeyTTL > 0 {
+			err = r.EnqueueUnique(context.Background(), msg, time.Duration(msg.UniqueKeyTTL)*time.Second)
+		} else {
+			err = r.Enqueue(context.Background(), msg)
+		}
 		require.NoError(tb, err)
 	}
 }
@@ -70,6 +74,16 @@ func SeedCompletedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string, f
 			msg.CompletedAt+int64(statsTTL),
 			retainUntil,
 			msg.ID)
+		//st := Statement(
+		//	"INSERT INTO "+r.conn.table(CompletedTasksTable)+
+		//		" (queue_name, type_name, task_uuid, task_msg, done_at, retain_until) "+
+		//		" VALUES (?, ?, ?, ?, ?, ?)",
+		//	qname,
+		//	msg.Type,
+		//	msg.ID,
+		//	encoded,
+		//	msg.CompletedAt,
+		//	retainUntil)
 		wrs, err := r.conn.WriteStmt(r.conn.ctx(), st)
 		require.NoError(tb, err, "error %v", wrs[0].Err)
 
@@ -80,6 +94,10 @@ func SeedCompletedQueue(tb testing.TB, r *RQLite, msgs []base.Z, qname string, f
 
 		err = r.conn.setTaskCompleted(time.Time{}, "", msg)
 		require.NoError(tb, err)
+
+		//st = r.conn.processedStatsStatement(time.Unix(msg.CompletedAt, 0), msg.Queue)
+		//wrs, err = r.conn.WriteStmt(r.conn.ctx(), st)
+		//require.NoError(tb, err)
 	}
 }
 

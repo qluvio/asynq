@@ -15,6 +15,7 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
+	"github.com/hibiken/asynq/internal/sqlite"
 	"github.com/hibiken/asynq/internal/sqlite3"
 	"github.com/hibiken/asynq/internal/timeutil"
 )
@@ -35,23 +36,45 @@ var _ base.Scheduler = (*RQLite)(nil)
 var _ base.Inspector = (*RQLite)(nil)
 var slog log.Base
 
+type SQLiteConnConfig = sqlite.Config
+type RQLiteConnConfig struct {
+	Url              string `json:"url,omitempty"`     // rqlite: server url, e.g. http://localhost:4001.
+	ConsistencyLevel string `json:"consistency_level"` // rqlite: consistency level: none | weak| strong
+}
+
+func (c *RQLiteConnConfig) InitDefaults() *RQLiteConnConfig {
+	c.ConsistencyLevel = "strong"
+	return c
+}
+
+func (c *RQLiteConnConfig) Validate() error {
+	if c.ConsistencyLevel == "" {
+		c.ConsistencyLevel = "strong"
+	}
+	c.ConsistencyLevel = strings.ToLower(c.ConsistencyLevel)
+	if c.ConsistencyLevel != "none" && c.ConsistencyLevel != "weak" && c.ConsistencyLevel != "strong" {
+		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition,
+			fmt.Sprintf("invalid consistency level: %s", c.ConsistencyLevel))
+	}
+	return nil
+}
+
+// Config is the configuration for rqlite/sqlite
 type Config struct {
-	Type                      string        `json:"type"`                                   // rqlite | sqlite
-	SqliteDbPath              string        `json:"sqlite_db_path,omitempty"`               // sqlite: db path
-	SqliteInMemory            bool          `json:"sqlite_in_memory,omitempty"`             // sqlite: im memory DB
-	SqliteTracing             bool          `json:"sqlite_tracing,omitempty"`               // sqlite: true to trace sql requests execution
-	RqliteUrl                 string        `json:"rqlite_url,omitempty"`                   // rqlite: server url, e.g. http://localhost:4001.
-	ConsistencyLevel          string        `json:"consistency_level"`                      // rqlite: consistency level: none | weak| strong
-	TablesPrefix              string        `json:"tables_prefix,omitempty"`                // tables prefix
-	MaxArchiveSize            int           `json:"max_archive_size,omitempty"`             // maximum number of tasks in archive
-	ArchivedExpirationInDays  int           `json:"archived_expiration_in_days,omitempty"`  // number of days before an archived task gets deleted permanently
-	ArchiveTTL                time.Duration `json:"archive_ttl,omitempty"`                  // expiration of archived entries
-	SchedulerHistoryMaxEvents int           `json:"scheduler_history_max_events,omitempty"` // Maximum number of enqueue events to store per scheduler entry.
-	PubsubPollingInterval     time.Duration `json:"pubsub_polling_interval,omitempty"`      // interval for polling the pub-sub table. Zero to disable.
+	Type                      string           `json:"type"` // rqlite | sqlite
+	Rqlite                    RQLiteConnConfig `json:"rqlite"`
+	Sqlite                    SQLiteConnConfig `json:"sqlite"`
+	TablesPrefix              string           `json:"tables_prefix,omitempty"`                // tables prefix
+	MaxArchiveSize            int              `json:"max_archive_size,omitempty"`             // maximum number of tasks in archive
+	ArchivedExpirationInDays  int              `json:"archived_expiration_in_days,omitempty"`  // number of days before an archived task gets deleted permanently
+	ArchiveTTL                time.Duration    `json:"archive_ttl,omitempty"`                  // expiration of archived entries
+	SchedulerHistoryMaxEvents int              `json:"scheduler_history_max_events,omitempty"` // Maximum number of enqueue events to store per scheduler entry.
+	PubsubPollingInterval     time.Duration    `json:"pubsub_polling_interval,omitempty"`      // interval for polling the pub-sub table. Zero to disable.
 }
 
 func (c *Config) InitDefaults() *Config {
-	c.ConsistencyLevel = "strong"
+	c.Rqlite.InitDefaults()
+	c.Sqlite.InitDefaults()
 	c.MaxArchiveSize = maxArchiveSize
 	c.ArchivedExpirationInDays = archivedExpirationInDays
 	c.ArchiveTTL = statsTTL
@@ -64,37 +87,46 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "nil config")
 	}
-	if c.RqliteUrl == "" && c.SqliteDbPath == "" {
+	if c.Rqlite.Url == "" && c.Sqlite.DbPath == "" {
 		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no rqlite url and no sqlite db path provided")
 	}
 	switch c.Type {
 	case rqliteType:
-		if c.RqliteUrl == "" {
+		if c.Rqlite.Url == "" {
 			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no rqlite url provided")
 		}
-		c.SqliteDbPath = ""
+		c.Sqlite.DbPath = ""
 	case sqliteType:
 		// require a db path even with in-memory as we need it to share the connection
-		if c.SqliteDbPath == "" {
+		if c.Sqlite.DbPath == "" {
 			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no sqlite db path provided")
 		}
-		c.RqliteUrl = ""
+		c.Rqlite.Url = ""
 	default:
-		if c.RqliteUrl != "" && c.SqliteDbPath != "" {
+		if c.Rqlite.Url != "" && c.Sqlite.DbPath != "" {
 			return errors.E(errors.Op("config.validate"), errors.FailedPrecondition, "no type specified and both rqlite url and sqlite db path provided")
 		}
-		if c.RqliteUrl != "" {
+		if c.Rqlite.Url != "" {
 			c.Type = rqliteType
 		}
-		if c.SqliteDbPath != "" {
+		if c.Sqlite.DbPath != "" {
 			c.Type = sqliteType
 		}
 	}
-	c.ConsistencyLevel = strings.ToLower(c.ConsistencyLevel)
-	if c.ConsistencyLevel != "none" && c.ConsistencyLevel != "weak" && c.ConsistencyLevel != "strong" {
-		return errors.E(errors.Op("config.validate"), errors.FailedPrecondition,
-			fmt.Sprintf("invalid consistency level: %s", c.ConsistencyLevel))
+
+	var err error
+	switch c.Type {
+	case rqliteType:
+		err = c.Rqlite.Validate()
+		_ = c.Sqlite.Validate()
+	case sqliteType:
+		err = c.Sqlite.Validate()
+		_ = c.Rqlite.Validate()
 	}
+	if err != nil {
+		return err
+	}
+
 	if c.MaxArchiveSize <= 0 {
 		c.MaxArchiveSize = maxArchiveSize
 	}
@@ -107,6 +139,10 @@ func (c *Config) Validate() error {
 	if c.SchedulerHistoryMaxEvents <= 0 {
 		c.SchedulerHistoryMaxEvents = schedulerHistoryMaxEvents
 	}
+	// pubsub is disabled when <= 0
+	//if c.PubsubPollingInterval <= 0 {
+	//	c.PubsubPollingInterval = PubsubPollingInterval
+	//}
 
 	return nil
 }
@@ -280,17 +316,17 @@ func (r *RQLite) EnqueueUniqueBatch(ctx context.Context, msg ...*base.MessageBat
 // off a queue if one exists and returns the message and deadline.
 // Dequeue skips a queue if the queue is paused.
 // If all queues are empty, ErrNoProcessableTask error is returned.
-func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessage, deadline time.Time, err error) {
+func (r *RQLite) Dequeue(serverID string, qnames ...string) (*base.TaskInfo, error) {
 	var op errors.Op = "rqlite.Dequeue"
 	conn, err := r.client(op)
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, err
 	}
 
 	for _, qname := range qnames {
 		q, err := r.getQueue(qname)
 		if err != nil {
-			return nil, time.Time{}, errors.E(op, fmt.Sprintf("get queue error: %v", err))
+			return nil, errors.E(op, fmt.Sprintf("get queue error: %v", err))
 		}
 		if q == nil || q.state == paused {
 			continue
@@ -298,15 +334,21 @@ func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessa
 
 		// here we would use dequeueMessage0 to perform dequeue in 2 steps
 		data, err := conn.dequeueMessage(r.Now(), serverID, qname)
+
 		if err != nil {
-			return nil, time.Time{}, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
+			return nil, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
 		}
 		if data == nil {
 			continue
 		}
-		return data.msg, time.Unix(data.deadline, 0), nil
+		return &base.TaskInfo{
+			Message:  data.msg,
+			State:    base.TaskStateActive,
+			Deadline: time.Unix(data.deadline, 0),
+			Result:   data.result,
+		}, nil
 	}
-	return nil, time.Time{}, errors.E(op, errors.NotFound, errors.ErrNoProcessableTask)
+	return nil, errors.E(op, errors.NotFound, errors.ErrNoProcessableTask)
 }
 
 // Done removes the task from active queue to mark the task as done and set its
@@ -320,13 +362,23 @@ func (r *RQLite) Done(serverID string, msg *base.TaskMessage) error {
 	return conn.setTaskDone(r.Now(), serverID, msg)
 }
 
-// Requeue moves the task from active to pending in the specified queue.
+// Requeue moves the task from active state to pending in the queue of the message.
 func (r *RQLite) Requeue(serverID string, msg *base.TaskMessage, aborted bool) error {
 	conn, err := r.client("rqlite.Requeue")
 	if err != nil {
 		return err
 	}
 	return conn.requeueTask(r.Now(), serverID, msg, aborted)
+}
+
+// MoveToQueue moves the task from fromQueue queue to pending state in the queue of the message.
+// An error is returned if the message does not exist in 'fromQueue'.
+func (r *RQLite) MoveToQueue(ctx context.Context, fromQueue string, msg *base.TaskMessage, processAt time.Time, active bool) (base.TaskState, error) {
+	conn, err := r.client("rqlite.MoveToQueue")
+	if err != nil {
+		return 0, err
+	}
+	return conn.moveToQueue(ctx, r.Now(), fromQueue, processAt, msg, active)
 }
 
 // Schedule adds the task to the scheduled set to be processed in the future.
@@ -431,7 +483,12 @@ func (r *RQLite) WriteResult(qname, id string, data []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return conn.writeTaskResult(qname, id, data, true)
+	return conn.writeTaskResult(qname, id, data, false)
+}
+
+func (r *RQLite) UpdateTask(qname, id string, data []byte) (*base.TaskInfo, error) {
+	conn, _ := r.Client()
+	return conn.updateTask(r.clock.Now(), qname, id, false, data)
 }
 
 // ForwardIfReady checks scheduled and retry sets of the given queues

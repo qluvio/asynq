@@ -89,7 +89,7 @@ func testNotNULLField(t *testing.T, db *DB) {
 	if err != nil {
 		t.Fatalf("failed to get PRAGMA table_info: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["cid","name","type","notnull","dflt_value","pk"],"types":["","","","","",""],"values":[[0,"id","INTEGER",1,null,1],[1,"name","TEXT",0,null,0]]}]`, asJSON(r); exp != got {
+	if exp, got := `[{"columns":["cid","name","type","notnull","dflt_value","pk"],"types":["integer","text","text","integer","",""],"values":[[0,"id","INTEGER",1,null,1],[1,"name","TEXT",0,null,0]]}]`, asJSON(r); exp != got {
 		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
 	}
 }
@@ -102,6 +102,91 @@ func testEmptyStatements(t *testing.T, db *DB) {
 	_, err = db.ExecuteStringStmt(";")
 	if err != nil {
 		t.Fatalf("failed to execute empty statement with semicolon: %s", err.Error())
+	}
+}
+
+func testSimpleStatementsNumeric(t *testing.T, db *DB) {
+	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT, age NUMERIC)")
+	if err != nil {
+		t.Fatalf("failed to create table: %s", err.Error())
+	}
+
+	_, err = db.ExecuteStringStmt(`INSERT INTO foo(name, age) VALUES("fiona", 20)`)
+	if err != nil {
+		t.Fatalf("failed to insert record: %s", err.Error())
+	}
+
+	r, err := db.QueryStringStmt(`SELECT * FROM foo`)
+	if err != nil {
+		t.Fatalf("failed to query table: %s", err.Error())
+	}
+	if exp, got := `[{"columns":["id","name","age"],"types":["integer","text","numeric"],"values":[[1,"fiona",20]]}]`, asJSON(r); exp != got {
+		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
+	}
+}
+
+func testSimpleStatementsCollate(t *testing.T, db *DB) {
+	_, err := db.ExecuteStringStmt("CREATE TABLE foo(x INTEGER PRIMARY KEY, a, b COLLATE BINARY, c COLLATE RTRIM, d COLLATE NOCASE)")
+	if err != nil {
+		t.Fatalf("failed to create table: %s", err.Error())
+	}
+
+	req := &command.Request{
+		Transaction: true,
+		Statements: []*command.Statement{
+			{
+				Sql: `INSERT INTO foo VALUES(1,'abc','abc', 'abc  ','abc')`,
+			},
+			{
+				Sql: `INSERT INTO foo VALUES(2,'abc','abc', 'abc',  'ABC')`,
+			},
+			{
+				Sql: `INSERT INTO foo VALUES(3,'abc','abc', 'abc ', 'Abc')`,
+			},
+			{
+				Sql: `INSERT INTO foo VALUES(4,'abc','abc ','ABC',  'abc')`,
+			},
+		},
+	}
+	_, err = db.Execute(req, false)
+	if err != nil {
+		t.Fatalf("failed to insert records: %s", err.Error())
+	}
+
+	tests := []struct {
+		query string
+		exp   string
+	}{
+		{
+			query: `SELECT x FROM foo WHERE a = b ORDER BY x`,
+			exp:   `[{"columns":["x"],"types":["integer"],"values":[[1],[2],[3]]}]`,
+		},
+		{
+			query: `SELECT x FROM foo WHERE a = b COLLATE RTRIM ORDER BY x`,
+			exp:   `[{"columns":["x"],"types":["integer"],"values":[[1],[2],[3],[4]]}]`,
+		},
+		{
+			query: `SELECT count(*) FROM foo GROUP BY d ORDER BY 1`,
+			exp:   `[{"columns":["count(*)"],"types":["integer"],"values":[[4]]}]`,
+		},
+		{
+			query: `SELECT count(*) FROM foo GROUP BY (d || '') ORDER BY 1`,
+			exp:   `[{"columns":["count(*)"],"types":["integer"],"values":[[1],[1],[2]]}]`,
+		},
+		{
+			query: `SELECT x FROM foo ORDER BY c COLLATE NOCASE, x`,
+			exp:   `[{"columns":["x"],"types":["integer"],"values":[[2],[4],[3],[1]]}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		r, err := db.QueryStringStmt(tt.query)
+		if err != nil {
+			t.Fatalf("failed to query table: %s", err.Error())
+		}
+		if exp, got := tt.exp, asJSON(r); exp != got {
+			t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
+		}
 	}
 }
 
@@ -159,6 +244,64 @@ func testSimpleSingleStatements(t *testing.T, db *DB) {
 	}
 	if exp, got := `[{"columns":["id","name","name"],"types":["integer","text","text"],"values":[[1,"fiona","fiona"],[2,"aoife","aoife"]]}]`, asJSON(r); exp != got {
 		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
+	}
+}
+
+// testSimpleExpressionStatements tests that types are set for expressions.
+func testSimpleExpressionStatements(t *testing.T, db *DB) {
+	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT, age INTEGER, height REAL)")
+	if err != nil {
+		t.Fatalf("failed to create table: %s", err.Error())
+	}
+
+	_, err = db.ExecuteStringStmt(`INSERT INTO foo(id, name, age, height) VALUES(1, "fiona", 20, 6.7)`)
+	if err != nil {
+		t.Fatalf("failed to insert record: %s", err.Error())
+	}
+
+	_, err = db.ExecuteStringStmt(`INSERT INTO foo(id, name, age, height) VALUES(2, "aoife", 40, 10.4)`)
+	if err != nil {
+		t.Fatalf("failed to insert record: %s", err.Error())
+	}
+
+	tests := []struct {
+		query string
+		exp   string
+	}{
+		{
+			query: `SELECT sum(name) FROM foo`,
+			exp:   `[{"columns":["sum(name)"],"types":["real"],"values":[[0]]}]`,
+		},
+		{
+			query: `SELECT sum(age) FROM foo`,
+			exp:   `[{"columns":["sum(age)"],"types":["integer"],"values":[[60]]}]`,
+		},
+		{
+			query: `SELECT sum(height) FROM foo`,
+			exp:   `[{"columns":["sum(height)"],"types":["real"],"values":[[17.1]]}]`,
+		},
+		{
+			query: `SELECT count(*) FROM foo`,
+			exp:   `[{"columns":["count(*)"],"types":["integer"],"values":[[2]]}]`,
+		},
+		{
+			query: `SELECT avg(height) FROM foo`,
+			exp:   `[{"columns":["avg(height)"],"types":["real"],"values":[[8.55]]}]`,
+		},
+		{
+			query: `SELECT avg(height),count(*),sum(age) FROM foo`,
+			exp:   `[{"columns":["avg(height)","count(*)","sum(age)"],"types":["real","integer","integer"],"values":[[8.55,2,60]]}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		r, err := db.QueryStringStmt(tt.query)
+		if err != nil {
+			t.Fatalf("failed to query table: %s", err.Error())
+		}
+		if exp, got := tt.exp, asJSON(r); exp != got {
+			t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
+		}
 	}
 }
 
@@ -240,7 +383,7 @@ func testSimpleSingleConcatStatements(t *testing.T, db *DB) {
 	if err != nil {
 		t.Fatalf("failed to query table: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["id || \"_bar\"","name"],"types":["","text"],"values":[["1_bar","fiona"]]}]`, asJSON(r); exp != got {
+	if exp, got := `[{"columns":["id || \"_bar\"","name"],"types":["text","text"],"values":[["1_bar","fiona"]]}]`, asJSON(r); exp != got {
 		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
 	}
 }
@@ -408,7 +551,7 @@ func testSimplePragmaTableInfo(t *testing.T, db *DB) {
 	if err != nil {
 		t.Fatalf("failed to query a common table expression: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["cid","name","type","notnull","dflt_value","pk"],"types":["","","","","",""],"values":[[0,"id","INTEGER",1,null,1],[1,"name","TEXT",0,null,0]]}]`, asJSON(res); exp != got {
+	if exp, got := `[{"columns":["cid","name","type","notnull","dflt_value","pk"],"types":["integer","text","text","integer","",""],"values":[[0,"id","INTEGER",1,null,1],[1,"name","TEXT",0,null,0]]}]`, asJSON(res); exp != got {
 		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
 	}
 }
@@ -442,7 +585,7 @@ func testWriteOnQueryDatabaseShouldFail(t *testing.T, db *DB) {
 	if err != nil {
 		t.Fatalf("failed to query table: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["COUNT(*)"],"types":[""],"values":[[1]]}]`, asJSON(ro); exp != got {
+	if exp, got := `[{"columns":["COUNT(*)"],"types":["integer"],"values":[[1]]}]`, asJSON(ro); exp != got {
 		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
 	}
 }
@@ -745,7 +888,7 @@ func testSimpleRequest(t *testing.T, db *DB) {
 				`SELECT COUNT(*) FROM foo`,
 				`SELECT last FROM foo WHERE first="richard"`,
 			},
-			exp: `[{"last_insert_id":3,"rows_affected":1},{"columns":["COUNT(*)"],"types":[""],"values":[[3]]},{"columns":["last"],"types":["text"],"values":[["feynman"]]}]`,
+			exp: `[{"last_insert_id":3,"rows_affected":1},{"columns":["COUNT(*)"],"types":["integer"],"values":[[3]]},{"columns":["last"],"types":["text"],"values":[["feynman"]]}]`,
 		},
 		{
 			name: "insert and select non-existent table",
@@ -754,7 +897,7 @@ func testSimpleRequest(t *testing.T, db *DB) {
 				`SELECT COUNT(*) FROM foo`,
 				`SELECT * FROM bar`,
 			},
-			exp: `[{"last_insert_id":4,"rows_affected":1},{"columns":["COUNT(*)"],"types":[""],"values":[[4]]},{"error":"no such table: bar"}]`,
+			exp: `[{"last_insert_id":4,"rows_affected":1},{"columns":["COUNT(*)"],"types":["integer"],"values":[[4]]},{"error":"no such table: bar"}]`,
 		},
 	}
 
@@ -931,12 +1074,17 @@ func testSerialize(t *testing.T, db *DB) {
 	if err != nil {
 		t.Fatalf("failed to serialize database: %s", err.Error())
 	}
+
+	if !IsDELETEModeEnabled(b) {
+		t.Fatalf("expected DELETE mode to be enabled")
+	}
+
 	err = os.WriteFile(dstDB.Name(), b, 0644)
 	if err != nil {
 		t.Fatalf("failed to write serialized database to file: %s", err.Error())
 	}
 
-	newDB, err := Open(dstDB.Name(), false)
+	newDB, err := Open(dstDB.Name(), false, false)
 	if err != nil {
 		t.Fatalf("failed to open on-disk serialized database: %s", err.Error())
 	}
@@ -975,6 +1123,11 @@ func testSize(t *testing.T, db *DB) {
 func testDBFileSize(t *testing.T, db *DB) {
 	if _, err := db.FileSize(); err != nil {
 		t.Fatalf("failed to read database file size: %s", err)
+	}
+}
+func testDBWALSize(t *testing.T, db *DB) {
+	if _, err := db.WALSize(); err != nil {
+		t.Fatalf("failed to read database WAL file size: %s", err)
 	}
 }
 
@@ -1101,21 +1254,21 @@ func testJSON1(t *testing.T, db *DB) {
 	if err != nil {
 		t.Fatalf("failed to perform simple SELECT: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["phone"],"types":[""],"values":[["{\"mobile\":\"789111\",\"home\":\"123456\"}"]]}]`, asJSON(q); exp != got {
+	if exp, got := `[{"columns":["phone"],"types":["text"],"values":[["{\"mobile\":\"789111\",\"home\":\"123456\"}"]]}]`, asJSON(q); exp != got {
 		t.Fatalf("unexpected results for simple query, expected %s, got %s", exp, got)
 	}
 	q, err = db.QueryStringStmt("SELECT json_extract(customer.phone, '$.mobile') FROM customer")
 	if err != nil {
 		t.Fatalf("failed to perform simple SELECT: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["json_extract(customer.phone, '$.mobile')"],"types":[""],"values":[["789111"]]}]`, asJSON(q); exp != got {
+	if exp, got := `[{"columns":["json_extract(customer.phone, '$.mobile')"],"types":["text"],"values":[["789111"]]}]`, asJSON(q); exp != got {
 		t.Fatalf("unexpected results for JSON query, expected %s, got %s", exp, got)
 	}
 	q, err = db.QueryStringStmt("SELECT customer.phone ->> '$.mobile' FROM customer")
 	if err != nil {
 		t.Fatalf("failed to perform simple SELECT: %s", err.Error())
 	}
-	if exp, got := `[{"columns":["customer.phone ->> '$.mobile'"],"types":[""],"values":[["789111"]]}]`, asJSON(q); exp != got {
+	if exp, got := `[{"columns":["customer.phone ->> '$.mobile'"],"types":["text"],"values":[["789111"]]}]`, asJSON(q); exp != got {
 		t.Fatalf("unexpected results for JSON query, expected %s, got %s", exp, got)
 	}
 }
@@ -1165,7 +1318,7 @@ func testCopy(t *testing.T, db *DB) {
 
 	dstFile := mustTempFile()
 	defer os.Remove(dstFile)
-	dstDB, err := Open(dstFile, false)
+	dstDB, err := Open(dstFile, false, false)
 	if err != nil {
 		t.Fatalf("failed to open destination database: %s", err)
 	}
@@ -1174,6 +1327,10 @@ func testCopy(t *testing.T, db *DB) {
 	err = db.Copy(dstDB)
 	if err != nil {
 		t.Fatalf("failed to copy database: %s", err.Error())
+	}
+
+	if !IsDELETEModeEnabledSQLiteFile(dstFile) {
+		t.Fatalf("Destination file not marked in DELETE mode")
 	}
 
 	ro, err := dstDB.QueryStringStmt(`SELECT * FROM foo`)
@@ -1187,6 +1344,10 @@ func testCopy(t *testing.T, db *DB) {
 
 func testBackup(t *testing.T, db *DB) {
 	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	if err != nil {
+		t.Fatalf("failed to create table: %s", err.Error())
+	}
+	_, err = db.ExecuteStringStmt("CREATE TABLE baz (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
 	if err != nil {
 		t.Fatalf("failed to create table: %s", err.Error())
 	}
@@ -1220,8 +1381,11 @@ func testBackup(t *testing.T, db *DB) {
 	if err != nil {
 		t.Fatalf("failed to backup database: %s", err.Error())
 	}
+	if !IsDELETEModeEnabledSQLiteFile(dstDB) {
+		t.Fatalf("Backup file not marked in DELETE mode")
+	}
 
-	newDB, err := Open(dstDB, false)
+	newDB, err := Open(dstDB, false, false)
 	if err != nil {
 		t.Fatalf("failed to open backup database: %s", err.Error())
 	}
@@ -1232,6 +1396,13 @@ func testBackup(t *testing.T, db *DB) {
 		t.Fatalf("failed to query table: %s", err.Error())
 	}
 	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"],[2,"fiona"],[3,"fiona"],[4,"fiona"]]}]`, asJSON(ro); exp != got {
+		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
+	}
+	ro, err = newDB.QueryStringStmt(`SELECT name FROM sqlite_master`)
+	if err != nil {
+		t.Fatalf("failed to query table: %s", err.Error())
+	}
+	if exp, got := `[{"columns":["name"],"types":["text"],"values":[["foo"],["baz"]]}]`, asJSON(ro); exp != got {
 		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
 	}
 }
@@ -1249,6 +1420,9 @@ func Test_DatabaseCommonOperations(t *testing.T) {
 		{"NotNULLField", testNotNULLField},
 		{"EmptyStatements", testEmptyStatements},
 		{"SimpleSingleStatements", testSimpleSingleStatements},
+		{"SimpleStatementsNumeric", testSimpleStatementsNumeric},
+		{"SimpleStatementsCollate", testSimpleStatementsCollate},
+		{"SimpleExpressionStatements", testSimpleExpressionStatements},
 		{"SimpleSingleJSONStatements", testSimpleSingleJSONStatements},
 		{"SimpleJoinStatements", testSimpleJoinStatements},
 		{"SimpleSingleConcatStatements", testSimpleSingleConcatStatements},
@@ -1271,6 +1445,7 @@ func Test_DatabaseCommonOperations(t *testing.T) {
 		{"Dump", testDump},
 		{"Size", testSize},
 		{"DBFileSize", testDBFileSize},
+		{"DBWALSize", testDBWALSize},
 		{"StmtReadOnly", testStmtReadOnly},
 		{"JSON1", testJSON1},
 		{"DBSTAT_table", testDBSTAT_table},
@@ -1279,10 +1454,17 @@ func Test_DatabaseCommonOperations(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		db, path := mustCreateDatabase()
+		db, path := mustCreateOnDiskDatabase()
 		defer db.Close()
 		defer os.Remove(path)
 		t.Run(tc.name+":disk", func(t *testing.T) {
+			tc.testFunc(t, db)
+		})
+
+		db, path = mustCreateOnDiskDatabaseWAL()
+		defer db.Close()
+		defer os.Remove(path)
+		t.Run(tc.name+":wal", func(t *testing.T) {
 			tc.testFunc(t, db)
 		})
 

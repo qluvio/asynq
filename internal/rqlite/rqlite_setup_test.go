@@ -21,10 +21,10 @@ var (
 func init() {
 	config.InitDefaults()
 	flag.StringVar(&config.Type, "broker_type", "", "broker type to use in testing: rqlite | sqlite")
-	flag.StringVar(&config.SqliteDbPath, "db_path", "", "sqlite DB path to use in testing")
-	flag.StringVar(&config.RqliteUrl, "rqlite_url", "http://localhost:4001", "rqlite url to use in testing")
-	flag.StringVar(&config.ConsistencyLevel, "consistency_level", "strong", "consistency level (rqlite)")
-	flag.BoolVar(&config.SqliteInMemory, "sqlite_in_memory", false, "use in memory DB (sqlite)")
+	flag.StringVar(&config.Sqlite.DbPath, "db_path", "", "sqlite DB path to use in testing")
+	flag.StringVar(&config.Rqlite.Url, "rqlite_url", "http://localhost:4001", "rqlite url to use in testing")
+	flag.StringVar(&config.Rqlite.ConsistencyLevel, "consistency_level", "strong", "consistency level (rqlite)")
+	flag.BoolVar(&config.Sqlite.InMemory, "sqlite_in_memory", false, "use in memory DB (sqlite)")
 }
 
 // defaultBrokerIfNotShort defines whether to use rqlite or sqlite when:
@@ -55,33 +55,33 @@ func setup(tb testing.TB) *RQLite {
 
 	initBrokerOnce.Do(func() {
 		if config.Type == sqliteType {
-			if config.SqliteDbPath == "" {
-				if config.SqliteInMemory {
-					config.SqliteDbPath = RandomInMemoryDbPath()
+			if config.Sqlite.DbPath == "" {
+				if config.Sqlite.InMemory {
+					config.Sqlite.DbPath = RandomInMemoryDbPath()
 				} else {
 					sqliteDbTemp = true
 					db, err := os.CreateTemp("", "sqlite")
 					require.NoError(tb, err)
-					config.SqliteDbPath = db.Name()
+					config.Sqlite.DbPath = db.Name()
 				}
 			}
-			fmt.Println("sqlite db path:", config.SqliteDbPath)
-			config.RqliteUrl = ""
+			fmt.Println("sqlite db path:", config.Sqlite.DbPath)
+			config.Rqlite.Url = ""
 		}
 	})
 	if sqliteDbTemp {
 		tb.Cleanup(func() {
 			if !tb.Failed() {
-				_ = os.Remove(config.SqliteDbPath)
+				_ = os.Remove(config.Sqlite.DbPath)
 			} else {
-				fmt.Println("preserving sqlite DB at:", config.SqliteDbPath)
+				fmt.Println("preserving sqlite DB at:", config.Sqlite.DbPath)
 			}
 		})
 	}
 
 	tb.Helper()
 	ret := NewRQLite(&config, nil, nil)
-	ret.MockNow(time.Now())
+	ret.MockNow(time.Now().Truncate(time.Second))
 	err := ret.Open()
 	if err != nil {
 		tb.Fatal("Unable to connect rqlite", err)

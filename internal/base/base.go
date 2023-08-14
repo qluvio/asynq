@@ -337,6 +337,7 @@ type TaskInfo struct {
 	Message       *TaskMessage
 	State         TaskState
 	NextProcessAt time.Time
+	Deadline      time.Time
 	Result        []byte
 }
 
@@ -807,26 +808,28 @@ type Broker interface {
 	// Use this function to set the clock to SimulatedClock in tests.
 	SetClock(c timeutil.Clock)
 
+	Now() time.Time
+
 	// Enqueue adds the given task to the pending list of the queue.
 	Enqueue(ctx context.Context, msg *TaskMessage) error
 	// EnqueueUnique inserts the given task if the task's uniqueness lock can be acquired.
 	// It returns ErrDuplicateTask if the lock cannot be acquired.
 	EnqueueUnique(ctx context.Context, msg *TaskMessage, ttl time.Duration, forceUnique ...bool) error
 	// Dequeue queries given queues in order and pops a task message
-	// off a queue if one exists and returns the message and deadline.
+	// off a queue if one exists and returns the message, deadline and possibly a result.
 	// Dequeue skips a queue if the queue is paused.
 	// If all queues are empty, ErrNoProcessableTask error is returned.
 	// - qnames are the queues to process
 	// - serverID is used the ID of the processor/server processing Dequeue and
 	//   is used to select tasks with server affinity.
-	Dequeue(serverID string, qnames ...string) (*TaskMessage, time.Time, error)
+	Dequeue(serverID string, qnames ...string) (*TaskInfo, error)
 	// Done removes the task from active queue to mark the task as done.
 	// It removes a uniqueness lock acquired by the task, if any.
 	// ServerID is the ID of the server that processed the task (used for server affinity)
 	Done(serverID string, msg *TaskMessage) error
 	// MarkAsComplete marks the task as completed
 	MarkAsComplete(serverID string, msg *TaskMessage) error
-	// Requeue moves the task from active queue to the specified queue.
+	// Requeue moves the task from active state to pending in the queue of the message.
 	// ServerID is the ID of the server that processed the task (used for server affinity)
 	// aborted is true when re-queuing occurs because the server stops and false for recurrent tasks
 	Requeue(serverID string, msg *TaskMessage, aborted bool) error
@@ -859,8 +862,14 @@ type Broker interface {
 	// PublishCancelation publish cancelation message to all subscribers.
 	// The message is the ID for the task to be canceled.
 	PublishCancelation(id string) error
-	// WriteResult
+	// WriteResult updates the result data of the given task and returns the count of bytes written
 	WriteResult(qname, taskID string, data []byte) (n int, err error)
+	// UpdateTask updates the result data of the given task and returns the updated task info and its actual deadline
+	UpdateTask(qname, id string, data []byte) (*TaskInfo, error)
+	// MoveToQueue moves the given task from fromQueue to its new queue.
+	// When active is true, the moved task must be in active state, otherwise it must be completed.
+	// The returned state is either scheduled or pending
+	MoveToQueue(ctx context.Context, fromQueue string, msg *TaskMessage, processAt time.Time, active bool) (TaskState, error)
 	// Close closes the connection with the store server.
 	Close() error
 	// ListServers returns the list of server info.

@@ -614,3 +614,7 @@ func (srv *Server) Stop() {
 	srv.state.Set(base.StateStopped)
 	srv.logger.Info("Processor stopped")
 }
+
+func (srv *Server) AsynchronousHandler() AsynchronousHandler {
+	return srv.processor.asynchronousHandler()
+}

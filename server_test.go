@@ -7,7 +7,6 @@ package asynq
 import (
 	"context"
 	"fmt"
-	"syscall"
 	"testing"
 	"time"
 
@@ -26,6 +25,11 @@ func ignoreTopFunctions() []goleak.Option {
 		goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"),
 		goleak.IgnoreTopFunction("database/sql.(*DB).connectionCleaner"),
 	}
+}
+
+// WaitForSignals expose waitForSignals for tests
+func (srv *Server) WaitForSignals() {
+	srv.waitForSignals()
 }
 
 func TestServer(t *testing.T) {
@@ -80,7 +84,7 @@ func TestServerRun(t *testing.T) {
 	// Make sure server exits when receiving TERM signal.
 	go func() {
 		time.Sleep(2 * time.Second)
-		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		_ = kill()
 		done <- struct{}{}
 	}()
 

@@ -130,10 +130,10 @@ func TestEndToEndAsync(t *testing.T) {
 			go func() {
 				// Fail 1% of tasks for the first attempt.
 				if retried == 0 && n%100 == 0 {
-					task.AsyncProcessor().TaskFailed(fmt.Errorf(":("))
+					_ = task.AsyncProcessor().TaskFailed(fmt.Errorf(":("))
 					return
 				}
-				task.AsyncProcessor().TaskCompleted()
+				_ = task.AsyncProcessor().TaskCompleted()
 				wg.Done()
 			}()
 			return AsynchronousTask

@@ -1,7 +1,6 @@
 package rqlite
 
 import (
-	"encoding/base64"
 	"fmt"
 	"time"
 
@@ -260,61 +259,4 @@ func (conn *Connection) currentStats(now time.Time, queue string) (*base.Stats, 
 
 func (conn *Connection) historicalStats(now time.Time, queue string, ndays int) ([]*base.DailyStats, error) {
 	return conn.queueStats(now, queue, ndays)
-}
-
-func (conn *Connection) getTaskInfo(now time.Time, qname string, taskid string) (*base.TaskInfo, error) {
-	var op errors.Op = "getTaskInfo"
-
-	tr, err := conn.getTask(qname, taskid)
-	if err == nil {
-		return getTaskInfo(op, now, tr)
-	} else if !errors.IsTaskNotFound(err) {
-		return nil, errors.E(op, errors.Internal, err)
-	}
-	// fall back to completed if not found
-	ret, err2 := conn.getCompletedTaskInfo(now, qname, taskid)
-	if err2 != nil {
-		if errors.IsTaskNotFound(err2) {
-			// return the initial 'not found' error
-			return nil, errors.E(op, errors.Internal, err)
-		}
-		// last error is more exotic: return it
-		return nil, errors.E(op, errors.Internal, err2)
-	}
-	return ret, nil
-}
-
-func getTaskInfo(op errors.Op, now time.Time, tr *taskRow) (*base.TaskInfo, error) {
-
-	state, err := base.TaskStateFromString(tr.state)
-	if err != nil {
-		return nil, errors.E(op, errors.Internal, err)
-	}
-
-	nextProcessAt := time.Time{}
-	switch tr.state {
-	case pending:
-		nextProcessAt = now
-	case scheduled:
-		nextProcessAt = time.Unix(tr.scheduledAt, 0).UTC()
-	case retry:
-		nextProcessAt = time.Unix(tr.retryAt, 0).UTC()
-	}
-	nextProcessAt = nextProcessAt.UTC()
-
-	var result []byte
-	if tr.result != "" {
-		var err error
-		result, err = base64.StdEncoding.DecodeString(tr.result)
-		if err != nil {
-			return nil, errors.E(op, errors.Internal, err)
-		}
-	}
-
-	return &base.TaskInfo{
-		Message:       tr.msg,
-		State:         state,
-		NextProcessAt: nextProcessAt,
-		Result:        result,
-	}, nil
 }

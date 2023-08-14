@@ -78,6 +78,7 @@ func newProcessorForTest(t *testing.T, r base.Broker, h Handler, q ...Queues) *p
 		shutdownTimeout: defaultShutdownTimeout,
 		starting:        starting,
 		finished:        finished,
+		emptyQSleep:     time.Millisecond * 5,
 	})
 	p.handler = h
 	return p
@@ -293,9 +294,9 @@ func TestProcessorSuccessWithAsyncTasks(t *testing.T) {
 					defer mu.Unlock()
 					processed = append(processed, task)
 					if rand.Intn(100)%2 == 0 {
-						task.AsyncProcessor().TaskCompleted()
+						_ = task.AsyncProcessor().TaskCompleted()
 					} else {
-						task.AsyncProcessor().TaskFailed(errors.New("failed"))
+						_ = task.AsyncProcessor().TaskFailed(errors.New("failed"))
 					}
 				}()
 				return AsynchronousTask
@@ -798,6 +799,59 @@ func TestProcessorQueues(t *testing.T) {
 			close(p.abortNow)
 		})
 	}
+}
+
+func TestProcessorUpdateQueues(t *testing.T) {
+	//testLogger.SetLevel(toInternalLogLevel(DebugLevel))
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	queue := "my_queue"
+	queueCfg := &QueuesConfig{
+		Queues: map[string]interface{}{
+			"high":    6,
+			"default": 3,
+			"low":     1,
+		},
+	}
+
+	ch := make(chan struct{})
+	isDone := func() bool {
+		timer := time.NewTimer(time.Millisecond * 1500)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return false
+		case <-ch:
+			return true
+		}
+	}
+
+	hand := HandlerFunc(func(_ context.Context, task *Task) error {
+		testLogger.Debug("handling task ",
+			fmt.Sprintf("[id: %s, queue: %s]", task.w.id, task.w.qname))
+		close(ch)
+		return nil
+	})
+	p := newProcessorForTest(t, client.rdb, hand, queueCfg)
+	err := p.broker.Enqueue(context.Background(), &base.TaskMessage{
+		ID:       "id_123456",
+		Timeout:  0,
+		Deadline: time.Now().Add(time.Hour).Unix(),
+		Queue:    queue,
+	})
+	require.NoError(t, err)
+	p.start(&sync.WaitGroup{})
+	defer func() { p.shutdownNow(true) }()
+
+	require.False(t, isDone())
+	err = queueCfg.UpdateQueues(map[string]interface{}{
+		queue: 6,
+	})
+	require.NoError(t, err)
+	require.True(t, isDone())
 }
 
 func TestProcessorWithStrictPriority(t *testing.T) {

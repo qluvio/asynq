@@ -3,6 +3,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"expvar"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -18,17 +20,27 @@ import (
 	"github.com/mattn/go-sqlite3"
 )
 
-const bkDelay = 250
+const (
+	bkDelay                  = 250
+	defaultCheckpointTimeout = 30 * time.Second
+)
 
 const (
-	numExecutions      = "executions"
-	numExecutionErrors = "execution_errors"
-	numQueries         = "queries"
-	numQueryErrors     = "query_errors"
-	numRequests        = "requests"
-	numETx             = "execute_transactions"
-	numQTx             = "query_transactions"
-	numRTx             = "request_transactions"
+	numCheckpoints      = "checkpoints"
+	numCheckpointErrors = "checkpoint_errors"
+	checkpointDuration  = "checkpoint_duration_ns"
+	numExecutions       = "executions"
+	numExecutionErrors  = "execution_errors"
+	numQueries          = "queries"
+	numQueryErrors      = "query_errors"
+	numRequests         = "requests"
+	numETx              = "execute_transactions"
+	numQTx              = "query_transactions"
+	numRTx              = "request_transactions"
+)
+
+var (
+	ErrWALReplayDirectoryMismatch = fmt.Errorf("WAL file(s) not in same directory as database file")
 )
 
 // DBVersion is the SQLite version.
@@ -47,6 +59,9 @@ func init() {
 // ResetStats resets the expvar stats for this module. Mostly for test purposes.
 func ResetStats() {
 	stats.Init()
+	stats.Add(numCheckpoints, 0)
+	stats.Add(numCheckpointErrors, 0)
+	stats.Add(checkpointDuration, 0)
 	stats.Add(numExecutions, 0)
 	stats.Add(numExecutionErrors, 0)
 	stats.Add(numQueries, 0)
@@ -60,8 +75,10 @@ func ResetStats() {
 // DB is the SQL database.
 type DB struct {
 	path      string // Path to database file, if running on-disk.
+	walPath   string // Path to WAL file, if running on-disk and WAL is enabled.
 	memory    bool   // In-memory only.
 	fkEnabled bool   // Foreign key constraints enabled
+	wal       bool
 
 	rwDB *sql.DB // Database connection for database reads and writes.
 	roDB *sql.DB // Database connection database reads.
@@ -105,6 +122,36 @@ func IsValidSQLiteData(b []byte) bool {
 	return len(b) > 13 && string(b[0:13]) == "SQLite format"
 }
 
+// IsValidSQLiteWALFile checks that the supplied path looks like a SQLite
+// WAL file. See https://www.sqlite.org/fileformat2.html#walformat
+func IsValidSQLiteWALFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer ignoreErr(f.Close)
+
+	b := make([]byte, 4)
+	if _, err := f.Read(b); err != nil {
+		return false
+	}
+
+	return IsValidSQLiteWALData(b)
+}
+
+// IsValidSQLiteWALData checks that the supplied data looks like a SQLite
+// WAL file.
+func IsValidSQLiteWALData(b []byte) bool {
+	if len(b) < 4 {
+		return false
+	}
+
+	header1 := []byte{0x37, 0x7f, 0x06, 0x82}
+	header2 := []byte{0x37, 0x7f, 0x06, 0x83}
+	header := b[:4]
+	return bytes.Equal(header, header1) || bytes.Equal(header, header2)
+}
+
 // IsWALModeEnabledSQLiteFile checks that the supplied path looks like a SQLite
 // with WAL mode enabled.
 func IsWALModeEnabledSQLiteFile(path string) bool {
@@ -128,18 +175,104 @@ func IsWALModeEnabled(b []byte) bool {
 	return len(b) >= 20 && b[18] == 2 && b[19] == 2
 }
 
+// IsDELETEModeEnabledSQLiteFile checks that the supplied path looks like a SQLite
+// with DELETE mode enabled.
+func IsDELETEModeEnabledSQLiteFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer ignoreErr(f.Close)
+
+	b := make([]byte, 20)
+	if _, err := f.Read(b); err != nil {
+		return false
+	}
+
+	return IsDELETEModeEnabled(b)
+}
+
+// IsDELETEModeEnabled checks that the supplied path looks like a SQLite
+// with DELETE mode enabled.
+func IsDELETEModeEnabled(b []byte) bool {
+	return len(b) >= 20 && b[18] == 1 && b[19] == 1
+}
+
+// RemoveFiles removes the SQLite database file, and any associated WAL and SHM files.
+func RemoveFiles(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Remove(path + "-wal"); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Remove(path + "-shm"); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// ReplayWAL replays the given WAL files into the database at the given path,
+// in the order given by the slice. The supplied WAL files must be in the same
+// directory as the database file and are removed as a result of the replay operation.
+// The "real" WAL file is also removed. If deleteMode is true, the database file
+// will be in DELETE mode after the replay operation, otherwise it will be in WAL
+// mode.
+func ReplayWAL(path string, wals []string, deleteMode bool) error {
+	for _, wal := range wals {
+		if filepath.Dir(wal) != filepath.Dir(path) {
+			return ErrWALReplayDirectoryMismatch
+		}
+	}
+
+	if !IsValidSQLiteFile(path) {
+		return fmt.Errorf("invalid database file %s", path)
+	}
+
+	for _, wal := range wals {
+		if !IsValidSQLiteWALFile(wal) {
+			return fmt.Errorf("invalid WAL file %s", wal)
+		}
+		if err := os.Rename(wal, path+"-wal"); err != nil {
+			return fmt.Errorf("rename WAL %s: %s", wal, err.Error())
+		}
+		db, err := Open(path, false, true)
+		if err != nil {
+			return err
+		}
+		if err := db.Checkpoint(defaultCheckpointTimeout); err != nil {
+			return fmt.Errorf("checkpoint WAL %s: %s", wal, err.Error())
+		}
+		if err := db.Close(); err != nil {
+			return err
+		}
+	}
+
+	if deleteMode {
+		db, err := Open(path, false, false)
+		if err != nil {
+			return err
+		}
+		if err = db.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Open opens a file-based database, creating it if it does not exist.
-func Open(dbPath string, fkEnabled bool) (*DB, error) {
-	return OpenContext(context.Background(), dbPath, fkEnabled)
+func Open(dbPath string, fkEnabled, wal bool) (*DB, error) {
+	return OpenContext(context.Background(), dbPath, fkEnabled, wal)
 }
 
 // OpenContext opens a file-based database, creating it if it does not exist.
 // After this function returns, an actual SQLite file will always exist.
-func OpenContext(ctx context.Context, dbPath string, fkEnabled bool) (*DB, error) {
+func OpenContext(ctx context.Context, dbPath string, fkEnabled, wal bool, synchMode ...string) (*DB, error) {
 	rwOpts := []string{
-		"_txlock=immediate",
-		//"_journal_mode=WAL",
 		fmt.Sprintf("_fk=%s", strconv.FormatBool(fkEnabled)),
+	}
+	if !wal {
+		rwOpts = append(rwOpts, "_txlock=immediate")
 	}
 	rwDSN := fmt.Sprintf("file:%s?%s", dbPath, strings.Join(rwOpts, "&"))
 	rwDB, err := sql.Open("sqlite3", rwDSN)
@@ -147,18 +280,30 @@ func OpenContext(ctx context.Context, dbPath string, fkEnabled bool) (*DB, error
 		return nil, err
 	}
 
-	// Set synchronous to OFF, to improve performance. The SQLite docs state that
-	// this risks database corruption in the event of a crash, but that's OK, as
-	// rqlite blows away the database on startup and always rebuilds it from the
-	// Raft log.
-	if _, err := rwDB.Exec("PRAGMA synchronous=OFF"); err != nil {
-		return nil, err
+	// Synchronous is set to OFF by default in rqlite, to improve performance
+	// with the following comment:
+	// "The SQLite docs state that this risks database corruption in the event of
+	//  a crash, but that's OK, as rqlite blows away the database on startup and
+	//  always rebuilds it from the Raft log."
+	smode := synchronousMode("NORMAL", synchMode...)
+	if _, err := rwDB.Exec(fmt.Sprintf("PRAGMA synchronous=%s", smode)); err != nil {
+		return nil, fmt.Errorf("sync OFF: %s", err.Error())
+	}
+
+	mode := "WAL"
+	if !wal {
+		mode = "DELETE"
+	}
+	if _, err := rwDB.Exec(fmt.Sprintf("PRAGMA journal_mode=%s", mode)); err != nil {
+		return nil, fmt.Errorf("journal mode to %s: %s", mode, err.Error())
 	}
 
 	roOpts := []string{
 		"mode=ro",
-		"_txlock=deferred",
 		fmt.Sprintf("_fk=%s", strconv.FormatBool(fkEnabled)),
+	}
+	if !wal {
+		roOpts = append(roOpts, "_txlock=deferred")
 	}
 
 	roDSN := fmt.Sprintf("file:%s?%s", dbPath, strings.Join(roOpts, "&"))
@@ -180,7 +325,9 @@ func OpenContext(ctx context.Context, dbPath string, fkEnabled bool) (*DB, error
 
 	return &DB{
 		path:      dbPath,
+		walPath:   dbPath + "-wal",
 		fkEnabled: fkEnabled,
+		wal:       wal,
 		rwDB:      rwDB,
 		roDB:      roDB,
 		rwDSN:     rwDSN,
@@ -257,13 +404,13 @@ func OpenInMemoryPath(dbPath string, fkEnabled bool) (*DB, error) {
 // LoadIntoMemory loads an in-memory database with that at the path.
 // Not safe to call while other operations are happening with the
 // source database.
-func LoadIntoMemory(dbPath string, fkEnabled bool) (*DB, error) {
+func LoadIntoMemory(dbPath string, fkEnabled, wal bool) (*DB, error) {
 	dstDB, err := OpenInMemory(fkEnabled)
 	if err != nil {
 		return nil, err
 	}
 
-	srcDB, err := Open(dbPath, false)
+	srcDB, err := Open(dbPath, fkEnabled, wal)
 	if err != nil {
 		return nil, err
 	}
@@ -365,6 +512,10 @@ func (db *DB) Stats() (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+	pragmas, err := db.pragmas()
+	if err != nil {
+		return nil, err
+	}
 	stats := map[string]interface{}{
 		"version":         DBVersion,
 		"compile_options": copts,
@@ -373,12 +524,18 @@ func (db *DB) Stats() (map[string]interface{}, error) {
 		"rw_dsn":          db.rwDSN,
 		"ro_dsn":          db.roDSN,
 		"conn_pool_stats": connPoolStats,
+		"pragmas":         pragmas,
 	}
 
 	stats["path"] = db.path
 	if !db.memory {
 		if stats["size"], err = db.FileSize(); err != nil {
 			return nil, err
+		}
+		if db.wal {
+			if stats["wal_size"], err = db.WALSize(); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return stats, nil
@@ -390,6 +547,9 @@ func (db *DB) Size() (int64, error) {
 	rows, err := db.QueryStringStmt(`SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()`)
 	if err != nil {
 		return 0, err
+	}
+	if rows[0].Error != "" {
+		return 0, fmt.Errorf(rows[0].Error)
 	}
 
 	return rows[0].Values[0].Parameters[0].GetInt64(), nil
@@ -408,6 +568,84 @@ func (db *DB) FileSize() (int64, error) {
 	return fi.Size(), nil
 }
 
+// WALSize returns the size of the SQLite WAL file on disk. If running in
+// WAL mode is not enabled, this function returns 0.
+func (db *DB) WALSize() (int64, error) {
+	if !db.wal {
+		return 0, nil
+	}
+	fi, err := os.Stat(db.walPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return 0, err
+		}
+		return 0, nil
+	}
+	return fi.Size(), nil
+}
+
+// Checkpoint performs a WAL checkpoint. If the checkpoint does not complete
+// within the given duration, an error is returned.
+func (db *DB) Checkpoint(dur time.Duration) (err error) {
+	start := time.Now()
+	defer func() {
+		if err != nil {
+			stats.Add(numCheckpointErrors, 1)
+		} else {
+			stats.Get(checkpointDuration).(*expvar.Int).Set(time.Since(start).Nanoseconds())
+			stats.Add(numCheckpoints, 1)
+		}
+	}()
+
+	var ok int
+	var nPages int
+	var nMoved int
+
+	f := func() error {
+		err := db.rwDB.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&ok, &nPages, &nMoved)
+		if err != nil {
+			return err
+		}
+		if ok != 0 {
+			return fmt.Errorf("failed to completely checkpoint WAL")
+		}
+		return nil
+	}
+
+	// Try fast path
+	if err := f(); err == nil {
+		return nil
+	}
+
+	t := time.NewTicker(100 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			if err := f(); err == nil {
+				return nil
+			}
+		case <-time.After(dur):
+			return fmt.Errorf("checkpoint timeout")
+		}
+	}
+}
+
+// DisableCheckpointing disables the automatic checkpointing that occurs when
+// the WAL reaches a certain size. This is key for full control of snapshotting.
+// and can be useful for testing.
+func (db *DB) DisableCheckpointing() error {
+	_, err := db.rwDB.Exec("PRAGMA wal_autocheckpoint=-1")
+	return err
+}
+
+// EnableCheckpointing enables the automatic checkpointing that occurs when
+// the WAL reaches a certain size.
+func (db *DB) EnableCheckpointing() error {
+	_, err := db.rwDB.Exec("PRAGMA wal_autocheckpoint=1000")
+	return err
+}
+
 // InMemory returns whether this database is in-memory.
 func (db *DB) InMemory() bool {
 	return db.memory
@@ -416,6 +654,11 @@ func (db *DB) InMemory() bool {
 // FKEnabled returns whether Foreign Key constraints are enabled.
 func (db *DB) FKEnabled() bool {
 	return db.fkEnabled
+}
+
+// WALEnabled returns whether WAL mode is enabled.
+func (db *DB) WALEnabled() bool {
+	return db.wal
 }
 
 // Path returns the path of this database.
@@ -729,6 +972,7 @@ func (db *DB) queryStmtWithConn(ctx context.Context, stmt *command.Statement, xT
 	for i := range types {
 		xTypes[i] = strings.ToLower(types[i].DatabaseTypeName())
 	}
+	needsQueryTypes := containsEmptyType(xTypes)
 
 	for rs.Next() {
 		dest := make([]interface{}, len(columns))
@@ -746,6 +990,13 @@ func (db *DB) queryStmtWithConn(ctx context.Context, stmt *command.Statement, xT
 		rows.Values = append(rows.Values, &command.Values{
 			Parameters: params,
 		})
+
+		// One-time population of any empty types. Best effort, ignore
+		// error.
+		if needsQueryTypes {
+			_ = populateEmptyTypes(xTypes, params)
+			needsQueryTypes = false
+		}
 	}
 
 	// Check for errors from iterating over rows.
@@ -865,40 +1116,73 @@ func (db *DB) RequestContext(ctx context.Context, req *command.Request, xTime bo
 }
 
 // Backup writes a consistent snapshot of the database to the given file.
-// This function can be called when changes to the database are in flight.
+// The resultant SQLite database file will be in DELETE mode. This function
+// can be called when changes to the database are in flight.
 func (db *DB) Backup(path string) error {
-	dstDB, err := Open(path, false)
+	dstDB, err := Open(path, false, false)
 	if err != nil {
 		return err
 	}
+	defer ignoreErr(dstDB.Close)
 
 	if err := copyDatabase(dstDB, db); err != nil {
 		return fmt.Errorf("backup database: %s", err)
 	}
-	return nil
+
+	// Source database might be in WAL mode.
+	_, err = dstDB.ExecuteStringStmt("PRAGMA journal_mode=DELETE")
+	if err != nil {
+		return err
+	}
+
+	return dstDB.Close()
 }
 
 // Copy copies the contents of the database to the given database. All other
 // attributes of the given database remain untouched e.g. whether it's an
-// on-disk database. This function can be called when changes to the source
-// database are in flight.
+// on-disk database, except the database will be placed in DELETE mode.
+// This function can be called when changes to the source database are in flight.
 func (db *DB) Copy(dstDB *DB) error {
 	if err := copyDatabase(dstDB, db); err != nil {
 		return fmt.Errorf("copy database: %s", err)
 	}
-	return nil
+	_, err := dstDB.ExecuteStringStmt("PRAGMA journal_mode=DELETE")
+	return err
 }
 
 // Serialize returns a byte slice representation of the SQLite database. For
 // an ordinary on-disk database file, the serialization is just a copy of the
 // disk file. For an in-memory database or a "TEMP" database, the serialization
 // is the same sequence of bytes which would be written to disk if that database
-// were backed up to disk. This function must not be called while any writes
-// are happening to the database.
+// were backed up to disk. If the database is in WAL mode, a temporary on-disk
+// copy is made, and it is this copy that is serialized. This function must not
+// be called while any writes are happening to the database.
 func (db *DB) Serialize() ([]byte, error) {
 	if !db.memory {
+		if db.wal {
+			tmpFile, err := os.CreateTemp("", "rqlite-serialize")
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = os.Remove(tmpFile.Name()) }()
+			defer ignoreErr(tmpFile.Close)
+
+			if err := db.Backup(tmpFile.Name()); err != nil {
+				return nil, err
+			}
+			newDB, err := Open(tmpFile.Name(), db.fkEnabled, false)
+			if err != nil {
+				return nil, err
+			}
+			defer ignoreErr(newDB.Close)
+			return newDB.Serialize()
+		}
 		// Simply read and return the SQLite file.
-		return os.ReadFile(db.path)
+		b, err := os.ReadFile(db.path)
+		if err != nil {
+			return nil, err
+		}
+		return b, nil
 	}
 
 	conn, err := db.roDB.Conn(context.Background())
@@ -1059,6 +1343,33 @@ func (db *DB) StmtReadOnlyWithConn(sql string, conn *sql.Conn) (bool, error) {
 	return readOnly, nil
 }
 
+func (db *DB) pragmas() (map[string]interface{}, error) {
+	conns := map[string]*sql.DB{
+		"rw": db.rwDB,
+		"ro": db.roDB,
+	}
+
+	connsMap := make(map[string]interface{})
+	for k, v := range conns {
+		pragmasMap := make(map[string]string)
+		for _, p := range []string{
+			"synchronous",
+			"journal_mode",
+			"foreign_keys",
+			"wal_autocheckpoint",
+		} {
+			var s string
+			if err := v.QueryRow(fmt.Sprintf("PRAGMA %s", p)).Scan(&s); err != nil {
+				return nil, err
+			}
+			pragmasMap[p] = s
+		}
+		connsMap[k] = pragmasMap
+	}
+
+	return connsMap, nil
+}
+
 func (db *DB) memStats() (map[string]int64, error) {
 	ms := make(map[string]int64)
 	for _, p := range []string{
@@ -1073,6 +1384,9 @@ func (db *DB) memStats() (map[string]int64, error) {
 		res, err := db.QueryStringStmt(fmt.Sprintf("PRAGMA %s", p))
 		if err != nil {
 			return nil, err
+		}
+		if res[0].Error != "" {
+			return nil, fmt.Errorf(res[0].Error)
 		}
 		ms[p] = res[0].Values[0].Parameters[0].GetInt64()
 	}
@@ -1180,6 +1494,32 @@ func parametersToValues(parameters []*command.Parameter) ([]interface{}, error) 
 	return values, nil
 }
 
+// populateEmptyTypes populates any empty types with the type of the parameter.
+// This is necessary because the SQLite driver doesn't return the type of the
+// column in some cases e.g. it's an expression, so we use the actual types
+// of the returned data to fill in the blanks.
+func populateEmptyTypes(types []string, params []*command.Parameter) error {
+	for i := range types {
+		if types[i] == "" {
+			switch params[i].GetValue().(type) {
+			case int, int64:
+				types[i] = "integer"
+			case float64:
+				types[i] = "real"
+			case bool:
+				types[i] = "boolean"
+			case []byte:
+				types[i] = "blob"
+			case string:
+				types[i] = "text"
+			default:
+				return fmt.Errorf("unsupported type: %T", params[i].GetValue())
+			}
+		}
+	}
+	return nil
+}
+
 // normalizeRowValues performs some normalization of values in the returned rows.
 // Text values come over (from sqlite-go) as []byte instead of strings
 // for some reason, so we have explicitly converted (but only when type
@@ -1261,9 +1601,29 @@ func randomString() string {
 	return output.String()
 }
 
+func containsEmptyType(slice []string) bool {
+	for _, str := range slice {
+		if str == "" {
+			return true
+		}
+	}
+	return false
+}
+
 func ignoreErr(f func() error) {
 	if f == nil {
 		return
 	}
 	_ = f()
+}
+
+func synchronousMode(defaultMode string, in ...string) string {
+	if len(in) > 0 {
+		m := strings.ToUpper(in[0])
+		switch m {
+		case "OFF", "NORMAL", "FULL", "EXTRA":
+			return m
+		}
+	}
+	return defaultMode
 }

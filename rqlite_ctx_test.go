@@ -25,10 +25,10 @@ func (c *rqliteTestContext) FlushDB() {
 func (c *rqliteTestContext) Close() error {
 	if sqliteDbTemp {
 		if c.tb.Failed() {
-			fmt.Println("test failed - leaving sqlite Db at path:", rqliteConfig.SqliteDbPath)
+			fmt.Println("test failed - leaving sqlite Db at path:", rqliteConfig.Sqlite.DbPath)
 		} else {
 			//fmt.Println("cleanup sqlite Db Path: ", rqliteConfig.SqliteDbPath)
-			_ = os.Remove(rqliteConfig.SqliteDbPath)
+			_ = os.Remove(rqliteConfig.Sqlite.DbPath)
 		}
 	}
 	return c.r.Close()

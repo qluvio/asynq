@@ -9,15 +9,21 @@ skinparam State {
 }
 
 [*] -up-> pending : enqueue
-note on link
+note left on link
   client
 end note
+
+[*] -right-> scheduled : schedule
+note left on link
+  client
+end note
+
 pending -left-> active : dequeue
 note on link
   processor
 end note
 
-state processed
+state processed #lightblue
 state completed
 state archived
 archived: retry count exceeded or
