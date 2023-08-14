@@ -34,5 +34,5 @@ require (
 
 replace (
 	github.com/mattn/go-sqlite3 => github.com/rqlite/go-sqlite3 v1.28.0
-	github.com/rqlite/gorqlite => github.com/eluv-io/gorqlite v0.0.9-0.20230619193649-0070c59c5978
+	github.com/rqlite/gorqlite => github.com/eluv-io/gorqlite v0.0.9
 )
