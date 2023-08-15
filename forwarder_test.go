@@ -5,6 +5,7 @@
 package asynq
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -126,6 +127,117 @@ func TestForwarder(t *testing.T) {
 			gotRetry := ctx.GetRetryMessages(qname)
 			if diff := cmp.Diff(want, gotRetry, h.SortMsgOpt); diff != "" {
 				t.Errorf("mismatch found in %q after running forwarder: (-want, +got)\n%s", base.RetryKey(qname), diff)
+			}
+		}
+
+		for qname, want := range tc.wantPending {
+			gotPending := ctx.GetPendingMessages(qname)
+			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
+				t.Errorf("mismatch found in %q after running forwarder: (-want, +got)\n%s", base.PendingKey(qname), diff)
+			}
+		}
+	}
+}
+
+func TestForwarderWake(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	deadlines := base.NewDeadlines(10)
+	defer deadlines.Close()
+
+	wakePrcCh := make(chan bool, 1)
+	wakeFwdCh := make(chan bool, 1)
+	broker := newWakingBroker(client.rdb, deadlines, wakePrcCh, wakeFwdCh)
+
+	const pollInterval = time.Hour
+	s := newForwarder(forwarderParams{
+		logger:    testLogger,
+		broker:    broker,
+		queues:    (&QueuesConfig{Queues: map[string]interface{}{"default": 1, "critical": 1}}),
+		interval:  pollInterval,
+		wakeCh:    wakeFwdCh,
+		wakePrcCh: wakePrcCh,
+	})
+
+	now := time.Now()
+	tasks := []struct {
+		msg *base.TaskMessage
+		pat time.Time
+	}{
+		{
+			msg: h.NewTaskMessageWithQueue("gen_thumbnail", nil, "default"),
+			pat: now.Add(time.Hour),
+		},
+		{
+			msg: h.NewTaskMessageWithQueue("send_email", nil, "critical"),
+			pat: now.Add(-2 * time.Second),
+		},
+		{
+			msg: h.NewTaskMessageWithQueue("reindex", nil, "default"),
+			pat: time.Now().Add(-500 * time.Millisecond),
+		},
+		{
+			msg: h.NewTaskMessageWithQueue("sync", nil, "critical"),
+		},
+	}
+
+	tests := []struct {
+		initScheduled []int                          // scheduled queue initial state
+		initPending   []int                          // default queue initial state
+		wantScheduled map[string][]*base.TaskMessage // schedule queue final state
+		wantPending   map[string][]*base.TaskMessage // default queue final state
+	}{
+		{
+			initScheduled: []int{0, 1, 2},
+			initPending:   []int{3},
+			wantScheduled: map[string][]*base.TaskMessage{
+				"default":  {tasks[0].msg},
+				"critical": {},
+			},
+			wantPending: map[string][]*base.TaskMessage{
+				"default":  {tasks[2].msg},
+				"critical": {tasks[1].msg, tasks[3].msg},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		ctx.FlushDB() // clean up db before each test case.
+
+		var wg sync.WaitGroup
+		s.start(&wg)
+		time.Sleep(time.Second) // wait for forwarder to start
+
+		// initialize scheduled queue
+		for _, i := range tc.initScheduled {
+			task := tasks[i]
+			err := broker.Schedule(context.Background(), task.msg, task.pat)
+			if err != nil {
+				s.shutdown()
+				t.Fatal(err)
+			}
+		}
+
+		// initialize default queue
+		for _, i := range tc.initPending {
+			task := tasks[i]
+			err := broker.Enqueue(context.Background(), task.msg)
+			if err != nil {
+				s.shutdown()
+				t.Fatal(err)
+			}
+		}
+
+		s.shutdown()
+
+		for qname, want := range tc.wantScheduled {
+			gotScheduled := ctx.GetScheduledMessages(qname)
+			if diff := cmp.Diff(want, gotScheduled, h.SortMsgOpt); diff != "" {
+				t.Errorf("mismatch found in %q after running forwarder: (-want, +got)\n%s", base.ScheduledKey(qname), diff)
 			}
 		}
 

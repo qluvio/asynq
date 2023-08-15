@@ -629,6 +629,7 @@ func (p *processor) sleep() {
 	}
 	base.ResetTimer(p.sleepTimer, p.emptyQSleep)
 	select {
+	case <-p.quit:
 	case <-p.wakeCh:
 	case <-p.sleepTimer.C:
 	}

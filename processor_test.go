@@ -1094,6 +1094,142 @@ func TestProcessorPerform(t *testing.T) {
 	close(p.abortNow)
 }
 
+func TestProcessorWake(t *testing.T) {
+	ctx := setupTestContext(t)
+	defer func() { _ = ctx.Close() }()
+
+	client := NewClient(getClientConnOpt(t))
+	defer func() { _ = client.Close() }()
+
+	deadlines := base.NewDeadlines(10)
+	defer deadlines.Close()
+
+	wakePrcCh := make(chan bool, 1)
+	wakeFwdCh := make(chan bool, 1)
+	broker := newWakingBroker(client.rdb, deadlines, wakePrcCh, wakeFwdCh)
+
+	const pollInterval = time.Hour
+	f := newForwarder(forwarderParams{
+		logger:    testLogger,
+		broker:    broker,
+		queues:    (&QueuesConfig{Queues: map[string]interface{}{"default": 1, "critical": 1}}),
+		interval:  pollInterval,
+		wakeCh:    wakeFwdCh,
+		wakePrcCh: wakePrcCh,
+	})
+
+	now := time.Now()
+	tasks := []struct {
+		msg *base.TaskMessage
+		pat time.Time
+	}{
+		{
+			msg: h.NewTaskMessageWithQueue("gen_thumbnail", nil, "default"),
+			pat: now.Add(time.Hour),
+		},
+		{
+			msg: h.NewTaskMessageWithQueue("send_email", nil, "default"),
+			pat: now.Add(-2 * time.Second),
+		},
+		{
+			msg: h.NewTaskMessageWithQueue("reindex", nil, "default"),
+			pat: time.Now().Add(-500 * time.Millisecond),
+		},
+		{
+			msg: h.NewTaskMessageWithQueue("sync", nil, "default"),
+		},
+	}
+
+	tests := []struct {
+		initScheduled []int
+		initPending   []int
+		wantScheduled map[string][]*base.TaskMessage
+		wantPending   map[string][]*base.TaskMessage
+		wantProcessed []*Task
+	}{
+		{
+			initScheduled: []int{0, 1, 2},
+			initPending:   []int{3},
+			wantScheduled: map[string][]*base.TaskMessage{
+				"default": {tasks[0].msg},
+			},
+			wantPending: map[string][]*base.TaskMessage{
+				"default": {},
+			},
+			wantProcessed: []*Task{
+				NewTask(tasks[1].msg.Type, nil),
+				NewTask(tasks[2].msg.Type, nil),
+				NewTask(tasks[3].msg.Type, nil),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		ctx.FlushDB() // clean up db before each test case.
+
+		var wg sync.WaitGroup
+		f.start(&wg)
+		// instantiate a new processor
+		var mu sync.Mutex
+		var processed []*Task
+		handler := func(ctx context.Context, task *Task) error {
+			mu.Lock()
+			defer mu.Unlock()
+			processed = append(processed, task)
+			return nil
+		}
+		p := newProcessorForTest(t, broker, HandlerFunc(handler))
+		p.wakeCh = wakePrcCh
+		p.emptyQSleep = pollInterval
+		p.start(&wg)
+		time.Sleep(time.Second) // wait for forwarder and processor to start
+
+		// initialize scheduled queue
+		for _, i := range tc.initScheduled {
+			task := tasks[i]
+			err := broker.Schedule(context.Background(), task.msg, task.pat)
+			if err != nil {
+				p.shutdown()
+				f.shutdown()
+				t.Fatal(err)
+			}
+		}
+		// initialize default queue
+		for _, i := range tc.initPending {
+			task := tasks[i]
+			err := broker.Enqueue(context.Background(), task.msg)
+			if err != nil {
+				p.shutdown()
+				f.shutdown()
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(time.Second) // wait for processor to process pending tasks
+
+		p.shutdown()
+		f.shutdown()
+		wg.Wait()
+
+		for qname, want := range tc.wantScheduled {
+			gotScheduled := ctx.GetScheduledMessages(qname)
+			if diff := cmp.Diff(want, gotScheduled, h.SortMsgOpt); diff != "" {
+				t.Errorf("mismatch found in %q after running processor: (-want, +got)\n%s", base.ScheduledKey(qname), diff)
+			}
+		}
+		for qname, want := range tc.wantPending {
+			gotPending := ctx.GetPendingMessages(qname)
+			if diff := cmp.Diff(want, gotPending, h.SortMsgOpt); diff != "" {
+				t.Errorf("mismatch found in %q after running processor: (-want, +got)\n%s", base.PendingKey(qname), diff)
+			}
+		}
+		mu.Lock()
+		if diff := cmp.Diff(tc.wantProcessed, processed, taskCmpOpts...); diff != "" {
+			t.Errorf("mismatch found in processed results; (-want, +got)\n%s", diff)
+		}
+		mu.Unlock()
+	}
+}
+
 func TestGCD(t *testing.T) {
 	tests := []struct {
 		input []int
