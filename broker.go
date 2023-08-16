@@ -12,6 +12,9 @@ import (
 	"github.com/hibiken/asynq/internal/rqlite"
 )
 
+var _ base.Broker = (*wakingBroker)(nil)
+var _ base.Scheduler = (*wakingBroker)(nil)
+
 // makeBroker returns a base.Broker instance given a client connection option.
 func makeBroker(r ClientConnOpt) (base.Broker, error) {
 	c := r.MakeClient()
@@ -29,18 +32,23 @@ func makeBroker(r ClientConnOpt) (base.Broker, error) {
 // newWakingBroker returns a base.Broker wrapper that sends wake signals on the specified channels when tasks are
 // expected to be moved into pending state, i.e. become ready for processing.
 func newWakingBroker(broker base.Broker, deadlines *base.Deadlines, wakePrcCh chan<- bool, wakeFwdCh chan<- bool) base.Broker {
-	return &wakingBroker{Broker: broker, deadlines: deadlines, wakePrcCh: wakePrcCh, wakeFwdCh: wakeFwdCh}
+	return &wakingBroker{
+		Scheduler: broker.(base.Scheduler),
+		deadlines: deadlines,
+		wakePrcCh: wakePrcCh,
+		wakeFwdCh: wakeFwdCh,
+	}
 }
 
 type wakingBroker struct {
-	base.Broker
+	base.Scheduler
 	deadlines *base.Deadlines
 	wakePrcCh chan<- bool
 	wakeFwdCh chan<- bool
 }
 
 func (b *wakingBroker) Enqueue(ctx context.Context, msg *base.TaskMessage) error {
-	err := b.Broker.Enqueue(ctx, msg)
+	err := b.Scheduler.Enqueue(ctx, msg)
 	if err == nil {
 		b.wakePrc()
 	}
@@ -48,7 +56,7 @@ func (b *wakingBroker) Enqueue(ctx context.Context, msg *base.TaskMessage) error
 }
 
 func (b *wakingBroker) EnqueueUnique(ctx context.Context, msg *base.TaskMessage, ttl time.Duration, forceUnique ...bool) error {
-	err := b.Broker.EnqueueUnique(ctx, msg, ttl, forceUnique...)
+	err := b.Scheduler.EnqueueUnique(ctx, msg, ttl, forceUnique...)
 	if err == nil {
 		b.wakePrc()
 	}
@@ -56,7 +64,7 @@ func (b *wakingBroker) EnqueueUnique(ctx context.Context, msg *base.TaskMessage,
 }
 
 func (b *wakingBroker) Requeue(serverID string, msg *base.TaskMessage, aborted bool) error {
-	err := b.Broker.Requeue(serverID, msg, aborted)
+	err := b.Scheduler.Requeue(serverID, msg, aborted)
 	if err == nil && !aborted {
 		if msg.ReprocessAfter <= 0 {
 			b.wakePrc()
@@ -67,42 +75,42 @@ func (b *wakingBroker) Requeue(serverID string, msg *base.TaskMessage, aborted b
 	return err
 }
 func (b *wakingBroker) Schedule(ctx context.Context, msg *base.TaskMessage, processAt time.Time) error {
-	err := b.Broker.Schedule(ctx, msg, processAt)
+	err := b.Scheduler.Schedule(ctx, msg, processAt)
 	if err == nil {
 		b.wakeFwdAt(processAt)
 	}
 	return err
 }
 func (b *wakingBroker) ScheduleUnique(ctx context.Context, msg *base.TaskMessage, processAt time.Time, ttl time.Duration, forceUnique ...bool) error {
-	err := b.Broker.ScheduleUnique(ctx, msg, processAt, ttl, forceUnique...)
+	err := b.Scheduler.ScheduleUnique(ctx, msg, processAt, ttl, forceUnique...)
 	if err == nil {
 		b.wakeFwdAt(processAt)
 	}
 	return err
 }
 func (b *wakingBroker) Retry(msg *base.TaskMessage, processAt time.Time, errMsg string, isFailure bool) error {
-	err := b.Broker.Retry(msg, processAt, errMsg, isFailure)
+	err := b.Scheduler.Retry(msg, processAt, errMsg, isFailure)
 	if err == nil {
 		b.wakeFwdAt(processAt)
 	}
 	return err
 }
 func (b *wakingBroker) EnqueueBatch(ctx context.Context, msgs ...*base.MessageBatch) error {
-	err := b.Broker.EnqueueBatch(ctx, msgs...)
+	err := b.Scheduler.EnqueueBatch(ctx, msgs...)
 	if err == nil {
 		b.wakePrc()
 	}
 	return err
 }
 func (b *wakingBroker) EnqueueUniqueBatch(ctx context.Context, msgs ...*base.MessageBatch) error {
-	err := b.Broker.EnqueueUniqueBatch(ctx, msgs...)
+	err := b.Scheduler.EnqueueUniqueBatch(ctx, msgs...)
 	if err == nil {
 		b.wakePrc()
 	}
 	return err
 }
 func (b *wakingBroker) ScheduleBatch(ctx context.Context, msgs ...*base.MessageBatch) error {
-	err := b.Broker.ScheduleBatch(ctx, msgs...)
+	err := b.Scheduler.ScheduleBatch(ctx, msgs...)
 	if err == nil {
 		for _, msg := range msgs {
 			b.wakeFwdAt(msg.ProcessAt)
@@ -111,7 +119,7 @@ func (b *wakingBroker) ScheduleBatch(ctx context.Context, msgs ...*base.MessageB
 	return err
 }
 func (b *wakingBroker) ScheduleUniqueBatch(ctx context.Context, msgs ...*base.MessageBatch) error {
-	err := b.Broker.ScheduleUniqueBatch(ctx, msgs...)
+	err := b.Scheduler.ScheduleUniqueBatch(ctx, msgs...)
 	if err == nil {
 		for _, msg := range msgs {
 			b.wakeFwdAt(msg.ProcessAt)
