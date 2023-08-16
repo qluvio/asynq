@@ -1,6 +1,9 @@
 package base
 
-import "reflect"
+import (
+	"reflect"
+	"time"
+)
 
 // credit: https://github.com/eapache/channels/
 
@@ -63,4 +66,18 @@ func Wrap(ch interface{}, transform func(x interface{}) interface{}) SimpleOutCh
 	}()
 
 	return NativeOutChannel(realChan)
+}
+
+func StopTimer(t *time.Timer) {
+	t.Stop()
+	// Drain timer channel, if needed
+	select {
+	case <-t.C:
+	default:
+	}
+}
+
+func ResetTimer(t *time.Timer, d time.Duration) {
+	StopTimer(t)
+	t.Reset(d)
 }

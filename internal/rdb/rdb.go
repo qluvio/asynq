@@ -882,14 +882,16 @@ func (r *RDB) Archive(msg *base.TaskMessage, errMsg string) error {
 
 // ForwardIfReady checks scheduled and retry sets of the given queues
 // and move any tasks that are ready to be processed to the pending set.
-func (r *RDB) ForwardIfReady(qnames ...string) error {
+func (r *RDB) ForwardIfReady(qnames ...string) (n int, err error) {
 	var op errors.Op = "rdb.ForwardIfReady"
 	for _, qname := range qnames {
-		if err := r.forwardAll(qname); err != nil {
-			return errors.E(op, errors.CanonicalCode(err), err)
+		if x, err := r.forwardAll(qname); err != nil {
+			return n, errors.E(op, errors.CanonicalCode(err), err)
+		} else {
+			n += x
 		}
 	}
-	return nil
+	return n, nil
 }
 
 // KEYS[1] -> source queue (e.g. asynq:{<qname>:scheduled or asynq:{<qname>}:retry})
@@ -927,20 +929,21 @@ func (r *RDB) forward(src, dst, taskKeyPrefix string) (int, error) {
 
 // forwardAll checks for tasks in scheduled/retry state that are ready to be run, and updates
 // their state to "pending".
-func (r *RDB) forwardAll(qname string) (err error) {
+func (r *RDB) forwardAll(qname string) (n int, err error) {
 	sources := []string{base.ScheduledKey(qname), base.RetryKey(qname)}
 	dst := base.PendingKey(qname)
 	taskKeyPrefix := base.TaskKeyPrefix(qname)
 	for _, src := range sources {
-		n := 1
-		for n != 0 {
-			n, err = r.forward(src, dst, taskKeyPrefix)
+		x := 1
+		for x != 0 {
+			x, err = r.forward(src, dst, taskKeyPrefix)
 			if err != nil {
-				return err
+				return n, err
 			}
+			n += x
 		}
 	}
-	return nil
+	return n, nil
 }
 
 // KEYS[1] -> asynq:{<qname>}:completed
