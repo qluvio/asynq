@@ -288,14 +288,6 @@ func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessa
 	}
 
 	for _, qname := range qnames {
-		q, err := r.getQueue(qname)
-		if err != nil {
-			return nil, time.Time{}, errors.E(op, fmt.Sprintf("get queue error: %v", err))
-		}
-		if q == nil || q.state == paused {
-			continue
-		}
-
 		// here we would use dequeueMessage0 to perform dequeue in 2 steps
 		data, err := conn.dequeueMessage(r.Now(), serverID, qname)
 		if err != nil {
@@ -307,6 +299,33 @@ func (r *RQLite) Dequeue(serverID string, qnames ...string) (msg *base.TaskMessa
 		return data.msg, time.Unix(data.deadline, 0), nil
 	}
 	return nil, time.Time{}, errors.E(op, errors.NotFound, errors.ErrNoProcessableTask)
+}
+
+// DequeueN queries the given queue and pops N task messages off the queue if at
+// least one exists and returns the messages and deadlines.
+// If the queue is empty or the queue is paused ErrNoProcessableTask error is returned.
+func (r *RQLite) DequeueN(serverID string, qname string, count int, ret []base.Task) ([]base.Task, error) {
+	var op errors.Op = "rqlite.DequeueN"
+	conn, err := r.client(op)
+	if err != nil {
+		return nil, err
+	}
+
+	datas, err := conn.dequeueMessages(r.Now(), serverID, qname, count)
+	if err != nil {
+		return nil, errors.E(op, fmt.Sprintf("rqlite eval error: %v", err))
+	}
+	if len(datas) == 0 {
+		return nil, errors.E(op, errors.NotFound, errors.ErrNoProcessableTask)
+	}
+
+	for _, d := range datas {
+		ret = append(ret, base.Task{
+			Msg:      d.msg,
+			Deadline: time.Unix(d.deadline, 0),
+		})
+	}
+	return ret, nil
 }
 
 // Done removes the task from active queue to mark the task as done and set its
@@ -326,7 +345,7 @@ func (r *RQLite) Requeue(serverID string, msg *base.TaskMessage, aborted bool) e
 	if err != nil {
 		return err
 	}
-	return conn.requeueTask(r.Now(), serverID, msg, aborted)
+	return conn.requeueTask(r.context(), r.Now(), serverID, msg, aborted)
 }
 
 // Schedule adds the task to the scheduled set to be processed in the future.
@@ -456,7 +475,7 @@ func (r *RQLite) forward(qname, src string) (int, error) {
 		return 0, err
 	}
 
-	return conn.forwardTasks(r.Now(), qname, src)
+	return conn.forwardTasks(r.context(), r.Now(), qname, src)
 }
 
 // forwardAll checks for tasks in scheduled/retry state that are ready to be run,
@@ -591,6 +610,8 @@ func (r *RQLite) CancelationPubSub() (base.PubSub, error) {
 				if err != nil {
 					r.logger.Error(fmt.Sprintf("cancellation channel query failed: %v", err))
 					if strings.Contains(err.Error(), "gorqlite: connection is closed") {
+						// close the done channel, otherwise a call to Close will hang
+						close(ret.done)
 						return
 					}
 					// assume a temporary error

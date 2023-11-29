@@ -22,7 +22,7 @@ type forwarder struct {
 	done chan struct{}
 
 	// list of queue names to check and enqueue.
-	queues Queues
+	queues queues
 
 	// poll interval on average
 	avgInterval time.Duration
@@ -39,7 +39,7 @@ type forwarder struct {
 type forwarderParams struct {
 	logger      *log.Logger
 	broker      base.Broker
-	queues      Queues
+	queues      queues
 	interval    time.Duration
 	healthCheck healthChecker
 	wakeCh      <-chan bool

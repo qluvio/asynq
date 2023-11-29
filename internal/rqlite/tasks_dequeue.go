@@ -167,6 +167,99 @@ type dequeueRow struct {
 	msg      *base.TaskMessage
 }
 
+func (conn *Connection) dequeueMessages(now time.Time, serverID string, qname string, count int) ([]*dequeueResult, error) {
+	op := errors.Op("rqlite.dequeueMessages")
+
+	nowUnix := now.Unix()
+	var st *sqlite3.Statement
+
+	getPending := "(task_uuid,ndx,pndx,task_msg,task_timeout,task_deadline) IN" +
+		"(SELECT task_uuid,ndx,pndx,task_msg,task_timeout,task_deadline FROM " + conn.table(TasksTable) +
+		" INNER JOIN " + conn.table(QueuesTable) +
+		" ON " + conn.table(QueuesTable) + ".queue_name=" + conn.table(TasksTable) + ".queue_name" +
+		" WHERE " + conn.table(QueuesTable) + ".queue_name=? " +
+		" AND " + conn.table(TasksTable) + ".state='pending' " +
+		" AND pndx IN (SELECT pndx FROM " + conn.table(TasksTable) + " WHERE state='pending' AND queue_name=? ORDER BY pndx LIMIT ?)" +
+		" AND " + conn.table(QueuesTable) + ".state='active'" +
+		" AND (" +
+		"    " + conn.table(TasksTable) + ".sid IS NULL " +
+		"    OR (" + conn.table(TasksTable) + ".sid=?" +
+		"       AND (" + conn.table(TasksTable) + ".affinity_timeout>=0 " +
+		"       OR (" + conn.table(TasksTable) + ".affinity_timeout<0 AND (" +
+		"           " + conn.table(TasksTable) + ".archived_at-" + conn.table(TasksTable) + ".affinity_timeout)<=?))) " +
+		" OR ((" + conn.table(TasksTable) + ".done_at+" + conn.table(TasksTable) + ".affinity_timeout)<=? " +
+		"     AND " + conn.table(TasksTable) + ".sid!=?)))"
+	returning := " RETURNING task_uuid,ndx,pndx,task_msg,deadline"
+
+	if len(serverID) > 0 {
+		st = Statement(
+			"UPDATE "+conn.table(TasksTable)+" SET state='active', pending_since=NULL, sid=?, "+
+				"affinity_timeout=server_affinity, "+
+				"deadline=iif(task_deadline=0,task_timeout+?,task_deadline) "+
+				"WHERE "+conn.table(TasksTable)+".state='pending' AND "+getPending+returning,
+			serverID,
+			nowUnix,
+			qname,
+			qname,
+			count,
+			serverID,
+			nowUnix,
+			nowUnix,
+			serverID)
+	} else {
+		st = Statement(
+			"UPDATE "+conn.table(TasksTable)+" SET state='active', pending_since=NULL, "+
+				"affinity_timeout=server_affinity, "+
+				"deadline=iif(task_deadline=0,task_timeout+?,task_deadline) "+
+				"WHERE "+conn.table(TasksTable)+".state='pending' AND "+getPending+returning,
+			nowUnix,
+			qname,
+			qname,
+			count,
+			serverID,
+			nowUnix,
+			nowUnix,
+			serverID)
+	}
+	st = st.WithReturning(true)
+	qrs, err := conn.RequestStmt(conn.ctx(), st)
+	if err != nil {
+		return nil, NewRqliteRqError(op, qrs, err, []*sqlite3.Statement{st})
+	}
+	if len(qrs) == 0 {
+		// no row
+		return nil, nil
+	}
+
+	qr := qrs[0]
+	if qr.Err != nil {
+		return nil, NewRqliteRqError(op, qrs, qr.Err, []*sqlite3.Statement{st})
+	}
+	if qr.Query.NumRows() == 0 {
+		// no row
+		return nil, nil
+	}
+
+	var ret []*dequeueResult
+	for qr.Query.Next() {
+		row := &dequeueRow{}
+		err = qr.Query.Scan(&row.uuid, &row.ndx, &row.pndx, &row.taskMsg, &row.deadline)
+		if err != nil {
+			return nil, errors.E(op, errors.Internal, fmt.Sprintf("rqlite scan error: %v", err))
+		}
+		row.msg, err = decodeMessage([]byte(row.taskMsg))
+		if err != nil {
+			return nil, errors.E(op, errors.Internal, fmt.Sprintf("cannot decode message: %v", err))
+		}
+		ret = append(ret, &dequeueResult{
+			taskMsg:  row.taskMsg,
+			deadline: row.deadline,
+			msg:      row.msg,
+		})
+	}
+	return ret, nil
+}
+
 //
 // ----- old impl -----
 //

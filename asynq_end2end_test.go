@@ -74,7 +74,6 @@ func TestEndToEnd(t *testing.T) {
 
 	srv.Stop()
 	_ = client.Close()
-
 }
 
 // TestEndToEndAsync is similar to TestEndToEnd but uses AsynchronousTask for
@@ -428,5 +427,4 @@ func TestAfterTask(t *testing.T) {
 	require.Equal(t, []int{0, 2, 4, 6, 8}, after)
 
 	_ = client.Close()
-
 }

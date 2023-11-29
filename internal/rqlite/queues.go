@@ -136,7 +136,7 @@ func (conn *Connection) removeQueue(queue string, force bool) (int64, error) {
 
 func (conn *Connection) listQueues(queue ...string) ([]*queueRow, error) {
 	op := errors.Op("listQueues")
-	st := Statement("SELECT queue_name, state " +
+	st := Statement("SELECT queue_name,state" +
 		" FROM " + conn.table(QueuesTable) + " ")
 	if len(queue) > 0 {
 		st = st.Append(" WHERE queue_name=? ", queue[0])

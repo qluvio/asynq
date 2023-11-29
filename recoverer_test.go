@@ -232,7 +232,7 @@ func TestRecoverer(t *testing.T) {
 		recoverer := newRecoverer(recovererParams{
 			logger:         testLogger,
 			broker:         client.rdb,
-			queues:         (&QueuesConfig{Queues: map[string]interface{}{"default": 1, "critical": 1}}),
+			queues:         newQueues(NewQueuesConfig(map[string]int{"default": 1, "critical": 1}), 100),
 			interval:       1 * time.Second,
 			retryDelayFunc: RetryDelayFunc(func(n int, err error, task *Task) time.Duration { return 30 * time.Second }),
 			isFailureFunc:  defaultIsFailureFunc,

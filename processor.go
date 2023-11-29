@@ -34,6 +34,9 @@ var TaskCanceled = errors.New("task canceled")
 // worker goroutine.
 var AsynchronousTask = errors.New("task is processing asynchronously")
 
+// errProcessorStopped is a sentinel error emitted by concurrency
+var errProcessorStopped = errors.New("processor is stopped")
+
 type processor struct {
 	logger   *log.Logger
 	serverID string
@@ -41,7 +44,7 @@ type processor struct {
 
 	handler Handler
 
-	queues Queues
+	dequeuer Dequeuer
 
 	retryDelay    RetryDelayHandler
 	isFailureFunc func(error) bool
@@ -56,11 +59,9 @@ type processor struct {
 	// rate limiter to prevent spamming logs with a bunch of errors.
 	errLogLimiter *rate.Limiter
 
-	// sema is a counting semaphore to ensure the number of active workers
+	// concurrency has a counting semaphore to ensure the number of active workers
 	// does not exceed the limit.
-	sema        chan struct{}
-	qsemas      map[string]chan struct{} // queue string -> chan
-	concurrency int
+	concurrency *concurrency
 
 	// channel to communicate back to the long running "processor" goroutine.
 	// once is used to send value to the channel only once.
@@ -111,8 +112,7 @@ type processorParams struct {
 	deadlines       *base.Deadlines
 	cancelations    *base.Cancelations
 	afterTasks      *base.AfterTasks
-	concurrency     int
-	queues          Queues
+	queues          queues
 	errHandler      ErrorHandler
 	shutdownTimeout time.Duration
 	starting        chan<- *workerInfo
@@ -136,26 +136,25 @@ type processorResult struct {
 // newProcessor constructs a new processor.
 func newProcessor(params processorParams) *processor {
 	abortNow := make(chan struct{})
+
 	return &processor{
 		logger:          params.logger,
 		serverID:        params.serverID,
 		broker:          params.broker,
-		queues:          params.queues,
+		dequeuer:        newDq(params.serverID, params.broker, params.queues),
 		retryDelay:      params.retryDelayFunc,
 		isFailureFunc:   params.isFailureFunc,
 		syncRequestCh:   params.syncCh,
 		cancelations:    params.cancelations,
 		afterTasks:      params.afterTasks,
 		errLogLimiter:   rate.NewLimiter(rate.Every(3*time.Second), 1),
-		sema:            make(chan struct{}, params.concurrency),
-		qsemas:          make(map[string]chan struct{}),
-		concurrency:     params.concurrency,
+		concurrency:     params.queues.concurrency(),
 		done:            make(chan struct{}),
 		quit:            make(chan struct{}),
 		abort:           make(chan struct{}),
 		abortNow:        abortNow,
 		tasks:           make(map[string]*processorTask),
-		results:         make(chan processorResult, params.concurrency),
+		results:         make(chan processorResult, params.queues.maxConcurrency()),
 		deadlines:       params.deadlines,
 		errHandler:      params.errHandler,
 		handler:         HandlerFunc(func(ctx context.Context, t *Task) error { return fmt.Errorf("handler not set") }),
@@ -196,9 +195,7 @@ func (p *processor) shutdownNow(immediately bool) {
 
 		p.logger.Info("processor: waiting for all workers to finish...")
 		// block until all workers have released the token
-		for i := 0; i < cap(p.sema); i++ {
-			p.sema <- struct{}{}
-		}
+		p.concurrency.acquireAll()
 
 		// should be no work left to wait for; abort processes
 		close(p.abortNow)
@@ -213,6 +210,7 @@ func (p *processor) shutdownNow(immediately bool) {
 
 func (p *processor) start(wg *sync.WaitGroup) {
 	wg.Add(2)
+	p.concurrency.setQuit(p.quit)
 	go func() {
 		defer wg.Done()
 		for {
@@ -231,84 +229,82 @@ func (p *processor) start(wg *sync.WaitGroup) {
 	}()
 }
 
-// exec pulls a task out of the queue and starts a worker goroutine to
-// process the task.
+// exec pulls a task out of the queue and starts a worker goroutine to process the task.
 func (p *processor) exec() {
-	select {
-	case <-p.quit:
+	err := p.concurrency.acquire()
+	if err == errProcessorStopped {
+		// this is the only error returned by acquire
 		return
-	case p.sema <- struct{}{}: // acquire token
-		// Only attempt to dequeue a task from queues that are under their respective concurrency limits
-		qnames, qsemas := p.acquireQSemas()
-		msg, deadline, err := p.broker.Dequeue(p.serverID, qnames...)
-		switch {
-		case errors.Is(err, errors.ErrNoProcessableTask):
-			p.logEmptyQ()
-			// Queues are empty and/or concurrency limits reached, this is a normal behavior.
-			// Sleep to avoid slamming redis and let scheduler move tasks into queues.
-			// Note: We are not using blocking pop operation and polling queues instead.
-			// This adds significant load to redis.
-			p.sleep()
-			p.releaseQSemas(qsemas, "") // release queue tokens
-			<-p.sema                    // release token
-			return
-		case err != nil:
-			p.resetEmptyQ()
-			if p.errLogLimiter.Allow() {
-				p.logger.Errorf("Dequeue error: %v", err)
-			}
-			// also sleep, otherwise we create a busy loop until errors clear...
-			p.sleep()
-			p.releaseQSemas(qsemas, "") // release queue tokens
-			<-p.sema                    // release token
-			return
-		}
-		p.resetEmptyQ()
-		p.logger.Debugf("dequeued %s -> %v", msg.ID, deadline)
-		qsema := p.releaseQSemas(qsemas, msg.Queue) // release unused queue tokens
-
-		go func() {
-			p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
-
-			ctx, cancel := asynqcontext.New(msg, deadline)
-			cleanup := func() {
-				cancel()
-				p.cancelations.Delete(msg.ID)
-				p.deadlines.Delete(msg.ID)
-				p.finished <- msg
-				<-qsema  // release queue token
-				<-p.sema // release token
-			}
-
-			ptask := &processorTask{ctx: ctx, msg: msg, done: atomic.NewBool(false), cleanup: cleanup}
-			p.tasksMutex.Lock()
-			p.tasks[msg.ID] = ptask
-			p.tasksMutex.Unlock()
-			p.deadlines.Add(msg.ID, deadline, func() {
-				p.results <- processorResult{task: ptask, err: context.DeadlineExceeded}
-				// ctx will be canceled via context deadline
-			})
-			p.cancelations.Add(msg.ID, func() {
-				p.results <- processorResult{task: ptask, err: TaskCanceled}
-				cancel()
-			})
-
-			// check context before starting a worker goroutine.
-			select {
-			case <-ctx.Done():
-				// already canceled (e.g. deadline exceeded); do nothing
-				return
-			default:
-			}
-
-			rw := &ResultWriter{id: msg.ID, qname: msg.Queue, broker: p.broker, ctx: ctx}
-			ap := &AsyncProcessor{results: p.results, task: ptask}
-			go func() {
-				task := newTask(msg.Type, msg.Payload, rw, ap, func(fn func(string, error, bool)) { p.afterTasks.Add(msg.ID, fn) })
-				p.results <- processorResult{task: ptask, err: p.perform(ctx, task)}
-			}()
-		}()
 	}
+	// dequeue a task from queues that are under their respective concurrency limits
+	dm, err := p.dequeuer.Dequeue()
+	switch {
+	case errors.Is(err, errors.ErrNoProcessableTask):
+		p.logEmptyQ()
+		// queues are empty and/or concurrency limits reached, this is a normal behavior.
+		// Sleep to avoid slamming redis and let scheduler move tasks into queues.
+		// Note: We are not using blocking pop operation and polling queues instead.
+		// This adds significant load to redis.
+		p.sleep()
+		p.concurrency.release() // release token
+		return
+	case err != nil:
+		p.resetEmptyQ()
+		if p.errLogLimiter.Allow() {
+			p.logger.Errorf("Dequeue error: %v", err)
+		}
+		// also sleep, otherwise we create a busy loop until errors clear...
+		p.sleep()
+		p.concurrency.release() // release token
+		return
+	}
+	p.resetEmptyQ()
+	msg := dm.Msg
+	deadline := dm.Deadline
+	p.logger.Debugf("dequeued %s -> %v", msg.ID, deadline)
+
+	go func() {
+		p.starting <- &workerInfo{msg: msg, started: time.Now(), deadline: deadline}
+
+		ctx, cancel := asynqcontext.New(msg, deadline)
+		cleanup := func() {
+			cancel()
+			p.cancelations.Delete(msg.ID)
+			p.deadlines.Delete(msg.ID)
+			p.finished <- msg
+			dm.queue.release()      // release queue token
+			p.concurrency.release() // release token
+		}
+
+		ptask := &processorTask{ctx: ctx, msg: msg, done: atomic.NewBool(false), cleanup: cleanup}
+		p.tasksMutex.Lock()
+		p.tasks[msg.ID] = ptask
+		p.tasksMutex.Unlock()
+		p.deadlines.Add(msg.ID, deadline, func() {
+			p.results <- processorResult{task: ptask, err: context.DeadlineExceeded}
+			// ctx will be canceled via context deadline
+		})
+		p.cancelations.Add(msg.ID, func() {
+			p.results <- processorResult{task: ptask, err: TaskCanceled}
+			cancel()
+		})
+
+		// check context before starting a worker goroutine.
+		select {
+		case <-ctx.Done():
+			// already canceled (e.g. deadline exceeded); do nothing
+			return
+		default:
+		}
+
+		rw := &ResultWriter{id: msg.ID, qname: msg.Queue, broker: p.broker, ctx: ctx}
+		ap := &AsyncProcessor{results: p.results, task: ptask}
+		go func() {
+			task := newTask(msg.Type, msg.Payload, rw, ap, func(fn func(string, error, bool)) { p.afterTasks.Add(msg.ID, fn) })
+			p.results <- processorResult{task: ptask, err: p.perform(ctx, task)}
+		}()
+	}()
+
 }
 
 // fini waits for tasks to complete and finishes processing each task.
@@ -574,51 +570,6 @@ func (p *processor) perform(ctx context.Context, task *Task) (err error) {
 		}
 	}()
 	return p.handler.ProcessTask(ctx, task)
-}
-
-func (p *processor) acquireQSemas() ([]string, map[string]chan struct{}) {
-	qnames := []string{}
-	qsemas := make(map[string]chan struct{})
-	for _, qn := range p.queues.Names() {
-		qs := p.qsemas[qn]
-		if qs == nil {
-			for q, c := range p.queues.Concurrencies() {
-				if p.qsemas[q] == nil {
-					if c <= 0 {
-						c = p.concurrency
-					}
-					p.qsemas[q] = make(chan struct{}, c)
-				}
-			}
-			qs = p.qsemas[qn]
-			if qs == nil {
-				// Should not happen; skip
-				continue
-			}
-		}
-		select {
-		case qs <- struct{}{}: // acquire queue token
-			qnames = append(qnames, qn)
-			qsemas[qn] = qs
-		default:
-			continue
-		}
-	}
-	return qnames, qsemas
-}
-
-// releaseQSemas releases the given queue tokens, except for the queue token associated with skipQueues, if specified.
-// Returns the qsema for the skipped queue
-func (p *processor) releaseQSemas(qsemas map[string]chan struct{}, skipQueue string) chan struct{} {
-	var ret chan struct{}
-	for qname, qsema := range qsemas {
-		if qname == skipQueue {
-			ret = qsema
-			continue
-		}
-		<-qsema
-	}
-	return ret
 }
 
 func (p *processor) sleep() {

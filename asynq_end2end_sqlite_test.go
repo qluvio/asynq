@@ -50,13 +50,11 @@ func TestLocalLongRun(t *testing.T) {
 		ShutdownTimeout:      time.Millisecond * 10,
 		HealthCheckInterval:  time.Millisecond * 200,
 		ForwarderInterval:    time.Millisecond * 200,
-		Queues: &QueuesConfig{
-			Queues: map[string]interface{}{
-				"low":    1,
-				"normal": 3,
-				"high":   5,
-			},
-		},
+		Queues: NewQueuesConfig(map[string]int{
+			"low":    1,
+			"normal": 3,
+			"high":   5,
+		}),
 	})
 
 	mux := NewServeMux()
