@@ -210,7 +210,7 @@ out:
 				}
 				count++
 				tasks := ret[queue]
-				tasks.tasks = append(tasks.tasks, taskId)
+				tasks.addTask(taskId)
 				if count == taskCount {
 					break out
 				}
@@ -351,6 +351,13 @@ func (h *handlerStats) stats() *hStats {
 
 type tasksList struct {
 	tasks []string
+	mu    sync.Mutex
+}
+
+func (l *tasksList) addTask(taskId string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.tasks = append(l.tasks, taskId)
 }
 
 func (l *tasksList) expectEquals(o *tasksList) error {
@@ -454,7 +461,7 @@ func (d *dhandler) distribute(typ string, t *Task) error {
 	if tasks == nil {
 		return errors.E("distribute", "reason", "tasks not found")
 	}
-	tasks.tasks = append(tasks.tasks, tasksId)
+	tasks.addTask(tasksId)
 
 	count := d.count.Add(1)
 	_ = count

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -308,9 +309,13 @@ func (t *testCtx) distQueuesAtRate() map[string]*hStats {
 	t.mayPreloadQQueue(d)
 
 	d.addTasks(t.taskCount)
+	var mu sync.Mutex
 	var enqueuedTasks map[string]*tasksList
 	var enqueueErr error
+
 	go func(d *distributor) {
+		mu.Lock()
+		defer mu.Unlock()
 		enqueuedTasks, enqueueErr = t.enqueueAtRate(d)
 	}(d)
 
@@ -318,6 +323,8 @@ func (t *testCtx) distQueuesAtRate() map[string]*hStats {
 	d.wait()
 	fmt.Println("finished after", w.Duration())
 
+	mu.Lock()
+	defer mu.Unlock()
 	t.NoError(enqueueErr)
 	distTasks := d.dh.tasks
 	for queue, queuedTasks := range enqueuedTasks {

@@ -423,7 +423,9 @@ func TestAfterTask(t *testing.T) {
 	srv.Stop()
 
 	// do the comparison after stopping the server to finish active tasks
+	mu.Lock()
 	sort.Ints(after)
+	mu.Unlock()
 	require.Equal(t, []int{0, 2, 4, 6, 8}, after)
 
 	_ = client.Close()

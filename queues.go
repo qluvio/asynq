@@ -429,7 +429,8 @@ func (q *strictNamer) selectQueues(_ map[string]*queue) []string {
 }
 
 type lenientNamer struct {
-	r             *rand.Rand
+	rand          *rand.Rand
+	randMu        sync.Mutex
 	weightedNames []string // weighted queue names
 	len           int
 	buf           []string
@@ -449,7 +450,7 @@ func newLenientNamer(queues map[string]*queue) *lenientNamer {
 		}
 	}
 	return &lenientNamer{
-		r:             rand.New(rand.NewSource(time.Now().UnixNano())),
+		rand:          rand.New(rand.NewSource(time.Now().UnixNano())),
 		weightedNames: names,
 		len:           len(queues),
 		buf:           make([]string, len(queues)),
@@ -464,7 +465,9 @@ func (q *lenientNamer) queueNames() []string {
 	if len(q.weightedNames) == 1 {
 		return q.weightedNames
 	}
-	q.r.Shuffle(
+	q.randMu.Lock()
+	defer q.randMu.Unlock()
+	q.rand.Shuffle(
 		len(q.weightedNames),
 		func(i, j int) { q.weightedNames[i], q.weightedNames[j] = q.weightedNames[j], q.weightedNames[i] })
 	return uniq(q.weightedNames, q.len)
