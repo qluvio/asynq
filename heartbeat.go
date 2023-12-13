@@ -27,11 +27,10 @@ type heartbeater struct {
 	interval time.Duration
 
 	// following fields are initialized at construction time and are immutable.
-	host        string
-	pid         int
-	serverID    string
-	concurrency int
-	queues      Queues
+	host     string
+	pid      int
+	serverID string
+	queues   queues
 
 	// following fields are mutable and should be accessed only by the
 	// heartbeater goroutine. In other words, confine these variables
@@ -48,15 +47,14 @@ type heartbeater struct {
 }
 
 type heartbeaterParams struct {
-	logger      *log.Logger
-	serverID    string
-	broker      base.Broker
-	interval    time.Duration
-	concurrency int
-	queues      Queues
-	state       *base.ServerState
-	starting    <-chan *workerInfo
-	finished    <-chan *base.TaskMessage
+	logger   *log.Logger
+	serverID string
+	broker   base.Broker
+	interval time.Duration
+	queues   queues
+	state    *base.ServerState
+	starting <-chan *workerInfo
+	finished <-chan *base.TaskMessage
 }
 
 func newHeartbeater(params heartbeaterParams) *heartbeater {
@@ -74,11 +72,10 @@ func newHeartbeater(params heartbeaterParams) *heartbeater {
 		done:     make(chan struct{}),
 		interval: params.interval,
 
-		host:        host,
-		pid:         os.Getpid(),
-		serverID:    params.serverID,
-		concurrency: params.concurrency,
-		queues:      params.queues,
+		host:     host,
+		pid:      os.Getpid(),
+		serverID: params.serverID,
+		queues:   params.queues,
 
 		state:    params.state,
 		workers:  make(map[string]*workerInfo),
@@ -136,13 +133,14 @@ func (h *heartbeater) start(wg *sync.WaitGroup) {
 }
 
 func (h *heartbeater) beat() {
+	queues, strict := h.queues.Priorities()
 	info := base.ServerInfo{
 		Host:              h.host,
 		PID:               h.pid,
 		ServerID:          h.serverID,
-		Concurrency:       h.concurrency,
-		Queues:            h.queues.Priorities(),
-		StrictPriority:    h.queues.StrictPriority(),
+		Concurrency:       h.queues.maxConcurrency(),
+		Queues:            queues,
+		StrictPriority:    strict,
 		Status:            h.state.String(),
 		Started:           h.started,
 		ActiveWorkerCount: len(h.workers),

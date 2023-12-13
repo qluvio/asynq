@@ -53,11 +53,11 @@ func fakeSyncer(syncCh <-chan *syncRequest, done <-chan struct{}) {
 }
 
 // Returns a processor instance configured for testing purpose.
-func newProcessorForTest(t *testing.T, r base.Broker, h Handler, q ...Queues) *processor {
+func newProcessorForTest(t *testing.T, r base.Broker, h Handler, q ...*QueuesConfig) *processor {
 	starting := make(chan *workerInfo)
 	finished := make(chan *base.TaskMessage)
 	syncCh := make(chan *syncRequest)
-	queues := Queues(defaultQueuesConfig)
+	queues := defaultQueuesConfig
 	if len(q) > 0 && q[0] != nil {
 		queues = q[0]
 	}
@@ -73,8 +73,7 @@ func newProcessorForTest(t *testing.T, r base.Broker, h Handler, q ...Queues) *p
 		syncCh:          syncCh,
 		deadlines:       base.NewDeadlines(10),
 		cancelations:    base.NewCancelations(),
-		concurrency:     10,
-		queues:          queues,
+		queues:          newQueues(queues, 10),
 		errHandler:      nil,
 		shutdownTimeout: defaultShutdownTimeout,
 		starting:        starting,
@@ -208,14 +207,12 @@ func TestProcessorSuccessWithMultipleQueues(t *testing.T) {
 				processed = append(processed, task)
 				return nil
 			}
-			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler), (&QueuesConfig{
-				Priority: Lenient,
-				Queues: map[string]interface{}{
+			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler), NewQueuesConfig(
+				map[string]int{
 					"default": 2,
 					"high":    3,
 					"low":     1,
-				},
-			}))
+				}))
 			p.start(&sync.WaitGroup{})
 			// Wait for two second to allow all pending tasks to be processed.
 			time.Sleep(2 * time.Second)
@@ -302,14 +299,12 @@ func TestProcessorSuccessWithAsyncTasks(t *testing.T) {
 				}()
 				return AsynchronousTask
 			}
-			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler), (&QueuesConfig{
-				Priority: Lenient,
-				Queues: map[string]interface{}{
+			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler), NewQueuesConfig(
+				map[string]int{
 					"default": 2,
 					"high":    3,
 					"low":     1,
-				},
-			}))
+				}))
 			p.start(&sync.WaitGroup{})
 			// Wait for two second to allow all pending tasks to be processed.
 			time.Sleep(2 * time.Second)
@@ -399,14 +394,12 @@ func TestProcessorContextDoneWithAsyncTasks(t *testing.T) {
 				}()
 				return AsynchronousTask
 			}
-			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler), (&QueuesConfig{
-				Priority: Lenient,
-				Queues: map[string]interface{}{
+			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler),
+				NewQueuesConfig(map[string]int{
 					"default": 2,
 					"high":    3,
 					"low":     1,
-				},
-			}))
+				}))
 			p.start(&sync.WaitGroup{})
 
 			// Wait for a second to allow all pending tasks to be processed.
@@ -709,12 +702,11 @@ func TestProcessorMarkAsComplete(t *testing.T) {
 				"default": {},
 				"custom":  {},
 			},
-			queueCfg: &QueuesConfig{
-				Queues: map[string]interface{}{
+			queueCfg: NewQueuesConfig(
+				map[string]int{
 					"default": 1,
 					"custom":  1,
-				},
-			},
+				}),
 			wantPending: map[string][]*base.TaskMessage{
 				"default": {},
 				"custom":  {},
@@ -771,21 +763,19 @@ func TestProcessorQueues(t *testing.T) {
 		want     []string
 	}{
 		{
-			queueCfg: &QueuesConfig{
-				Queues: map[string]interface{}{
+			queueCfg: NewQueuesConfig(
+				map[string]int{
 					"high":    6,
 					"default": 3,
 					"low":     1,
-				},
-			},
+				}),
 			want: []string{"high", "default", "low"},
 		},
 		{
-			queueCfg: &QueuesConfig{
-				Queues: map[string]interface{}{
+			queueCfg: NewQueuesConfig(
+				map[string]int{
 					"default": 1,
-				},
-			},
+				}),
 			want: []string{"default"},
 		},
 	}
@@ -793,7 +783,7 @@ func TestProcessorQueues(t *testing.T) {
 	for i, tc := range tests {
 		t.Run(fmt.Sprintf("test-%d", i), func(t *testing.T) {
 			p := newProcessorForTest(t, nil, nil, tc.queueCfg)
-			got := p.queues.Names()
+			got := p.dequeuer.(*dq).queues.Names()
 			if diff := cmp.Diff(tc.want, got, sortOpt); diff != "" {
 				t.Errorf("with queue config: %v\n(*processor).queues() = %v, want %v\n(-want,+got):\n%s",
 					tc.queueCfg, got, tc.want, diff)
@@ -861,14 +851,13 @@ func TestProcessorWithStrictPriority(t *testing.T) {
 				processed = append(processed, task)
 				return nil
 			}
-			queueCfg := &QueuesConfig{
-				Priority: Strict,
-				Queues: map[string]interface{}{
+			queueCfg := NewQueuesConfig(
+				map[string]int{
 					base.DefaultQueueName: 2,
 					"critical":            3,
 					"low":                 1,
 				},
-			}
+				Strict)
 			starting := make(chan *workerInfo)
 			finished := make(chan *base.TaskMessage)
 			syncCh := make(chan *syncRequest)
@@ -884,8 +873,7 @@ func TestProcessorWithStrictPriority(t *testing.T) {
 				syncCh:          syncCh,
 				deadlines:       base.NewDeadlines(1),
 				cancelations:    base.NewCancelations(),
-				concurrency:     1, // Set concurrency to 1 to make sure tasks are processed one at a time.
-				queues:          queueCfg,
+				queues:          newQueues(queueCfg, 1), // Set concurrency to 1 to make sure tasks are processed one at a time.
 				errHandler:      nil,
 				shutdownTimeout: defaultShutdownTimeout,
 				starting:        starting,
@@ -983,23 +971,23 @@ func TestProcessorWithQueueConcurrency(t *testing.T) {
 				processed = append(processed, task)
 				return nil
 			}
-			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler), (&QueuesConfig{
+			p := newProcessorForTest(t, client.rdb, HandlerFunc(handler), &QueuesConfig{
 				Priority: Lenient,
-				Queues: map[string]interface{}{
-					"default": QueueConfig{
+				Queues: map[string]QueueConfig{
+					"default": {
 						Priority:    2,
 						Concurrency: tc.queues["default"],
 					},
-					"high": QueueConfig{
+					"high": {
 						Priority:    3,
 						Concurrency: tc.queues["high"],
 					},
-					"low": QueueConfig{
+					"low": {
 						Priority:    1,
 						Concurrency: tc.queues["low"],
 					},
 				},
-			}))
+			})
 			p.start(&sync.WaitGroup{})
 
 			// Wait for a second to allow pending tasks to be processed.
@@ -1112,7 +1100,7 @@ func TestProcessorWake(t *testing.T) {
 	f := newForwarder(forwarderParams{
 		logger:    testLogger,
 		broker:    broker,
-		queues:    (&QueuesConfig{Queues: map[string]interface{}{"default": 1, "critical": 1}}),
+		queues:    newQueues(NewQueuesConfig(map[string]int{"default": 1, "critical": 1}), 100),
 		interval:  pollInterval,
 		wakeCh:    wakeFwdCh,
 		wakePrcCh: wakePrcCh,
@@ -1254,98 +1242,102 @@ func TestGCD(t *testing.T) {
 
 func TestNormalizeQueues(t *testing.T) {
 	tests := []struct {
-		input map[string]QueueConfig
-		want  map[string]QueueConfig
+		input map[string]*queue
+		want  map[string]*queue
 	}{
 		{
-			input: map[string]QueueConfig{
+			input: map[string]*queue{
 				"high": {
-					Priority:    100,
-					Concurrency: 10,
+					priority:    100,
+					concurrency: 10,
 				},
 				"default": {
-					Priority:    20,
-					Concurrency: 5,
+					priority:    20,
+					concurrency: 5,
 				},
 				"low": {
-					Priority:    5,
-					Concurrency: 1,
+					priority:    5,
+					concurrency: 1,
 				},
 			},
-			want: map[string]QueueConfig{
+			want: map[string]*queue{
 				"high": {
-					Priority:    20,
-					Concurrency: 10,
+					priority:    20,
+					concurrency: 10,
 				},
 				"default": {
-					Priority:    4,
-					Concurrency: 5,
+					priority:    4,
+					concurrency: 5,
 				},
 				"low": {
-					Priority:    1,
-					Concurrency: 1,
+					priority:    1,
+					concurrency: 1,
 				},
 			},
 		},
 		{
-			input: map[string]QueueConfig{
+			input: map[string]*queue{
 				"default": {
-					Priority: 10,
+					priority: 10,
 				},
 			},
-			want: map[string]QueueConfig{
+			want: map[string]*queue{
 				"default": {
-					Priority: 1,
-				},
-			},
-		},
-		{
-			input: map[string]QueueConfig{
-				"critical": {
-					Priority: 5,
-				},
-				"default": {
-					Priority: 1,
-				},
-			},
-			want: map[string]QueueConfig{
-				"critical": {
-					Priority: 5,
-				},
-				"default": {
-					Priority: 1,
+					priority: 1,
 				},
 			},
 		},
 		{
-			input: map[string]QueueConfig{
+			input: map[string]*queue{
 				"critical": {
-					Priority: 6,
+					priority: 5,
 				},
 				"default": {
-					Priority: 3,
-				},
-				"low": {
-					Priority: 0,
+					priority: 1,
 				},
 			},
-			want: map[string]QueueConfig{
+			want: map[string]*queue{
 				"critical": {
-					Priority: 2,
+					priority: 5,
 				},
 				"default": {
-					Priority: 1,
+					priority: 1,
+				},
+			},
+		},
+		{
+			input: map[string]*queue{
+				"critical": {
+					priority: 6,
+				},
+				"default": {
+					priority: 3,
 				},
 				"low": {
-					Priority: 0,
+					priority: 0,
+				},
+			},
+			want: map[string]*queue{
+				"critical": {
+					priority: 2,
+				},
+				"default": {
+					priority: 1,
+				},
+				"low": {
+					priority: 0,
 				},
 			},
 		},
 	}
 
+	sameQueue := func(q1, q2 *queue) bool {
+		return q1.name == q2.name && q1.concurrency == q2.concurrency && q1.priority == q2.priority
+	}
+
 	for _, tc := range tests {
 		got := normalizeQueues(tc.input)
-		if diff := cmp.Diff(tc.want, got); diff != "" {
+		if diff := cmp.Diff(tc.want, got, cmp.Comparer(sameQueue)); diff != "" {
 			t.Errorf("normalizeQueues(%v) = %v, want %v; (-want, +got):\n%s",
 				tc.input, got, tc.want, diff)
 		}

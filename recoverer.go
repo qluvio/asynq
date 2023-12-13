@@ -23,7 +23,7 @@ type recoverer struct {
 	done chan struct{}
 
 	// list of queues to check for deadline.
-	queues Queues
+	queues queues
 
 	// poll interval.
 	interval time.Duration
@@ -39,7 +39,7 @@ type recoverer struct {
 type recovererParams struct {
 	logger         *log.Logger
 	broker         base.Broker
-	queues         Queues
+	queues         queues
 	interval       time.Duration
 	expiration     time.Duration
 	retryDelayFunc RetryDelayHandler

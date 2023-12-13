@@ -23,7 +23,7 @@ type janitor struct {
 	done chan struct{}
 
 	// list of queue names to check.
-	queues Queues
+	queues queues
 
 	// average interval between checks.
 	avgInterval time.Duration
@@ -36,7 +36,7 @@ type janitor struct {
 type janitorParams struct {
 	logger      *log.Logger
 	broker      base.Broker
-	queues      Queues
+	queues      queues
 	interval    time.Duration
 	healthCheck healthChecker
 }

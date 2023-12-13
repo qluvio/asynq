@@ -288,7 +288,7 @@ func (r *RQLite) runAllTasks(qname string, state string) (int64, error) {
 		return 0, err
 	}
 	conn, _ := r.client(op)
-	count, err := conn.setPending(qname, state)
+	count, err := conn.setPending(conn.ctx(), qname, state)
 	if err != nil {
 		return 0, errors.E(op, errors.Unknown, err)
 	}
@@ -314,7 +314,7 @@ func (r *RQLite) RunTask(qname string, taskid string) error {
 	}
 	conn, _ := r.Client()
 
-	count, err := conn.setTaskPending(qname, taskid)
+	count, err := conn.setTaskPending(conn.ctx(), qname, taskid)
 	if err != nil {
 		return errors.E(op, errors.Unknown, err)
 	}

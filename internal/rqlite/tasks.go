@@ -256,14 +256,14 @@ func (conn *Connection) deleteTask(queue string, taskid string) (int64, error) {
 	return ret, nil
 }
 
-func (conn *Connection) setTaskPending(queue string, taskid string) (int64, error) {
+func (conn *Connection) setTaskPending(ctx context.Context, queue string, taskid string) (int64, error) {
 	op := errors.Op("rqlite.setTaskPending")
 	st := Statement(
 		"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=NULL "+
 			" WHERE queue_name=? AND task_uuid=? AND state != 'pending' AND state!='active'",
 		queue,
 		taskid)
-	wrs, err := conn.WriteStmt(conn.ctx(), st)
+	wrs, err := conn.WriteStmt(ctx, st)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
@@ -284,14 +284,14 @@ func (conn *Connection) setTaskPending(queue string, taskid string) (int64, erro
 	return ret, nil
 }
 
-func (conn *Connection) setPending(queue string, state string) (int64, error) {
+func (conn *Connection) setPending(ctx context.Context, queue string, state string) (int64, error) {
 	op := errors.Op("rqlite.setPending")
 	st := Statement(
 		"UPDATE "+conn.table(TasksTable)+" SET state='pending', deadline=NULL "+
 			" WHERE queue_name=? AND state=?",
 		queue,
 		state)
-	wrs, err := conn.WriteStmt(conn.ctx(), st)
+	wrs, err := conn.WriteStmt(ctx, st)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
@@ -360,15 +360,18 @@ func (conn *Connection) enqueueMessages(ctx context.Context, now time.Time, msgs
 		return nil
 	}
 
-	queues := make(map[string]bool)
+	queues := make(map[string]int)
 	stmts := make([]*sqlite3.Statement, 0, len(msgs)*2)
 	msgNdx := make([]int, 0, len(msgs))
 
 	for _, bmsg := range msgs {
 		msg := bmsg.Msg
-		if !queues[msg.Queue] {
+		qc := queues[msg.Queue]
+		if qc == 0 {
 			stmts = append(stmts, conn.ensureQueueStatement(msg.Queue))
-			queues[msg.Queue] = true
+			queues[msg.Queue] = 1
+		} else {
+			queues[msg.Queue] = qc + 1
 		}
 		encoded, err := encodeMessage(msg)
 		if err != nil {
@@ -447,15 +450,18 @@ func (conn *Connection) enqueueUniqueMessages(ctx context.Context, now time.Time
 		return nil
 	}
 
-	queues := make(map[string]bool)
+	queues := make(map[string]int)
 	stmts := make([]*sqlite3.Statement, 0, len(msgs)*2)
 	msgNdx := make([]int, 0, len(msgs))
 
 	for _, bmsg := range msgs {
 		msg := bmsg.Msg
-		if !queues[msg.Queue] {
+		qc := queues[msg.Queue]
+		if qc == 0 {
 			stmts = append(stmts, conn.ensureQueueStatement(msg.Queue))
-			queues[msg.Queue] = true
+			queues[msg.Queue] = 1
+		} else {
+			queues[msg.Queue] = qc + 1
 		}
 		if bmsg.Msg.UniqueKeyTTL == 0 {
 			// flaky tests
@@ -657,7 +663,7 @@ func (conn *Connection) writeTaskResult(qname, taskID string, data []byte, activ
 // The server ID is not updated when aborting.
 // The unique key deadline is moved to (now + unique key TTL) for recurrent tasks
 // with a unique key.
-func (conn *Connection) requeueTask(now time.Time, serverID string, msg *base.TaskMessage, aborted bool) error {
+func (conn *Connection) requeueTask(ctx context.Context, now time.Time, serverID string, msg *base.TaskMessage, aborted bool) error {
 	op := errors.Op("rqlite.requeueTask")
 
 	var st *sqlite3.Statement
@@ -767,7 +773,7 @@ func (conn *Connection) requeueTask(now time.Time, serverID string, msg *base.Ta
 		}
 
 	}
-	wrs, err := conn.WriteStmt(conn.ctx(), st)
+	wrs, err := conn.WriteStmt(ctx, st)
 	if err != nil {
 		return NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}
@@ -1096,7 +1102,7 @@ func (conn *Connection) archiveTask(now time.Time, msg *base.TaskMessage, errMsg
 	return nil
 }
 
-func (conn *Connection) forwardTasks(now time.Time, qname, src string) (int, error) {
+func (conn *Connection) forwardTasks(ctx context.Context, now time.Time, qname, src string) (int, error) {
 	op := errors.Op("rqlite.forwardTask")
 
 	srcAt := src + "_at"
@@ -1106,7 +1112,7 @@ func (conn *Connection) forwardTasks(now time.Time, qname, src string) (int, err
 		qname,
 		src,
 		now.Unix())
-	wrs, err := conn.WriteStmt(conn.ctx(), st)
+	wrs, err := conn.WriteStmt(ctx, st)
 	if err != nil {
 		return 0, NewRqliteWsError(op, wrs, err, []*sqlite3.Statement{st})
 	}

@@ -603,9 +603,9 @@ func TestClientEnqueueConflictingWithCompleted(t *testing.T) {
 			return time.Second
 		}),
 		LogLevel: testLogLevel, //DebugLevel,
-		Queues: &QueuesConfig{Queues: map[string]interface{}{
+		Queues: NewQueuesConfig(map[string]int{
 			queueName: 1,
-		}},
+		}),
 	})
 	defer func() {
 		srv.Shutdown()

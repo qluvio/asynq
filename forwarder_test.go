@@ -13,6 +13,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	h "github.com/hibiken/asynq/internal/asynqtest"
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/hibiken/asynq/internal/timeutil"
 )
 
 func TestForwarder(t *testing.T) {
@@ -26,7 +27,7 @@ func TestForwarder(t *testing.T) {
 	s := newForwarder(forwarderParams{
 		logger:   testLogger,
 		broker:   client.rdb,
-		queues:   (&QueuesConfig{Queues: map[string]interface{}{"default": 1, "critical": 1}}),
+		queues:   newQueues(NewQueuesConfig(map[string]int{"default": 1, "critical": 1}), 100),
 		interval: pollInterval,
 	})
 	t1 := h.NewTaskMessageWithQueue("gen_thumbnail", nil, "default")
@@ -145,6 +146,8 @@ func TestForwarderWake(t *testing.T) {
 
 	client := NewClient(getClientConnOpt(t))
 	defer func() { _ = client.Close() }()
+	now := time.Now()
+	client.rdb.SetClock(timeutil.NewSimulatedClock(now))
 
 	deadlines := base.NewDeadlines(10)
 	defer deadlines.Close()
@@ -157,13 +160,12 @@ func TestForwarderWake(t *testing.T) {
 	s := newForwarder(forwarderParams{
 		logger:    testLogger,
 		broker:    broker,
-		queues:    (&QueuesConfig{Queues: map[string]interface{}{"default": 1, "critical": 1}}),
+		queues:    newQueues(NewQueuesConfig(map[string]int{"default": 1, "critical": 1}), 100),
 		interval:  pollInterval,
 		wakeCh:    wakeFwdCh,
 		wakePrcCh: wakePrcCh,
 	})
 
-	now := time.Now()
 	tasks := []struct {
 		msg *base.TaskMessage
 		pat time.Time
@@ -178,7 +180,7 @@ func TestForwarderWake(t *testing.T) {
 		},
 		{
 			msg: h.NewTaskMessageWithQueue("reindex", nil, "default"),
-			pat: time.Now().Add(-500 * time.Millisecond),
+			pat: now.Add(-500 * time.Millisecond),
 		},
 		{
 			msg: h.NewTaskMessageWithQueue("sync", nil, "critical"),

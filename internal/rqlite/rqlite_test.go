@@ -3,6 +3,8 @@ package rqlite
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math/rand"
 	"sync"
 	"testing"
 	"time"
@@ -580,6 +582,126 @@ func TestDequeue(t *testing.T) {
 			//if diff := cmp.Diff(want, gotDeadlines, cmpopts.EquateApproxTime(1*time.Second)); diff != "" {
 			if diff := cmp.Diff(want, gotDeadlines); diff != "" {
 				t.Errorf("mismatch deadline found in %q: (-want,+got):\n%s", queue, diff)
+			}
+		}
+	}
+}
+
+func TestDequeueN(t *testing.T) {
+	r := setup(t)
+	defer func() { _ = r.Close() }()
+	now := r.Now()
+
+	count := 20
+	targetQueue := "target"
+	targetIds := make([]string, 0, count)
+	targetTasks := make([]*base.TaskMessage, 0, count)
+	for i := 0; i < count; i++ {
+		id := fmt.Sprintf("target_%d_%s", i, uuid.NewString())
+		targetIds = append(targetIds, id)
+		targetTasks = append(targetTasks,
+			&base.TaskMessage{
+				ID:       id,
+				Type:     "send_email",
+				Payload:  h.JSON(map[string]interface{}{"subject": "hello!"}),
+				Queue:    targetQueue,
+				Timeout:  1800,
+				Deadline: 0,
+			})
+	}
+	others := []*base.TaskMessage{
+		{
+			ID:       uuid.NewString(),
+			Type:     "send_email",
+			Payload:  h.JSON(map[string]interface{}{"subject": "hello!"}),
+			Queue:    "default",
+			Timeout:  1800,
+			Deadline: 0,
+		},
+		{
+			ID:       uuid.NewString(),
+			Type:     "export_csv",
+			Payload:  nil,
+			Queue:    "critical",
+			Timeout:  0,
+			Deadline: 1593021600, //2020-06-24T18:00:00.000Z
+		},
+		{
+			ID:       uuid.NewString(),
+			Type:     "reindex",
+			Payload:  nil,
+			Queue:    "low",
+			Timeout:  int64((5 * time.Minute).Seconds()),
+			Deadline: now.Add(10 * time.Minute).Unix(),
+		},
+	}
+	pendings := make([]*base.TaskMessage, len(targetTasks))
+	copy(pendings, targetTasks)
+	for i := 0; i < len(others); i++ {
+		k := rand.Intn(len(pendings))
+		pendings = append(pendings, nil)
+		copy(pendings[k+1:], pendings[k:])
+		pendings[k] = others[i]
+	}
+
+	type dequeueOp struct {
+		dequeueCount int
+		wantIds      []string
+	}
+
+	idRange := func(from int, tos ...int) []string {
+		to := from
+		if len(tos) > 0 {
+			to = tos[0]
+		}
+		ret := make([]string, 0, 1+to-from)
+		for i := from; i <= to; i++ {
+			ret = append(ret, targetIds[i])
+		}
+		return ret
+	}
+
+	tests := []struct {
+		pending []*base.TaskMessage
+		ops     []*dequeueOp
+	}{
+		{
+			pending: pendings,
+			ops: []*dequeueOp{
+				{dequeueCount: 1, wantIds: idRange(0)},
+				{dequeueCount: 1, wantIds: idRange(1)},
+				{dequeueCount: 5, wantIds: idRange(2, 6)},
+				{dequeueCount: 5, wantIds: idRange(7, 11)},
+				{dequeueCount: 15, wantIds: idRange(12, 19)},
+				{dequeueCount: 1, wantIds: nil},
+			},
+		},
+		{
+			pending: pendings,
+			ops: []*dequeueOp{
+				{dequeueCount: 30, wantIds: idRange(0, 19)},
+				{dequeueCount: 1, wantIds: nil},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+
+		FlushDB(t, r.conn)
+		for _, msg := range tc.pending {
+			err := r.Enqueue(context.Background(), msg)
+			require.NoError(t, err)
+		}
+		for _, op := range tc.ops {
+			tasks, err := r.DequeueN("", targetQueue, op.dequeueCount, nil)
+			if len(op.wantIds) == 0 {
+				require.True(t, errors.Is(err, errors.ErrNoProcessableTask))
+				continue
+			}
+			require.NoError(t, err, "(*RQLite.DequeueN(%v) returned error %v", targetQueue, err)
+			require.Equal(t, len(op.wantIds), len(tasks))
+			for i, task := range tasks {
+				require.Equal(t, op.wantIds[i], task.Msg.ID)
 			}
 		}
 	}

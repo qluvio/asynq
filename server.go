@@ -10,14 +10,12 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq/internal/base"
-	aserrors "github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
 )
 
@@ -62,7 +60,7 @@ type Config struct {
 	// Maximum number of concurrent processing of tasks.
 	//
 	// If set to a zero or negative value, NewServer will overwrite the value
-	// to the number of CPUs usable by the currennt process.
+	// to the number of CPUs usable by the current process.
 	Concurrency int
 
 	// Function to calculate retry delay for a failed task.
@@ -80,7 +78,7 @@ type Config struct {
 
 	// Queues is the list of queues to process with given priority value
 	// If nil the server will process only the "default" queue
-	Queues Queues
+	Queues *QueuesConfig
 
 	// ErrorHandler handles errors returned by the task handler.
 	//
@@ -320,10 +318,6 @@ func NewServer(r ClientConnOpt, cfg Config) *Server {
 }
 
 func newServer(broker base.Broker, cfg Config) *Server {
-	n := cfg.Concurrency
-	if n < 1 {
-		n = runtime.NumCPU()
-	}
 	if len(cfg.ServerID) == 0 {
 		cfg.ServerID = uuid.New().String()
 	}
@@ -360,14 +354,10 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	if cfg.JanitorInterval <= 0 {
 		cfg.JanitorInterval = time.Second * 8
 	}
-
 	if cfg.Queues == nil {
 		cfg.Queues = &QueuesConfig{}
 	}
-	err := cfg.Queues.Configure()
-	if err != nil {
-		panic(aserrors.E(aserrors.Op("newServer"), aserrors.Internal, err))
-	}
+	queues := newQueues(cfg.Queues, cfg.Concurrency)
 
 	shutdownTimeout := cfg.ShutdownTimeout
 	if shutdownTimeout == 0 {
@@ -384,13 +374,13 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	}
 	logger.SetLevel(toInternalLogLevel(loglevel))
 
-	starting := make(chan *workerInfo, n)
-	finished := make(chan *base.TaskMessage, n)
-	syncCh := make(chan *syncRequest, n)
+	starting := make(chan *workerInfo, queues.maxConcurrency())
+	finished := make(chan *base.TaskMessage, queues.maxConcurrency())
+	syncCh := make(chan *syncRequest, queues.maxConcurrency())
 	state := base.NewServerState()
 	cancels := base.NewCancelations()
 	afterTasks := base.NewAfterTasks()
-	deadlines := base.NewDeadlines(n)
+	deadlines := base.NewDeadlines(queues.maxConcurrency())
 
 	wakePrcCh := make(chan bool, 1)
 	wakeFwdCh := make(chan bool, 1)
@@ -402,15 +392,14 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		interval:   cfg.SyncerInterval,
 	})
 	heartbeater := newHeartbeater(heartbeaterParams{
-		logger:      logger,
-		broker:      broker,
-		serverID:    cfg.ServerID,
-		interval:    cfg.HeartBeaterInterval,
-		concurrency: n,
-		queues:      cfg.Queues,
-		state:       state,
-		starting:    starting,
-		finished:    finished,
+		logger:   logger,
+		broker:   broker,
+		serverID: cfg.ServerID,
+		interval: cfg.HeartBeaterInterval,
+		queues:   queues,
+		state:    state,
+		starting: starting,
+		finished: finished,
 	})
 	subscriber := newSubscriber(subscriberParams{
 		logger:       logger,
@@ -428,8 +417,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		deadlines:       deadlines,
 		cancelations:    cancels,
 		afterTasks:      afterTasks,
-		concurrency:     n,
-		queues:          cfg.Queues,
+		queues:          queues,
 		errHandler:      cfg.ErrorHandler,
 		shutdownTimeout: shutdownTimeout,
 		starting:        starting,
@@ -446,7 +434,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	forwarder := newForwarder(forwarderParams{
 		logger:      logger,
 		broker:      broker,
-		queues:      cfg.Queues,
+		queues:      queues,
 		interval:    cfg.ForwarderInterval,
 		healthCheck: healthchecker,
 		wakeCh:      wakeFwdCh,
@@ -457,7 +445,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 		broker:         broker,
 		retryDelayFunc: delayFunc,
 		isFailureFunc:  isFailureFunc,
-		queues:         cfg.Queues,
+		queues:         queues,
 		interval:       cfg.RecovererInterval,
 		expiration:     cfg.RecovererExpiration,
 		healthCheck:    healthchecker,
@@ -465,7 +453,7 @@ func newServer(broker base.Broker, cfg Config) *Server {
 	janitor := newJanitor(janitorParams{
 		logger:      logger,
 		broker:      broker,
-		queues:      cfg.Queues,
+		queues:      queues,
 		interval:    cfg.JanitorInterval,
 		healthCheck: healthchecker,
 	})

@@ -13,6 +13,6 @@ require (
 
 replace (
 	github.com/hibiken/asynq => ./..
-	github.com/mattn/go-sqlite3 => github.com/rqlite/go-sqlite3 v1.27.1
-	github.com/rqlite/gorqlite => github.com/eluv-io/gorqlite v0.0.6
+	github.com/mattn/go-sqlite3 => github.com/rqlite/go-sqlite3 v1.28.0
+	github.com/rqlite/gorqlite => github.com/eluv-io/gorqlite v0.0.9
 )
